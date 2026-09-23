@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+.env
+.env.*
+!.env.example
+.aws/
+credentials
+credentials.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+runs/
+data/
+# User input files belong locally. Generate synthetic samples with make_samples.py.
+*.csv
+*.tsv
+*.xlsx
+*.xls
