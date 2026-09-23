@@ -3,9 +3,6 @@ import io
 import json
 from pathlib import Path
 
-import pandas as pd
-
-
 class LocalS3Client:
     def __init__(self, objects, bucket="local"):
         self.objects = objects
@@ -17,33 +14,30 @@ class LocalS3Client:
         return {"Body": io.BytesIO(self.objects[Key])}
 
 
-def prepare_local_file(path, *, encoding="utf-8-sig", delimiter=","):
+def prepare_local_file(path, *, encoding="utf-8-sig", delimiter=",", overrides=None):
+    from preprocess import preprocess_file
     path = Path(path).expanduser().resolve(strict=True)
-    extension = path.suffix.lower()
-    if extension == ".csv":
-        frames = {"Sheet1": pd.read_csv(path, encoding=encoding, sep=delimiter)}
-    elif extension in {".xlsx", ".xls"}:
-        frames = pd.read_excel(path, sheet_name=None)
-    else:
-        raise ValueError("Expected a .csv, .xlsx, or .xls file")
+    objects, _ = preprocess_file(path, encoding=encoding, delimiter=delimiter, overrides=overrides)
     base = f"local/preprocessed/{path.name}/"
-    objects, sheets = {}, {}
-    for name, frame in frames.items():
-        frame.columns = frame.columns.map(str)
-        key = base + (path.name if extension == ".csv" else name.replace("/", "_") + ".csv")
-        if key in objects:
-            raise ValueError(f"Sheet names collide after S3 normalization: {name}")
-        objects[key] = frame.to_csv(index=False).encode("utf-8")
-        # Match types/null counts actually observed by the production CSV loader.
-        normalized = pd.read_csv(io.BytesIO(objects[key])) if len(frame.columns) else frame
-        sheets[name] = {
-            "sheet_type": "data", "row_count": len(normalized),
-            "column_count": len(normalized.columns),
-            "columns": [{"name": col, "dtype": str(normalized[col].dtype),
-                         "null_count": int(normalized[col].isna().sum()),
-                         "likely_junk": not col.strip() or col.startswith("Unnamed:")}
-                        for col in normalized.columns],
-        }
-    objects[base + "_metadata.json"] = json.dumps({"sheets": sheets}).encode()
-    return dict(s3_client=LocalS3Client(objects), s3_bucket="local", s3_prefix="",
-                plan_domain="local", filename=path.name)
+    return dict(s3_client=LocalS3Client({base + k: v for k, v in objects.items()}),
+                s3_bucket="local", s3_prefix="", plan_domain="local", filename=path.name)
+
+
+def prepare_preprocessed_directory(path):
+    """Read an exported preprocessing directory without reprocessing the workbook."""
+    root = Path(path).expanduser().resolve(strict=True)
+    meta_bytes = (root / '_metadata.json').read_bytes()
+    metadata = json.loads(meta_bytes)
+    filename = metadata['filename']
+    base = f'local/preprocessed/{filename}/'
+    objects = {base + '_metadata.json': meta_bytes}
+    for sheet in metadata['sheets'].values():
+        name = sheet['csv_file']
+        if '/' in name or '\\' in name or Path(name).name != name:
+            raise ValueError('CSV file must be a basename inside the preprocessing directory')
+        target = (root / name).resolve(strict=True)
+        if target.parent != root:
+            raise ValueError('CSV path escapes the preprocessing directory')
+        objects[base + name] = target.read_bytes()
+    return dict(s3_client=LocalS3Client(objects), s3_bucket='local', s3_prefix='',
+                plan_domain='local', filename=filename)

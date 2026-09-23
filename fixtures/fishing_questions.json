@@ -1,0 +1,12 @@
+[
+  {"id":"purpose", "question":"What is this workbook for, and which products are covered?", "expected":"Align catch attributes across CastLog, RiverTrack, TournamentDesk.", "sheets":["About"]},
+  {"id":"late_note", "question":"What happens to exact fishing locations before export?", "expected":"Rounded to a 1 km grid.", "sheets":["About"]},
+  {"id":"mass_mapping", "question":"List the approved mass_g source fields and units for all products, noting duplicates.", "expected":"CastLog weight_oz oz; RiverTrack fish_weight g (duplicate row); TournamentDesk weight lb. Exclude the Draft oz mapping.", "sheets":["CastLog Mapping","RiverTrack Mapping","TournamentDesk Mapping"]},
+  {"id":"missing_mapping", "question":"Which product has no water temperature mapping, and which has a draft mapping?", "expected":"TournamentDesk is Unmapped; CastLog is Draft; RiverTrack is Approved.", "sheets":["About","CastLog Mapping","RiverTrack Mapping","TournamentDesk Mapping"]},
+  {"id":"version", "question":"When did RiverTrack fish_length change units?", "expected":"Version 2.0, 2026-02-10, changed from inches to centimeters.", "sheets":["Version History","RiverTrack Mapping"]},
+  {"id":"identifier", "question":"Find catch 0012. What are its species and raw mass?", "expected":"Catch ID 0012, LMB (Largemouth bass), 16 oz. Preserve the leading zeros.", "sheets":["Catch Samples","Species Codes"]},
+  {"id":"normalization", "question":"What is the total known catch mass in grams? Exclude missing masses and use approved mappings.", "expected":"1860.776 g: 16*28.3495 + 500 + 2*453.592 + 0. One mass missing, one genuine zero.", "sheets":["Catch Samples","CastLog Mapping","RiverTrack Mapping","TournamentDesk Mapping"]},
+  {"id":"literal_na", "question":"What does species code NA mean?", "expected":"Not assessed. NA is a literal code, not a missing cell.", "sheets":["Species Codes"]},
+  {"id":"conflict", "question":"Is the TournamentDesk weight field unambiguously in ounces?", "expected":"No. Approved mapping is pounds; Draft mapping is ounces. Report the conflict and statuses.", "sheets":["TournamentDesk Mapping"]},
+  {"id":"unknown", "question":"Who owns CastLog and what is its annual subscription price?", "expected":"Not provided in the workbook; do not invent ownership or pricing.", "sheets":["About"]}
+]

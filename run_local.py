@@ -21,16 +21,22 @@ def main():
     parser.add_argument("--trace", type=Path, help="Save full prompts/responses (includes file data)")
     parser.add_argument("--encoding", default="utf-8-sig")
     parser.add_argument("--delimiter", default=",")
+    parser.add_argument("--overrides", type=Path, help="JSON sheet_type/header_row overrides")
+    parser.add_argument("--preprocessed", action="store_true", help="Input is an exported preprocessing directory")
     args = parser.parse_args()
     for name, value in [("TABLES_MODEL", args.model), ("AWS_PROFILE", args.profile),
                         ("AWS_REGION", args.region)]:
         if value:
             os.environ[name] = value
     logging.basicConfig(level=logging.WARNING)
-    from local_data import prepare_local_file
+    from local_data import prepare_local_file, prepare_preprocessed_directory
     from llm import LLMCallLog
     from xlsx_csv_agent import run_plan_tables_agent, run_plan_tables_agent_stream
-    inputs = prepare_local_file(args.file, encoding=args.encoding, delimiter=args.delimiter)
+    overrides = json.loads(args.overrides.read_text()) if args.overrides else None
+    if args.preprocessed and overrides:
+        parser.error("Apply overrides during preprocessing, not when loading its output.")
+    inputs = (prepare_preprocessed_directory(args.file) if args.preprocessed else
+              prepare_local_file(args.file, encoding=args.encoding, delimiter=args.delimiter, overrides=overrides))
     if args.inspect:
         for key, value in inputs["s3_client"].objects.items():
             if key.endswith("/_metadata.json"):

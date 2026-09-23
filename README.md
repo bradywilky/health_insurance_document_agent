@@ -29,7 +29,7 @@ Run the real agent using your existing local AWS profile:
 .\.venv\Scripts\python run_local.py data\sales.csv "What is total revenue?" --profile dev-profile --model scout --stream
 ```
 
-Replace the file path and question to test your own files. CSV options include `--encoding cp1252` and `--delimiter ';'`. `.xlsx` and `.xls` files load all worksheets. Headers are assumed to be on the first row; merged headings, formulas without cached values, and irregular tables need preprocessing first. Dates/types follow the existing CSV round-trip behavior.
+Replace the file path and question to test your own files. CSV options include `--encoding cp1252` and `--delimiter ';'`. `.xlsx` and `.xls` files load all worksheets. The local preprocessor detects headers below title rows and preserves free-text metadata sheets. Explicit header/type overrides handle ambiguous layouts. Multiple tables per sheet and uncached formulas are not supported. See fixtures/README.md for details.
 
 Expected sample results: total revenue **500**, West **250**, East **250**. The Excel workbook also has a Targets sheet: West **300**, East **200**. Try searching for West across both sheets or asking for the purpose of each sheet. Cross-sheet joins are not a dedicated tool yet; verify any multi-sheet arithmetic carefully.
 
@@ -76,7 +76,7 @@ answer = run_plan_tables_agent(
 )
 ```
 
-Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash. Existing preprocessing must provide `_metadata.json` plus each sheet's CSV at `{prefix}{domain}/preprocessed/{filename}/`; for CSV inputs the object basename is the original CSV filename. This harness simulates that contract; it does not implement or validate your production preprocessing pipeline.
+Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash. Existing preprocessing must provide `_metadata.json` plus each sheet's CSV at `{prefix}{domain}/preprocessed/{filename}/`; for CSV inputs the object basename is the original CSV filename. The new preprocess.py exports that contract locally; it does not upload to S3 or validate another preprocessing pipeline.
 
 ## Limits of this development harness
 
@@ -94,3 +94,10 @@ Commit source code, tests, dependency files, and `.env.example`. The example use
 The ignore rules exclude `.env` variants, `.aws` folders, credential/key files, logs, local data, model traces under `runs/`, spreadsheet inputs, and the virtual environment. Keep traces in `runs/` even when choosing a custom `--trace` path. Ignore rules do not remove files already committed, and do not protect files uploaded manually through the GitHub website. Do not upload a ZIP of the entire working directory.
 
 Before each push, inspect `git status --short` and `git diff --cached`. Add any deliberate sample fixtures explicitly only after verifying they are synthetic. Do not force-add local configuration, credentials, or real spreadsheets.
+
+
+## Messy workbook development
+
+The [synthetic fishing fixtures](fixtures/README.md) cover free-text About sheets, version history, cross-product attribute mappings, duplicates, conflicting units, missing values, and leading-zero IDs. The reviewed workbook and CSV are committed as specific exceptions to the input-file ignore rules.
+
+`preprocess.py` exports each sheet to CSV plus metadata with types, counts, frequent values, source row positions, and parsing warnings. `local_data.py` uses it automatically, or `run_local.py --preprocessed` loads a previously exported directory. `read_sheet` provides paginated access to narrative content and full table rows; search now includes metadata sheets. `evaluate.py` runs known-answer questions through a selected model and saves results for human review under `runs/`.
