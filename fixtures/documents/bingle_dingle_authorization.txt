@@ -1,0 +1,13 @@
+BINGLE-DINGLE INSURANCE — AUTHORIZATION AND INTAKE RULES
+Document ID: BD-AUTH-2026. Version 1.0. Effective January 1–December 31, 2026.
+
+1. Authorization scope
+Under Meadow, DEMO-SESSION outpatient physical therapy requires a service-date authorization matching member, rendering provider, service category, date range, and authorized units. DEMO-VISIT office evaluation and DEMO-REMOTE virtual office visits do not require authorization under this rule. No rule for unlisted services or other products can be inferred.
+Authorization does not prove active enrollment, remaining benefits, network status, clinical necessity, or payment eligibility. An authorization for one member or provider must not be reused for another.
+
+2. Required claim intake information
+Identify claim and line IDs; original or corrected submission; member ID and product; billing and rendering provider IDs; service date; submission receipt date; place of service; service code and modifiers if applicable; diagnosis information; units; billed amount and currency; and authorization reference when applicable. Link a corrected claim to its original. Unknown data must be labeled missing rather than silently defaulted.
+Code definitions and clinical documentation must be verified from the applicable source records; do not infer a diagnosis or procedure from an undefined code.
+
+3. Reviews
+Check duplicate claim or line identifiers and overlapping original/corrected submissions before summing amounts. Missing or mismatched authorization is a review issue; this research tool must identify the missing or conflicting evidence, not automatically deny a claim. Refer to BD-AGR-2026-01 for submission timing and BD-BEN-MEADOW-2026 for benefit terms.

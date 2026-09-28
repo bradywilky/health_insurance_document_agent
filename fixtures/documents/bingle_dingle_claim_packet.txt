@@ -1,0 +1,17 @@
+BINGLE-DINGLE INSURANCE — CLAIM REVIEW PACKET
+Document ID: BD-CASE-0012. Snapshot version 1.0.
+
+1. Claim intake
+Claim ID 0012; line ID 01; original professional claim, no linked correction. Member DEMO-MEMBER-01; Meadow product. Billing and rendering provider DEMO-PROVIDER-01, Pebblebrook Provider Group. Service date August 15, 2026; receipt date August 20, 2026. Place of service: outpatient office. Service DEMO-SESSION, two completed physical therapy sessions. No modifiers. Diagnosis reference: DEMO-DX-01; the clinical description is not included in this packet. Billed amount USD 220.00. Authorization reference DEMO-AUTH-01. Both units occurred on the service date for this claim.
+
+2. Service-date facts supplied for this case only
+The enrollment record explicitly shows Meadow active on August 15, 2026. The network roster explicitly shows Pebblebrook participating on that date. The case review records both sessions as covered and clinically appropriate; no clinical determination should be inferred for any other case. No other insurance, duplicate, correction, exclusion, or adjustment applies in this case.
+
+3. Authorization and utilization
+DEMO-AUTH-01 matches DEMO-MEMBER-01, DEMO-PROVIDER-01, and DEMO-SESSION. It authorizes six sessions from August 1–September 30, 2026, inclusive. Two sessions were used before this claim; four authorized sessions remain immediately before this claim. Annual therapy benefit use immediately before this claim is eight completed sessions. Do not confuse authorization usage with annual benefit usage.
+
+4. Accumulator snapshot
+Immediately before this service, remaining in-network deductible is USD 50.00 and remaining in-network out-of-pocket maximum is USD 400.00. These values are provided only for this case and must not be carried to other members, dates, or claims. This packet contains no final payment decision.
+
+5. Related documents
+Use the executed agreement BD-AGR-2026-01, original schedule BD-RATES-2026-01, applicable executed amendment BD-AMD-2026-02, benefits BD-BEN-MEADOW-2026, and authorization rules BD-AUTH-2026. If any required document is not selected, disclose that limitation. An estimate is not an instruction to approve, deny, or release payment.

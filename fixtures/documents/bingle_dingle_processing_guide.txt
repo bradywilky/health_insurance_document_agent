@@ -1,0 +1,15 @@
+BINGLE-DINGLE INSURANCE — DOCUMENT REVIEW GUIDE
+Document ID: BD-GUIDE-2026-01. Version: 1.0. Status: administrative guidance.
+This guide does not amend an agreement or determine coverage or payment.
+
+Section 1 — Required facts
+To identify a scheduled amount, establish provider, product, service identifier, service date, and completed units. Do not infer missing facts from a filename. Refer to the applicable executed agreement, schedule, and amendments. Present conditional rates or request clarification if a service date is missing.
+
+Section 2 — Evidence and unresolved issues
+State which document and provision support a finding. Distinguish contracted scheduled amounts from final insurer payments. If eligibility, benefits, or cost-sharing information is absent, say it is unavailable. Conflicting executed terms without explicit precedence require review. Missing referenced documents must be identified rather than reconstructed from general knowledge.
+
+Section 3 — Illustrative cross-file example
+For two DEMO-SESSION units on August 15, 2026, at Pebblebrook under Meadow, BD-AMD-2026-02 gives USD 88.00 per unit, so the scheduled amount is USD 176.00. This is not a determination of insurer payment or member responsibility.
+
+Section 4 — Example submission exception
+Suppose an ordinary deadline is April 1 and a documented qualifying intake outage ends April 5. The exception deadline is April 20, which is later. Without evidence of the qualifying outage, do not apply that exception.

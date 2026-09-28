@@ -1,0 +1,17 @@
+BINGLE-DINGLE INSURANCE — PROVIDER AGREEMENT
+Document ID: BD-AGR-2026-01. Version: 1.0. Status: executed.
+
+Section 1 — Parties and scope
+Bingle-Dingle Insurance and Pebblebrook Provider Group enter this agreement for the Meadow network product. Effective dates: January 1 through December 31, 2026, inclusive. It applies only to Pebblebrook services under Meadow. It does not establish terms for other providers, products, or out-of-network services.
+
+Section 2 — Contracted amounts
+Schedule BD-RATES-2026-01 supplies contracted amounts per service unit. Use the service date, not the submission or upload date, to choose the applicable rate. A contracted amount is not the final insurer payment or member responsibility. Eligibility, benefits, cost sharing, and other adjustments are not supplied in this agreement.
+
+Section 3 — Amendments and precedence
+An executed amendment overrides this agreement or its rate schedule only for the provisions and service-date range it expressly identifies. A draft does not amend executed terms. File upload order and a later filename do not establish precedence. If two executed documents conflict without a stated relationship, identify the conflict for review rather than choosing a winner.
+
+Section 4 — Submission window
+Initial submissions must be received within 90 calendar days after the service date. Service date is day zero. An outage exception requires a documented Bingle-Dingle intake outage affecting the submission and a receipt within 15 calendar days after restoration. Apply the later of the ordinary deadline and this exception deadline. Do not assume an outage occurred without supporting facts.
+
+Section 5 — Unlisted services
+If the selected documents contain no applicable rate, report that the rate is unavailable. Do not substitute a similar service or another provider's rate. The business review desk must resolve missing terms.

@@ -1,0 +1,9 @@
+[
+  {"id":"purpose","question":"What is this workbook for?","expected":"Comparing claim intake attributes across intake systems; mappings do not establish payment decisions."},
+  {"id":"billed_total","question":"What is the total known billed amount in Claim Samples?","expected":"USD 445, with one missing billed amount and one zero. Not an allowed or paid total."},
+  {"id":"identifier","question":"What service and billed amount are recorded for claim 0012?","expected":"DEMO-SESSION, USD 220, 2 units. Preserve leading zeros."},
+  {"id":"missing_zero","question":"Which claim has missing billed amount, and which has zero?","expected":"0015 missing; 0016 zero."},
+  {"id":"duplicates","question":"Does River Mapping contain duplicate mapping records?","expected":"The approved amount to billed_amount USD mapping appears twice."},
+  {"id":"status","question":"Compare rendering_provider_id mapping status in Meadow and River.","expected":"Meadow render_id Approved; River provider Draft."},
+  {"id":"literal_na","question":"What does NA represent in Service Codes?","expected":"Literal source code, not a missing cell."}
+]

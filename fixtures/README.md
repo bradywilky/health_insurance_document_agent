@@ -1,62 +1,23 @@
-# Synthetic fishing fixtures
+# Health-insurance fixtures
 
-All names, rules, product versions, and observations are invented. No external datasets or real product specifications are used.
+Bingle-Dingle Insurance documents support selected-source claim research and table-ingestion evaluation.
 
-`fishing_mappings.xlsx` is a deliberately irregular eight-sheet workbook:
+## Selected-document research
 
-| Sheet | Purpose / test difficulty |
-| --- | --- |
-| About | Free text; an important location-export rule is on row 10 |
-| Version History | Narrative change records, including a unit change |
-| Attribute Dictionary | Canonical field definitions and units |
-| CastLog Mapping | Merged title, header on row 4, blank row, repeated header, footer note |
-| RiverTrack Mapping | Structured table with an intentional duplicate mapping |
-| TournamentDesk Mapping | Header on row 3, duplicate Notes headings, conflicting statuses and units, unmapped attribute |
-| Species Codes | Categorical lookup, including literal code NA |
-| Catch Samples | Text IDs with leading zeros, units, missing mass and genuine zero |
+Click **Load Bingle-Dingle examples** in the app to load eight text documents. The agreement, schedule, and amendment establish provider/product/date-specific rates. The draft tests that later documents do not automatically override executed terms. Benefits, authorization rules, and a claim packet add the facts needed to explain a hypothetical claim calculation.
 
-`fishing_catches.csv` contains the Catch Samples table for single-file tests. It does not include the mapping/definition sheets; the agent should say when needed information is absent. `fishing_questions.json` supplies ten questions and expected findings for the workbook. Expected answers are independent test evidence and are never given to the answering agent.
+For claim 0012, the packet supports 2 x USD 88 = USD 176 allowed; USD 50 deductible plus USD 25.20 coinsurance = USD 75.20 member responsibility; USD 100.80 insurer estimate. The supplied out-of-pocket balance does not reduce member responsibility further. These are estimates under the documented case assumptions, not claim approval or payment instructions.
 
-## Try individual questions
+The claim has four authorized sessions available before service and two afterward; annual benefit use goes from eight to ten of twenty. Tests must keep authorization units separate from benefit utilization. Deselecting benefits or the claim packet should produce missing-information explanations.
 
-```powershell
-.\.venv\Scripts\python run_local.py fixtures\fishing_mappings.xlsx "What happens to exact fishing locations before export?" --trace runs\location.json
-.\.venv\Scripts\python run_local.py fixtures\fishing_mappings.xlsx "List approved mass_g mappings across all products and note duplicates."
-.\.venv\Scripts\python run_local.py fixtures\fishing_mappings.xlsx "Which product has no water temperature mapping?"
-.\.venv\Scripts\python run_local.py fixtures\fishing_catches.csv "Which catches have missing mass, and which have zero mass?"
-```
+`documents/questions.json` contains thirteen questions and human-review expectations. Expected answers are never supplied to the answering model. Run `evaluate_documents.py --model maverick --output runs/insurance-documents.jsonl` after AWS authentication.
 
-## Inspect and export preprocessing
+## Messy table ingestion
 
-```powershell
-.\.venv\Scripts\python run_local.py fixtures\fishing_mappings.xlsx Inspect --inspect
-.\.venv\Scripts\python preprocess.py fixtures\fishing_mappings.xlsx --output data\preprocessed\fishing_mappings.xlsx
-.\.venv\Scripts\python run_local.py data\preprocessed\fishing_mappings.xlsx "What changed in version 2.0?" --preprocessed
-```
+Run `python make_samples.py` to generate `data/insurance_mappings.xlsx` and `data/insurance_claims.csv`. The eight-sheet workbook deliberately includes narrative sheets, title rows above headers, repeated headers, duplicate mappings, duplicate column names, missing and zero billed amounts, and leading-zero identifiers. These parser records are separate from the narrative claim packet.
 
-The export creates one CSV per sheet plus `_metadata.json`. The output directory must be new to prevent stale CSVs. Metadata retains the existing `sheets`, `sheet_type`, `row_count`, `column_count`, and `columns` contract, with added header/source row positions, context rows, warnings, distinct counts, and the eight most frequent values per column. `row_count` for narrative metadata sheets counts nonempty cells, each represented by source row, source column, and text.
+Known billed total is USD 445 across four non-missing records. Claim 0015 has a missing billed amount; claim 0016 has zero. NA is an intentional literal source code. Meadow's rendering-provider mapping is approved; River's is draft. Billed amounts must not be relabeled as allowed or paid amounts.
 
-Data headers are detected from the first 30 rows. Blank rows and exactly repeated headers are excluded with warnings; duplicate records are retained. Sparse notes prefixed `Note:`, `Source:`, or `Footnote:` are kept as context. Blank and duplicate headers get unique names. Text IDs with leading zeros and literal NA codes survive preprocessing and agent reads.
+`insurance_questions.json` supplies seven table questions. Run `evaluate.py --model maverick --output runs/insurance-tables.jsonl` after generating the samples. Offline tests create their own temporary workbooks without requiring AWS.
 
-Classification and header detection are heuristics. Override ambiguous layouts using JSON:
-
-```json
-{"Version History": {"sheet_type": "data", "header_row": 1}}
-```
-
-Pass the file with `--overrides path\overrides.json` to either preprocessing or `run_local.py`. Header rows use Excel's one-based row numbers. This version handles one table per sheet, not separate table blocks or hierarchical multirow headers. It does not forward-fill merged body cells or calculate Excel formulas; formula values must already be cached in the input. Notes/comments, shapes, images, and formatting are not extracted into CSV. Original input workbooks should be retained separately.
-
-## Evaluate real models
-
-```powershell
-.\.venv\Scripts\python evaluate.py --model maverick --case late_note --case identifier --output runs\maverick-check.jsonl
-.\.venv\Scripts\python evaluate.py --model scout --output runs\scout-suite.jsonl
-```
-
-These are paid Bedrock calls using the configured profile. The JSONL report includes question, expected findings, actual answer, time, calls, and token counts. Successful execution means `needs_human_review`, not a passing answer. Review completeness, source attribution, status distinctions, duplicates, conversions, and refusal to invent facts. The runner stops on an error and preserves completed records. Cross-sheet computations currently rely on several single-sheet tool calls and model synthesis; the conversion case deliberately tests that limitation.
-
-Offline checks: `.\.venv\Scripts\python -m pytest -q`. No Bedrock calls occur during these tests.
-
-## Rebuilding
-
-The workbook is checked in so Python users do not need a JS authoring dependency. `build_fishing.mjs` records how it was authored; rebuilding requires Node and `@oai/artifact-tool`. Invoke `node fixtures/build_fishing.mjs` in an environment providing that package. It writes the workbook and sheet previews under `outputs/fishing/`. No rebuild is needed to test or deploy the Python agent.
+Keep actual input files and traces out of Git. This prototype does not implement clinical necessity rules or automatic claim adjudication.

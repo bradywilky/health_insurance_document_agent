@@ -31,7 +31,7 @@ def main():
     logging.basicConfig(level=logging.WARNING)
     from local_data import prepare_local_file, prepare_preprocessed_directory
     from llm import LLMCallLog
-    from xlsx_csv_agent import run_plan_tables_agent, run_plan_tables_agent_stream
+    from table_agent import run_plan_tables_agent, run_plan_tables_agent_stream
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
     if args.preprocessed and overrides:
         parser.error("Apply overrides during preprocessing, not when loading its output.")

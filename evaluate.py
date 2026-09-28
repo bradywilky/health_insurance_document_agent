@@ -11,18 +11,19 @@ from dotenv import load_dotenv
 def main():
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--file', type=Path, default=Path('fixtures/fishing_mappings.xlsx'))
-    parser.add_argument('--questions', type=Path, default=Path('fixtures/fishing_questions.json'))
+    parser.add_argument('--file', type=Path, default=Path('data/insurance_mappings.xlsx'))
+    parser.add_argument('--questions', type=Path, default=Path('fixtures/insurance_questions.json'))
     parser.add_argument('--case', action='append', help='Case ID; repeat to select several. Default: all.')
     parser.add_argument('--model', choices=['maverick', 'scout'], default='maverick')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--traces', type=Path, help='Save prompts and evidence per case under this local directory')
     args = parser.parse_args()
     os.environ['TABLES_MODEL'] = args.model
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
     from local_data import prepare_local_file
     from llm import LLMCallLog
-    from xlsx_csv_agent import run_plan_tables_agent
+    from table_agent import run_plan_tables_agent
     questions = json.loads(args.questions.read_text(encoding='utf-8'))
     if args.case:
         unknown = set(args.case) - {q['id'] for q in questions}
@@ -47,6 +48,10 @@ def main():
             record.update(duration_seconds=round(time.monotonic()-start, 2), calls=len(log.records),
                           input_tokens=sum(r['usage'].get('inputTokens', 0) for r in log.records),
                           output_tokens=sum(r['usage'].get('outputTokens', 0) for r in log.records))
+            if args.traces:
+                args.traces.mkdir(parents=True, exist_ok=True)
+                with (args.traces / f"{q['id']}.json").open('x', encoding='utf-8') as trace:
+                    json.dump(log.records, trace, default=str, indent=2)
             output.write(json.dumps(record, default=str) + '\n')
             output.flush()
             print(f"{q['id']}: {record['status']} ({record['calls']} calls)", flush=True)

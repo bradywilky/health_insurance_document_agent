@@ -1,0 +1,140 @@
+[
+  {
+    "id": "provider_original_rate",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt"
+    ],
+    "question": "What is the DEMO-SESSION per-unit rate for Pebblebrook under Meadow on June 30, 2026, submitted August 1?",
+    "expected": "USD 80.00; service date controls, not submission date."
+  },
+  {
+    "id": "provider_amended_rate",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt"
+    ],
+    "question": "What scheduled amount applies to two completed DEMO-SESSION units at Pebblebrook under Meadow on August 15, 2026?",
+    "expected": "USD 88.00 per unit, USD 176.00 scheduled amount; not final insurer payment."
+  },
+  {
+    "id": "provider_draft",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt",
+      "bingle_dingle_draft.txt"
+    ],
+    "question": "What is the DEMO-SESSION per-unit rate at Pebblebrook under Meadow on October 10, 2026?",
+    "expected": "USD 88.00. Draft USD 99.00 has no effect despite its later date."
+  },
+  {
+    "id": "provider_missing_date",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt"
+    ],
+    "question": "What is the DEMO-SESSION rate at Pebblebrook under Meadow?",
+    "expected": "Ask for service date or explain USD 80.00 January-June and USD 88.00 July-December 2026."
+  },
+  {
+    "id": "provider_missing_service",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt"
+    ],
+    "question": "What is the DEMO-IMAGING rate at Pebblebrook under Meadow on August 15, 2026?",
+    "expected": "No rate supplied. Do not substitute another service rate."
+  },
+  {
+    "id": "provider_unselected_amendment",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt"
+    ],
+    "question": "Using only these files, is a July rate amendment established, and what original DEMO-SESSION rate is listed?",
+    "expected": "No amendment is established by selected files; original schedule lists USD 80.00. Do not retrieve USD 88.00 from an unselected file; qualify that amendments could change original terms."
+  },
+  {
+    "id": "provider_payment_gap",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt"
+    ],
+    "question": "How much will the insurer pay for two DEMO-SESSION units at Pebblebrook under Meadow on August 15, 2026?",
+    "expected": "Scheduled amount USD 176.00; final payment unavailable without eligibility, benefit and cost-sharing information."
+  },
+  {
+    "id": "provider_outage_exception",
+    "files": [
+      "bingle_dingle_agreement.txt"
+    ],
+    "question": "The ordinary deadline is April 1, 2026. A documented qualifying intake outage ended April 5. What deadline applies under this agreement?",
+    "expected": "April 20, 2026: 15 calendar days after restoration, later than April 1."
+  },
+  {
+    "id": "provider_wrong_scope",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt"
+    ],
+    "question": "What is the DEMO-SESSION rate for Pebblebrook under the River product on August 15, 2026?",
+    "expected": "Unavailable. Meadow rates cannot be applied to River."
+  },
+  {
+    "id": "claim_estimate",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt",
+      "bingle_dingle_benefits.txt",
+      "bingle_dingle_authorization.txt",
+      "bingle_dingle_claim_packet.txt"
+    ],
+    "question": "For claim 0012, explain the allowed amount, member responsibility, and insurer estimate using the supplied scenario. Is this a final payment decision?",
+    "expected": "Allowed USD 176.00 (2 x 88). Deductible USD 50.00; coinsurance USD 25.20 on remaining USD 126.00; member USD 75.20, below remaining OOP maximum USD 400; insurer estimate USD 100.80. Billed USD 220 is not the allowed amount. Not a final payment decision."
+  },
+  {
+    "id": "claim_authorization",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt",
+      "bingle_dingle_benefits.txt",
+      "bingle_dingle_authorization.txt",
+      "bingle_dingle_claim_packet.txt"
+    ],
+    "question": "For claim 0012, do the documented dates, member, provider and units fit the authorization, and how many authorized sessions and annual benefit sessions remain afterward?",
+    "expected": "Matches authorization scope and date range. Four authorized sessions remain before two used, leaving two. Annual benefit use eight plus two equals ten, leaving ten of twenty. Do not confuse the two counters or imply guaranteed payment."
+  },
+  {
+    "id": "claim_missing_benefits",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt",
+      "bingle_dingle_authorization.txt",
+      "bingle_dingle_claim_packet.txt"
+    ],
+    "question": "Can you determine member responsibility for claim 0012 from the selected files?",
+    "expected": "No. Benefit summary BD-BEN-MEADOW-2026 is referenced but absent; supplied balances alone do not establish cost-sharing rules. Do not retrieve 20 percent or USD 75.20 from unselected sources."
+  },
+  {
+    "id": "claim_missing_accumulators",
+    "files": [
+      "bingle_dingle_agreement.txt",
+      "bingle_dingle_rates.txt",
+      "bingle_dingle_amendment.txt",
+      "bingle_dingle_benefits.txt",
+      "bingle_dingle_authorization.txt"
+    ],
+    "question": "Estimate final insurer payment for two covered DEMO-SESSION units at Pebblebrook under Meadow on August 15, 2026. I have no accumulator or authorization record.",
+    "expected": "Scheduled amount USD 176; final payment unknown. Need eligibility, authorization, utilization, remaining deductible and OOP maximum and other applicable facts. Missing is not zero."
+  }
+]

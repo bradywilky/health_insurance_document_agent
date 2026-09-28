@@ -1,0 +1,9 @@
+BINGLE-DINGLE INSURANCE — EXECUTED AMENDMENT
+Document ID: BD-AMD-2026-02. Version: 1.0. Status: executed.
+Execution date: June 15, 2026. Amends BD-RATES-2026-01 under BD-AGR-2026-01 only as specified below.
+
+Section 1 — Rate change
+For Pebblebrook Provider Group, Meadow product, and service dates July 1 through December 31, 2026, inclusive, replace the DEMO-SESSION rate of USD 80.00 with USD 88.00 per completed session. The maximum remains three scheduled units per service date. Services before July 1 retain the original rate even if submitted after July 1.
+
+Section 2 — Unchanged provisions
+DEMO-VISIT remains USD 120.00. DEMO-REMOTE remains USD 60.00. Submission deadlines and the outage exception in the agreement remain unchanged. This amendment supplies no rates for DEMO-IMAGING, other providers, or other products.

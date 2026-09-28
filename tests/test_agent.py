@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
-import xlsx_csv_agent as agent
+import table_agent as agent
 from local_data import prepare_local_file
 from llm import LLM
 

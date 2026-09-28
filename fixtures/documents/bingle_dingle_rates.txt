@@ -1,0 +1,15 @@
+BINGLE-DINGLE INSURANCE — RATE SCHEDULE
+Document ID: BD-RATES-2026-01. Version: 1.0. Status: executed.
+Incorporated by agreement BD-AGR-2026-01. Provider: Pebblebrook Provider Group. Product: Meadow. Service dates: January 1 through December 31, 2026, subject to executed amendments.
+All amounts are in USD.
+
+Section A — Scheduled rates
+DEMO-VISIT: office evaluation visit; USD 120.00 per encounter; maximum one scheduled unit per service date.
+DEMO-SESSION: outpatient physical therapy session; USD 80.00 per completed session; maximum three scheduled units per service date.
+DEMO-REMOTE: synchronous virtual office visit; USD 60.00 per encounter; maximum one scheduled unit per service date.
+
+Section B — Scope of calculations
+Multiply the applicable per-unit rate by documented units within the stated maximum to compute a scheduled amount. Units above a maximum require review; do not silently discard them or assume a rate. This schedule contains no deductible, copayment, coinsurance, benefit eligibility, or final payment determination.
+
+Section C — Unlisted services and products
+DEMO-IMAGING is not listed. No rate for it can be inferred from this schedule. No River product or other provider rates are included.

@@ -1,0 +1,17 @@
+BINGLE-DINGLE INSURANCE — HEALTH BENEFIT SUMMARY
+Document ID: BD-BEN-MEADOW-2026. Version 1.0. Effective January 1–December 31, 2026.
+
+1. Product and network
+Bingle-Dingle Insurance is a regional health insurer serving the Lakeshore region. Meadow is its employer-sponsored health product. This summary applies only to covered, in-network professional services under Meadow. River is a separate product whose benefits are not provided here. Network participation alone does not establish member enrollment or coverage for a particular service.
+
+2. Benefit categories
+DEMO-VISIT represents an office evaluation visit. For an eligible covered in-network service, the member pays a USD 25.00 copayment per encounter; deductible and coinsurance do not apply to this category. The copayment cannot exceed the allowed amount.
+DEMO-SESSION represents an outpatient physical therapy session. For an eligible covered in-network service, the remaining deductible applies first, then member coinsurance is 20 percent of the remaining allowed amount. There is no separate copayment. The annual therapy benefit limit is 20 completed sessions. Prior authorization rules are in BD-AUTH-2026.
+DEMO-REMOTE represents a synchronous virtual office visit. For an eligible covered in-network service, the member pays a USD 15.00 copayment per encounter; deductible and coinsurance do not apply to this category.
+
+3. Required inputs and calculation order
+An estimate requires service-date eligibility, applicable network status, service category, allowed amount, authorization when required, year-to-date benefit use, remaining deductible, and remaining out-of-pocket maximum as of the service date. Do not treat a missing accumulator as zero. For therapy, deductible applied is the lesser of remaining deductible and allowed amount. Coinsurance is 20 percent of the allowed amount left after that deductible. Round each monetary component to cents using half-up rounding.
+For covered in-network services described in this summary, member responsibility is capped at the supplied remaining out-of-pocket maximum. The insurer estimate is allowed amount minus capped member responsibility. A remaining maximum of zero is different from an unknown maximum. These equations apply only within the scope of this benefit summary.
+
+4. Limits
+Coordination of benefits, excluded services, out-of-network reimbursement, adjustments, and actual clinical necessity criteria are not defined. If any apply or required facts are missing, identify what needs review. A contractual rate alone cannot establish a payable claim.

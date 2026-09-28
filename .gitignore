@@ -20,8 +20,21 @@ data/
 *.tsv
 *.xlsx
 *.xls
+*.pdf
+*.docx
+*.doc
+*.txt
+!requirements.txt
+!requirements-dev.txt
+!fixtures/documents/bingle_dingle_agreement.txt
+!fixtures/documents/bingle_dingle_rates.txt
+!fixtures/documents/bingle_dingle_amendment.txt
+!fixtures/documents/bingle_dingle_processing_guide.txt
+!fixtures/documents/bingle_dingle_draft.txt
+uploads/
 outputs/
 node_modules/
 # Reviewed, wholly synthetic test fixtures only.
-!fixtures/fishing_mappings.xlsx
-!fixtures/fishing_catches.csv
+!fixtures/documents/bingle_dingle_benefits.txt
+!fixtures/documents/bingle_dingle_authorization.txt
+!fixtures/documents/bingle_dingle_claim_packet.txt
