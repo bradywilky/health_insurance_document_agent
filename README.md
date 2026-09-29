@@ -1,22 +1,69 @@
 # Health Insurance Document Agent
 
-`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama Maverick or Scout through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The existing `run_plan_tables_agent()` entry points and S3 loading paths remain available in `table_agent.py`.
+`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama Maverick/Scout or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
+
+## Project layout
+
+All commands below run from the project root. Python command-line programs run with `-m` so
+package imports resolve consistently; the Streamlit entry point is `apps/chat/app.py`.
+
+```text
+backend/         Reusable application backend
+  agents/        Sole LangGraph workflow, native protocol, Bedrock and evidence
+  tools/         Document and deterministic table tools
+  retrieval/     Search over extracted document blocks
+  preprocessing/ Extraction and workbook-to-CSV conversion
+  storage/       Local/S3 persistence and table loading
+  shared/        Document model, metadata summaries and serialization
+  config/        Model settings
+apps/            Replaceable Streamlit interfaces
+  chat/app.py    Saved-document selection and questions (port 8501)
+  upload/app.py  Upload, preprocessing and saving (port 8502)
+development/     Utilities and tests, not required by the backend
+  cli/           Single-file command-line runner
+  evaluation/    Live model evaluations
+  scripts/       Sample-data generator
+  tests/         Offline regression tests
+  fixtures/      Reviewed test documents and expected answers
+  runs/          Evaluation reports and traces (ignored by Git)
+data/            Local documents and shared library (ignored by Git)
+outputs/         Generated artifacts (ignored by Git)
+```
+
+`backend/preprocessing/documents.py` creates document records; `backend/retrieval/search.py` searches them.
+The shared `Document` record lives in `backend/shared/models.py`. Preprocessing and storage do not
+import the agent runtime. `backend/storage/tables.py` loads the same preprocessed CSV contract through
+either a real S3 client or the local adapter. This preserves the AWS object layout.
+
+Dependencies and local configuration stay at the root (`requirements*.txt`, `.env.example`,
+`.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
+managed dependency/cache folders, not application code.
+
+Import integrations from `backend.agents.document_agent`. Root-level Python
+modules have been relocated, so update imports and launch commands to the paths shown here.
+The former table-agent entry points have been removed; migrate callers as shown below.
 
 ## Multi-file chat prototype
 
 After installing dependencies and configuring your local AWS profile, start the interface:
 
 ```powershell
-.\.venv\Scripts\python -m streamlit run app.py
+.\.venv\Scripts\python -m streamlit run apps/chat/app.py
 ```
 
-Open http://127.0.0.1:8501. Upload files, click **Add uploaded files**, and use **Files to answer from** to select one or more sources. Alternatively, click **Load Bingle-Dingle examples**. Changing selected files clears the conversation.
+In a second terminal, start the upload portal:
 
-The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with at most 10 files and 20 MB per file. PDF references use page numbers; Word references use paragraph/table locations; spreadsheets preserve sheet and row references. Extraction warnings and the retrieved evidence appear alongside answers. Choose Maverick or Scout; `BEDROCK_MODEL_ID`, if set, overrides that choice.
+```powershell
+.\.venv\Scripts\python -m streamlit run apps/upload/app.py --server.port 8502
+```
 
-`documents.py` handles extraction and lexical retrieval. `health_insurance_document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `app.py` keeps files and chat in session memory; selected excerpts and conversation context are sent to Bedrock. Nothing is uploaded to S3 by this prototype.
+Open http://127.0.0.1:8502 to upload and preprocess files, or click **Load Bingle-Dingle examples** there. Open http://127.0.0.1:8501 for chat, click **Refresh saved files**, and use **Files to answer from** to select sources. Changing selected files or model clears the conversation to keep comparisons independent.
 
-This is a localhost development application, without shared storage or authentication. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. Citations identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
+The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with at most 10 files per upload batch or chat selection and 20 MB per file. PDF references use page numbers; Word references use paragraph/table locations; spreadsheets preserve sheet and row references. Extraction warnings and the retrieved evidence appear alongside answers. Choose Maverick, Scout, or Claude Haiku/Sonnet/Opus 4.5; `BEDROCK_MODEL_ID`, if set, overrides that choice.
+
+`backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
+
+This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source backend.storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. Citations identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
 
 **Load Bingle-Dingle examples** loads eight Bingle-Dingle health-insurance documents: provider agreement, rate schedule, executed amendment, processing guide, unexecuted draft, benefit summary, authorization rules, and claim packet. Bingle-Dingle Insurance is a regional health insurer offering the Meadow product. The documents cover provider terms, benefits, authorization, and claim-specific records.
 
@@ -25,10 +72,46 @@ Try: "For claim 0012, explain the allowed amount, member responsibility, and ins
 Thirteen document evaluation cases cover effective dates, draft precedence, product scope, missing sources, authorization, benefit utilization, and cost sharing:
 
 ```powershell
-.\.venv\Scripts\python evaluate_documents.py --model maverick --output runs\documents-maverick.jsonl
+.\.venv\Scripts\python -m development.evaluation.documents --model maverick --output development\runs\documents-maverick.jsonl
 ```
 
 This makes billable model calls. Results require human comparison with the expected answers; offline tests use scripted responses and do not measure model quality.
+
+## Native tools and model comparison
+
+The document agent uses native Bedrock Converse `toolConfig`, `toolUse`, and matching
+`toolResult` messages. The chat app, local CLI, streaming entry point, and both evaluation CLIs all use this workflow. Model choice is independent of tool calling:
+Maverick, Scout, and Claude Haiku/Sonnet/Opus 4.5 all use the same native protocol.
+There is no prompt-based JSON tool planner or automatic fallback. Unsupported model/API
+configurations fail explicitly. Final answer writing returns text through Converse; its response is never parsed as a tool request.
+
+Native requests are validated before execution. Selected document/sheet restrictions, duplicate
+request handling, multiple calls per turn, evidence attribution, and bounded corrective retries
+remain in place. The agent permits at most two corrective retries per question, twelve planner turns, and twelve retrieval executions. Every received native call gets a matching result before another planner turn.
+An early finish without supporting content is rejected. A valid tool request does not guarantee
+correct document interpretation or arithmetic.
+
+Select a model in the app, pass `model=` to `run_document_agent()`, or use `--model` on either CLI.
+The default model still uses the existing `TABLES_MODEL` environment variable. `BEDROCK_MODEL_ID`
+can select a deployment-specific native-tool-capable inference profile. The old `planner_mode`
+argument, `--planner-mode` flag, and tool-mode UI selector have been removed;
+`DOCUMENTS_PLANNER_MODE` is no longer read. Metadata, tool schemas and local result files still
+use JSON serialization; that is independent of model tool-request parsing.
+
+Run matched evaluations with local files and real Bedrock models (output paths must be new):
+
+```powershell
+.\.venv\Scripts\python -m development.evaluation.documents --model maverick --output development\runs\maverick-native.jsonl --traces development\runs\maverick-native-traces
+.\.venv\Scripts\python -m development.evaluation.documents --model scout --output development\runs\scout-native.jsonl
+.\.venv\Scripts\python -m development.evaluation.documents --model claude-haiku-4.5 --output development\runs\haiku-native.jsonl
+.\.venv\Scripts\python -m development.evaluation.documents --model claude-sonnet-4.5 --output development\runs\sonnet-native.jsonl
+.\.venv\Scripts\python -m development.evaluation.documents --model claude-opus-4.5 --output development\runs\opus-native.jsonl
+```
+
+Expected answers remain outside model inputs. Reports retain actual model IDs, native protocol,
+latency, usage, evidence and answers. Full traces contain document content and are optional;
+`development/runs/` is ignored by Git. Historical JSON comparisons are retained only as local evaluation
+artifacts, not as runnable application modes. Review correctness separately from protocol success.
 
 ## Quick start (PowerShell)
 
@@ -38,7 +121,7 @@ Python 3.11+ is required. From this project directory:
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-.\.venv\Scripts\python make_samples.py
+.\.venv\Scripts\python -m development.scripts.make_samples
 .\.venv\Scripts\python -m pytest -q
 ```
 
@@ -47,17 +130,17 @@ If your Python installation cannot bootstrap pip, use `python -m pip --python .\
 Inspect preprocessing without credentials or model calls:
 
 ```powershell
-.\.venv\Scripts\python run_local.py data\insurance_mappings.xlsx "Inspect" --inspect
+.\.venv\Scripts\python -m development.cli.run_local data\insurance_mappings.xlsx "Inspect" --inspect
 ```
 
 Run the real agent using your existing local AWS profile:
 
 ```powershell
-.\.venv\Scripts\python run_local.py data\insurance_mappings.xlsx "What is the total known billed amount in Claim Samples?" --profile dev-profile --model maverick --trace runs\maverick.json
-.\.venv\Scripts\python run_local.py data\insurance_claims.csv "What is the total known billed amount?" --profile dev-profile --model scout --stream
+.\.venv\Scripts\python -m development.cli.run_local data\insurance_mappings.xlsx "What is the total known billed amount in Claim Samples?" --profile dev-profile --model maverick --trace development\runs\maverick.json
+.\.venv\Scripts\python -m development.cli.run_local data\insurance_claims.csv "What is the total known billed amount?" --profile dev-profile --model scout --stream
 ```
 
-Replace the file path and question to test your own files. CSV options include `--encoding cp1252` and `--delimiter ';'`. `.xlsx` and `.xls` files load all worksheets. The local preprocessor detects headers below title rows and preserves free-text metadata sheets. Explicit header/type overrides handle ambiguous layouts. Multiple tables per sheet and uncached formulas are not supported. See fixtures/README.md for details.
+Replace the file path and question to test your own files. CSV options include `--encoding cp1252` and `--delimiter ';'`. `.xlsx` and `.xls` files load all worksheets. The local preprocessor detects headers below title rows and preserves free-text metadata sheets. Explicit header/type overrides handle ambiguous layouts. Multiple tables per sheet and uncached formulas are not supported. See development/fixtures/README.md for details.
 
 Expected table results: known billed amount **USD 445**, one missing amount (claim **0015**) and one zero amount (claim **0016**). Claim **0012** retains its leading zeros. The workbook includes narrative About and Version History sheets, mappings with duplicates and draft status, repeated headers, and source-row provenance. These independent parser samples are not a combined claim ledger for the narrative packet.
 
@@ -73,6 +156,9 @@ Defaults:
 | --- | --- |
 | maverick | `us.meta.llama4-maverick-17b-instruct-v1:0` |
 | scout | `us.meta.llama4-scout-17b-instruct-v1:0` |
+| claude-haiku-4.5 | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| claude-sonnet-4.5 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` |
+| claude-opus-4.5 | `us.anthropic.claude-opus-4-5-20251101-v1:0` |
 
 `BEDROCK_MODEL_ID` overrides the selection when your deployment uses a specific inference profile ARN or ID. Remove that override when comparing `--model scout` and `--model maverick`. `BEDROCK_MAX_TOKENS` controls the output limit per call. These US profiles may route requests across US regions.
 
@@ -80,59 +166,152 @@ AWS references: [Maverick](https://docs.aws.amazon.com/bedrock/latest/userguide/
 
 ## Files and AWS migration
 
-- `table_agent.py`: original graph plus JSON retry, recursion budget, streaming, literal/numeric search, empty parallel extraction, attribution, and instruction/data separation fixes.
-- `llm.py`: Bedrock Converse wrapper with normal SDK profile/role credentials, configurable region, timeouts, and retries.
-- `config_utils.py`: missing configuration module, now supplied with Maverick/Scout defaults and optional business context. Retain or reconcile your existing AWS version of this module; the original business context was not supplied.
-- `local_data.py`: in-memory `get_object` adapter and metadata generation; no AWS calls.
-- `run_local.py`: CLI with optional full LLM traces and token totals. Trace files contain input data and are ignored by Git.
-- `make_samples.py`: deterministic sample files.
-- `tests/test_agent.py`: offline regression tests using scripted LLM responses and the real graph/data tools. They do not measure Llama's answer quality.
+- `backend/agents/document_agent.py`: the sole LangGraph workflow, with native tools, bounded retries, streaming, selected-source restrictions, and evidence.
+- `backend/agents/llm.py`: Bedrock Converse wrapper with normal SDK profile/role credentials, configurable region, timeouts, and retries.
+- `backend/config/settings.py`: missing configuration module, now supplied with Llama and Claude model profiles with environment-based settings.
+- `backend/storage/local.py`: in-memory `get_object` adapter and metadata generation; no AWS calls.
+- `development/cli/run_local.py`: CLI with optional full LLM traces and token totals. Trace files contain input data and are ignored by Git.
+- `development/scripts/make_samples.py`: deterministic sample files.
+- `development/tests/test_agent.py`: offline regression tests using scripted LLM responses and the real graph/data backend.tools. They do not measure Llama's answer quality.
 
-In AWS, keep calling the existing entry point with the real S3 client:
+For existing AWS preprocessing outputs, load a document and call the sole agent:
 
 ```python
-import boto3
-from table_agent import run_plan_tables_agent
+from backend.preprocessing.documents import document_from_table_inputs
+from backend.agents.document_agent import run_document_agent
 
-answer = run_plan_tables_agent(
-    s3_client=boto3.client("s3"),
+# s3_client is your existing configured S3 client.
+doc = document_from_table_inputs(
+    s3_client=s3_client,
     s3_bucket="your-bucket",
     s3_prefix="your-prefix/",
     plan_domain="your-domain",
     filename="your-workbook.xlsx",
-    query="What is the total known billed amount?",
 )
+result = run_document_agent({doc.id: doc}, [doc.id], "What is the total known billed amount?")
+print(result["answer"])
 ```
 
-Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash. Existing preprocessing must provide `_metadata.json` plus each sheet's CSV at `{prefix}{domain}/preprocessed/{filename}/`; for CSV inputs the object basename is the original CSV filename. The new preprocess.py exports that contract locally; it does not upload to S3 or validate another preprocessing pipeline.
+`document_from_table_inputs()` reads the existing CSV/metadata contract through either a
+local adapter or S3. It adds searchable text and table metadata without running another agent.
+For saved multi-file libraries, use `store.load(manifest_key)` and pass the selected document
+records to the same agent. `run_document_agent_stream()` streams sanitized node progress and
+a final answer from this graph. The old table-agent functions have been removed.
+
+Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash. Existing preprocessing must provide `_metadata.json` plus each sheet's CSV at `{prefix}{domain}/preprocessed/{filename}/`; for CSV inputs the object basename is the original CSV filename. The new backend/preprocessing/tables.py exports that contract locally; it does not upload to S3 or validate another preprocessing pipeline.
 
 ## Limits of this development harness
 
-The original table CLI retains generated pandas code through in-process `exec`. Restricted builtins and prompt instructions **are not a sandbox**: pandas can access files and networks. Use trusted development files/questions for that CLI. The new multi-file chat does not expose this tool. Isolate generated code in a separate execution service with resource, filesystem, network, and credential restrictions before exposing it to untrusted users.
-
-Search outputs can be truncated, and overview extraction sees only five sample rows. Tool failures and the step limit may yield incomplete answers. Identical table tool calls reuse cached evidence; the document loop stops repeated requests with a limitation. CLI calls are independent questions; existing Python entry points still accept conversation history.
+The CLI and chat expose the same deterministic table backend.tools. Generated Python execution and
+sampled parallel summaries were removed with the duplicate table workflow. Search results
+can be truncated, and tool failures or step limits may yield incomplete answers. Repeated
+identical calls reuse evidence. CLI calls are independent; Python callers can pass `history`.
 
 Deterministic `query_table` supports filters, grouping, sorting, pagination, decimal aggregates, and explicit unit conversions. `join_tables` checks relationship constraints and caps output size. Decimal arithmetic preserves loaded numeric values; it cannot restore precision already lost in a source workbook. Missing totals remain missing instead of silently becoming zero. The evidence pipeline bounds model context and retains tool parameters and source references. Its numeric display check is a guard against omitted exact values, not a semantic answer verifier.
 
-For model evaluation, run the same questions with both models and compare answers to known totals. Inspect traces for tool selection, generated code, failures, and token use. Offline passing tests are not evidence that a live AWS profile or model invocation works.
+For model evaluation, run the same questions with both models and compare answers to known totals. Inspect traces for tool selection, evidence, failures, and token use. Offline passing tests are not evidence that a live AWS profile or model invocation works.
 
 
 ## Publishing to GitHub
 
 Commit source code, tests, dependency files, and `.env.example`. The example uses a placeholder profile name; keep your actual settings in `.env` (ignored by Git). AWS login credentials remain in your user-level AWS configuration/cache outside this project; the source code loads them through the SDK and contains no account-specific credentials.
 
-The ignore rules exclude `.env` variants, `.aws` folders, credential/key files, logs, local data, model traces under `runs/`, spreadsheet inputs, and the virtual environment. Keep traces in `runs/` even when choosing a custom `--trace` path. Ignore rules do not remove files already committed, and do not protect files uploaded manually through the GitHub website. Do not upload a ZIP of the entire working directory.
+The ignore rules exclude `.env` variants, `.aws` folders, credential/key files, logs, local data, model traces under `development/runs/`, spreadsheet inputs, and the virtual environment. Keep traces in `development/runs/` even when choosing a custom `--trace` path. Ignore rules do not remove files already committed, and do not protect files uploaded manually through the GitHub website. Do not upload a ZIP of the entire working directory.
 
 Before each push, inspect `git status --short` and `git diff --cached`. Add any deliberate sample fixtures explicitly only after verifying they are synthetic. Do not force-add local configuration, credentials, or real spreadsheets.
 
 
 ## Messy workbook development
 
-The [insurance fixtures](fixtures/README.md) cover narrative sheets, cross-system claim attribute mappings, duplicates, draft mappings, missing values, and leading-zero IDs. Run `make_samples.py` to generate the workbook and CSV under ignored `data/`; tests create independent temporary copies.
+The [insurance fixtures](development/fixtures/README.md) cover narrative sheets, cross-system claim attribute mappings, duplicates, draft mappings, missing values, and leading-zero IDs. Run `development/scripts/make_samples.py` to generate the workbook and CSV under ignored `data/`; tests create independent temporary copies.
 
-`preprocess.py` exports each sheet to CSV plus metadata with types, counts, frequent values, source row positions, and parsing warnings. `local_data.py` uses it automatically, or `run_local.py --preprocessed` loads a previously exported directory. `read_sheet` provides paginated access to narrative content and full table rows; search now includes metadata sheets. `evaluate.py` runs known-answer questions through a selected model and saves results for human review under `runs/`.
+`backend/preprocessing/tables.py` exports each sheet to CSV plus metadata with types, counts, frequent values, source row positions, and parsing warnings. `backend/storage/local.py` uses it automatically, or `development/cli/run_local.py --preprocessed` loads a previously exported directory. `read_sheet` provides paginated access to narrative content and full table rows; search now includes metadata sheets. `development/evaluation/tables.py` runs known-answer questions through a selected model and saves results for human review under `development/runs/`.
 
 
 ## Module names
 
-`health_insurance_document_agent.py` contains the selected-document research loop; `table_agent.py` contains the table graph and existing AWS-compatible table entry points. Update integrations to import table functions from `table_agent`. Function signatures and the S3 preprocessing contract are unchanged.
+`backend/agents/document_agent.py` contains the sole research graph and both synchronous/streaming entry points. Shared table operations live under `backend/tools/`; the S3 preprocessing layout is unchanged.
+
+
+## Persistent preprocessing in S3
+
+Use an existing bucket. Set these values in your ignored `.env` and restart Streamlit:
+
+```dotenv
+DOCUMENTS_STORAGE=s3
+DOCUMENTS_S3_BUCKET=your-bucket
+DOCUMENTS_S3_PREFIX=document-agent/
+# Optional KMS override; otherwise the bucket encryption policy applies:
+# DOCUMENTS_S3_KMS_KEY_ID=your-key-id
+```
+
+The app uses `AWS_PROFILE` for local development or the deployment IAM role when unset. Uploaded files and the example-loader files are saved automatically when S3 is configured. A failed save reports an error rather than silently falling back to local backend.storage. Chat history is not persisted. Clearing files/chat does not delete S3 objects.
+
+In the chat app, click **Refresh saved files** and select sources under **Files to answer from**. The upload portal handles all ingestion; the chat app opens its store in read-only mode. In production, give the chat service a read-only storage role and the separate upload service write permissions. The picker shows up to 100 saved documents from the configured prefix; this is a prototype library, not automatic retrieval across a bucket. Everyone using this app configuration has the same storage scope; add authentication and server-side authorization before a shared deployment.
+
+Documents are stored by their full filename, including extension:
+
+```text
+<prefix>/documents/
+  raw/
+    benefits.pdf
+    claims.xlsx
+  preprocessed/
+    benefits.pdf/
+      extracted.json
+      manifest.json
+    claims.xlsx/
+      extracted.json
+      manifest.json
+      _metadata.json
+      <sheet>.csv
+```
+
+`extracted.json` preserves text blocks, source locations, warnings, and table metadata. The manifest is written last. Re-uploading the same filename replaces its raw file and preprocessed outputs; use distinct filenames to retain separate documents. The previous manifest and outputs are removed before replacement so a failed upload cannot be opened as complete. A failed replacement requires re-uploading the source; this is not an atomic transaction or version-history system. Concurrent writes to the same filename are not supported. Bucket versioning may be enabled separately if recovery history is required.
+
+Table inputs use `s3_prefix=<prefix>/`, `plan_domain=documents`, and `filename=<filename>`, preserving the existing preprocessing reading contract. Saved documents reopen without re-extraction; table queries read CSVs directly from S3.
+
+The configured identity needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the chosen object prefix, `s3:ListBucket` restricted to that prefix for the saved-file picker, and `s3:AbortMultipartUpload` for transfer cleanup. A KMS-encrypted bucket/key may also require `kms:GenerateDataKey` and `kms:Decrypt` plus an appropriate key policy. This code does not create buckets, modify policies, add public access, or offer a delete-file UI. Replacement does remove prior preprocessed objects for that filename.
+
+Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Keep and use the returned document's `storage_ref['manifest_key']` with `store.load(...)`. Existing calls without a store remain local.
+
+For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and development.tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
+
+The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout. Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
+
+## LangGraph workflows
+
+The document agent uses LangGraph for every answering entry point. Native Bedrock tool calling
+remains the model protocol; LangGraph controls which Python node runs next.
+The document workflow in `backend/agents/document_agent.py` is:
+
+```mermaid
+flowchart LR
+    START --> init --> plan --> tools
+    tools -->|continue research or repair| plan
+    tools -->|finished or budget reached| synthesize --> END
+```
+
+`DocumentState` names the data passed between nodes. `init` validates selected sources and
+creates the per-run native conversation. `plan` requests model tool calls. `tools` validates
+and executes them, records evidence, and returns matching native tool results.
+`route_after_tools` chooses another planning turn or answer synthesis. The graph preserves
+the twelve-turn/twelve-execution cap and two corrective retries. `run_document_agent()`
+invokes the compiled graph and returns the same result shape used by Streamlit and evaluations.
+
+For learning/debugging, `DOCUMENT_GRAPH.get_graph().draw_mermaid()` prints its diagram.
+`DOCUMENT_GRAPH.stream(inputs, stream_mode="updates", config={"recursion_limit": 29})`
+exposes node updates, where inputs contain `documents`, `document_ids`, and `question`.
+Raw updates contain document content and runtime objects; keep them out of public logs.
+This is an in-memory workflow, without durable checkpoints or restart/resume support.
+
+`backend/tools/documents.py` dispatches selected-document tools; `backend/tools/tables.py` dispatches the six
+shared deterministic table tools; `backend/tools/table_operations.py` implements queries and joins.
+These modules never import the agent. The agent uses `backend/agents/native.py` for native protocol handling and validation;
+document-specific schemas remain in `backend/agents/document_protocol.py`. Shared result conversion
+lives in `backend/shared/serialization.py`. Uploading, preprocessing, and storage remain ordinary
+Python services rather than agent workflows.
+
+Run commands from the repository root. `backend/` does not import `apps/` or `development/`. The upload app’s optional example-loader reads development fixtures; ordinary uploads do not need them. Root dependency files, `.env`, and `.streamlit/` remain shared configuration. Existing local data and S3 object paths are unchanged.
+
+`node_modules/` is a local junction to Codex-provided JavaScript tooling. This Python application does not depend on it; it is ignored by Git and is not part of the deployment.

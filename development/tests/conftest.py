@@ -1,0 +1,40 @@
+import pytest
+from development.scripts.make_samples import create_samples
+
+
+@pytest.fixture(scope='session')
+def insurance_workbook(tmp_path_factory):
+    return create_samples(tmp_path_factory.mktemp('insurance_samples'))
+
+@pytest.fixture
+def native_script(monkeypatch):
+    """Script the Bedrock transport, retaining the real LLM wrapper and tool protocol."""
+    import copy
+    import itertools
+    from backend.agents.llm import LLM
+    def install(turns):
+        replies=iter(turns)
+        requests=[]
+        ids=itertools.count()
+        class Client:
+            def converse(self,**kwargs):
+                requests.append(copy.deepcopy(kwargs))
+                turn=next(replies)
+                if isinstance(turn,str):
+                    message={'role':'assistant','content':[{'text':turn}]}
+                    stop='end_turn'
+                else:
+                    actions=turn if isinstance(turn,list) else [turn]
+                    message={'role':'assistant','content':[{'toolUse':{
+                        'toolUseId':f'call-{next(ids)}','name':a['tool'],'input':a['parameters']}} for a in actions]}
+                    stop='tool_use'
+                return {'output':{'message':message},'stopReason':stop,
+                        'usage':{'inputTokens':10,'outputTokens':5}}
+        client=Client()
+        original=LLM.__init__
+        def init(self,*a,**kw):
+            original(self,*a,**kw)
+            self._client=client
+        monkeypatch.setattr(LLM,'__init__',init)
+        return requests
+    return install
