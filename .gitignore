@@ -39,3 +39,6 @@ node_modules/
 !development/fixtures/documents/bingle_dingle_benefits.txt
 !development/fixtures/documents/bingle_dingle_authorization.txt
 !development/fixtures/documents/bingle_dingle_claim_packet.txt
+
+# Reviewed source-only transfer bundle. Never include local data or configuration.
+!/transfer/repository-bundle.txt

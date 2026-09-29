@@ -26,6 +26,7 @@ development/     Utilities and tests, not required by the backend
   tests/         Offline regression tests
   fixtures/      Reviewed test documents and expected answers
   runs/          Evaluation reports and traces (ignored by Git)
+transfer/        Source bundle, create_bundle.py, and standalone restore_repo.py
 data/            Local documents and shared library (ignored by Git)
 outputs/         Generated artifacts (ignored by Git)
 ```
@@ -315,3 +316,30 @@ Python services rather than agent workflows.
 Run commands from the repository root. `backend/` does not import `apps/` or `development/`. The upload app’s optional example-loader reads development fixtures; ordinary uploads do not need them. Root dependency files, `.env`, and `.streamlit/` remain shared configuration. Existing local data and S3 object paths are unchanged.
 
 `node_modules/` is a local junction to Codex-provided JavaScript tooling. This Python application does not depend on it; it is ignored by Git and is not part of the deployment.
+
+## Portable text bundle
+
+`transfer/` contains:
+- `repository-bundle.txt`: generated UTF-8 source snapshot, excluding itself.
+- `create_bundle.py`: creates or refreshes the snapshot using Git's file list.
+- `restore_repo.py`: standalone restoration script requiring only Python 3.11+.
+
+From the project root, regenerate after source changes:
+
+```powershell
+.\.venv\Scripts\python transfer/create_bundle.py
+```
+
+Copy the complete bundle into a UTF-8 text file and separately copy `restore_repo.py`.
+Place those two files together on the destination machine and run:
+
+```powershell
+python restore_repo.py repository-bundle.txt restored-project
+```
+
+Headers give each relative path, content length, and checksum; the parser verifies all content
+before writing. Existing destination folders are rejected. Text line endings normalize to LF.
+Both transfer scripts are included inside the snapshot; the snapshot itself is excluded to
+prevent recursive growth. Git permits the generated snapshot under `transfer/`, so refresh
+and review it before publishing. Local configuration, credentials, data, reports, dependencies,
+and Git history are excluded. Install project dependencies and configure the environment separately.
