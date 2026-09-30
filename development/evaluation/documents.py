@@ -19,19 +19,28 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--case',action='append')
     parser.add_argument('--traces', type=Path, help='Save full local model-call traces')
+    parser.add_argument('--fixtures', type=Path,
+                        help='Generated fixture directory containing questions.json and upload files')
     args=parser.parse_args()
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
-    root=Path(__file__).resolve().parents[1]/'fixtures'/'documents'
-    docs=[ingest_document(p.name,p.read_bytes()) for p in sorted(root.glob('*.txt'))]
-    documents={d.id:d for d in docs}
-    by_name={d.name:d.id for d in docs}
+    root=args.fixtures or Path(__file__).resolve().parents[1]/'fixtures'/'documents'
     cases=json.loads((root/'questions.json').read_text())
     if args.case:
         unknown=set(args.case)-{c['id'] for c in cases}
         if unknown:
             raise ValueError(f'Unknown cases: {sorted(unknown)}')
         cases=[c for c in cases if c['id'] in args.case]
+    # Only load selected case inputs; rejection fixtures must not abort Q&A evaluation.
+    names=sorted({name for case in cases for name in case['files']})
+    docs=[]
+    for name in names:
+        path=(root/name).resolve()
+        if not path.is_relative_to(root.resolve()):
+            raise ValueError('Fixture path escapes the fixture directory')
+        docs.append(ingest_document(path.name,path.read_bytes()))
+    documents={d.id:d for d in docs}
+    by_name={d.name:d.id for d in docs}
     if args.traces:
         args.traces.mkdir(parents=True, exist_ok=True)
     args.output.parent.mkdir(parents=True,exist_ok=True)

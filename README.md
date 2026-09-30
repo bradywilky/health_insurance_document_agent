@@ -88,7 +88,7 @@ configurations fail explicitly. Final answer writing returns text through Conver
 
 Native requests are validated before execution. Selected document/sheet restrictions, duplicate
 request handling, multiple calls per turn, evidence attribution, and bounded corrective retries
-remain in place. The agent permits at most two corrective retries per question, twelve planner turns, and twelve retrieval executions. Every received native call gets a matching result before another planner turn.
+remain in place. The agent permits at most two corrective retries per question, sixteen planner turns, and sixteen tool executions. Every received native call gets a matching result before another planner turn.
 An early finish without supporting content is rejected. A valid tool request does not guarantee
 correct document interpretation or arithmetic.
 
@@ -289,19 +289,22 @@ The document workflow in `backend/agents/document_agent.py` is:
 ```mermaid
 flowchart LR
     START --> init --> plan --> tools
-    tools -->|continue research or repair| plan
-    tools -->|finished or budget reached| synthesize --> END
+    tools -->|continue research, repair or coverage prompt| plan
+    tools -->|finished or budget reached| synthesize
+    synthesize -->|answer used uncomputed amounts, once| plan
+    synthesize -->|answer checked| END
 ```
 
 `DocumentState` names the data passed between nodes. `init` validates selected sources and
 creates the per-run native conversation. `plan` requests model tool calls. `tools` validates
 and executes them, records evidence, and returns matching native tool results.
-`route_after_tools` chooses another planning turn or answer synthesis. The graph preserves
-the twelve-turn/twelve-execution cap and two corrective retries. `run_document_agent()`
+`route_after_tools` chooses another planning turn or answer synthesis; `route_after_synthesize`
+can send the planner back once to compute amounts (see below). The graph preserves the
+sixteen-turn/sixteen-execution cap and two corrective retries. `run_document_agent()`
 invokes the compiled graph and returns the same result shape used by Streamlit and evaluations.
 
 For learning/debugging, `DOCUMENT_GRAPH.get_graph().draw_mermaid()` prints its diagram.
-`DOCUMENT_GRAPH.stream(inputs, stream_mode="updates", config={"recursion_limit": 29})`
+`DOCUMENT_GRAPH.stream(inputs, stream_mode="updates", config={"recursion_limit": 42})`
 exposes node updates, where inputs contain `documents`, `document_ids`, and `question`.
 Raw updates contain document content and runtime objects; keep them out of public logs.
 This is an in-memory workflow, without durable checkpoints or restart/resume support.
@@ -343,3 +346,30 @@ Both transfer scripts are included inside the snapshot; the snapshot itself is e
 prevent recursive growth. Git permits the generated snapshot under `transfer/`, so refresh
 and review it before publishing. Local configuration, credentials, data, reports, dependencies,
 and Git history are excluded. Install project dependencies and configure the environment separately.
+
+## Calculations, source coverage and answer checks
+
+These controls target failures seen in live evaluations: mental arithmetic with an outdated rate,
+unread amendments, and answers stating what the insurer "will pay".
+
+- **Deterministic calculations** (`backend/tools/calculations.py`). `calculate` evaluates an
+  expression of literal numbers with exact decimals, e.g. `{"label":"allowed","expression":"2 * 88.00",
+  "sources":["E2","question"]}`. Every number must appear in a cited evidence record or the question
+  (dates are ignored, so "August 20" cannot supply 20; 0, 1 and 100 are always allowed).
+  `date_calculate` performs `add_days`, `days_between` and `compare` on ISO dates. Results become
+  citable evidence. Bad inputs return a tool error to the planner and do not use corrective retries.
+  The tools verify arithmetic and number provenance, not whether the model chose the right inputs.
+- **Source coverage.** When the planner calls `answer` before retrieving content from every selected
+  document with extracted content, it is sent back once with the unexamined filenames. When research
+  ends, short unread text documents (at most 20 blocks) are read automatically into evidence
+  (`coverage.auto_read`). Longer unread documents are passed to the writer as `unexamined_documents`
+  and reported in limitations, so the answer says they were not reviewed rather than that information
+  is missing. Documents with no extracted content (e.g. scans) are excluded; their warnings apply.
+- **Answer checks** (`backend/agents/answer_checks.py`). After the answer is written, currency amounts
+  that appear in no evidence, calculation or question are detected. Research then returns to the
+  planner once to compute them with `calculate`. Sentences asserting a payment as certain ("the insurer
+  will pay") trigger one writer revision. Issues that remain are added to limitations as
+  `Answer check: ...`. These checks flag likely errors; they do not prove an answer correct.
+
+Results include `protocol` counters (`coverage_prompts`, `auto_reads`, `calculation_prompts`,
+`answer_revisions`) and `coverage` (`examined`, `auto_read`, `unexamined`).

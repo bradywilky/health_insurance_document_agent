@@ -40,6 +40,7 @@ def execute_document_tool(name, params, docs):
         if doc.table_inputs is None:
             raise ValueError('This file is not an Excel or CSV table')
         return {'document_id':doc.id,'filename':doc.name,
+                'warnings':doc.warnings,
                 'table_result':execute_table_tool(params['name'],params.get('parameters',{}),
                                               **doc.table_inputs, metadata=doc.table_metadata)}
     raise ValueError(f'Unknown document tool: {name}')

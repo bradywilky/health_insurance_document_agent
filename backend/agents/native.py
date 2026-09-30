@@ -46,3 +46,16 @@ class NativePlanner:
         else:
             self.messages.append({'role':'user','content':[{'text':error or 'Return a native tool call.'}]})
         self.pending = []
+
+    def note(self, text):
+        """Add guidance after the latest tool results, keeping user/assistant turns alternating.
+
+        Bedrock rejects text blocks beside toolResult blocks, so the note joins the last result's content.
+        """
+        last = self.messages[-1]
+        if last['role'] == 'user' and 'toolResult' in last['content'][-1]:
+            last['content'][-1]['toolResult']['content'].append({'text': text})
+        elif last['role'] == 'user':
+            last['content'].append({'text': text})
+        else:
+            self.messages.append({'role': 'user', 'content': [{'text': text}]})

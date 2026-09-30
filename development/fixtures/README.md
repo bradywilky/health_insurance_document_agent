@@ -21,3 +21,9 @@ Known billed total is USD 445 across four non-missing records. Claim 0015 has a 
 `insurance_questions.json` supplies seven table questions. Run `development/evaluation/tables.py --model maverick --output development/runs/insurance-tables.jsonl` after generating the samples. Offline tests create their own temporary workbooks without requiring AWS.
 
 Keep actual input files and traces out of Git. This prototype does not implement clinical necessity rules or automatic claim adjudication.
+
+## VDI extraction-warning regression pack
+
+See [ROBUSTNESS.md](ROBUSTNESS.md) for synthetic upload files, expected warnings/rejections,
+question-answering acceptance criteria, and commands for offline and live-model tests.
+Generate it with `python -m development.scripts.make_robustness_samples --output data/robustness`.

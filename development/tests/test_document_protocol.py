@@ -31,9 +31,10 @@ def test_text_tool_requests_never_become_evidence(native_script):
 
 def test_repair_budget_is_bounded(native_script):
     doc=ingest_document('rates.txt',b'Rate USD 88.')
-    requests=native_script(['{"tool":"answer","parameters":{}}']*3)
+    requests=native_script(['{"tool":"answer","parameters":{}}']*3+['USD 88 [E1].'])
     r=run_document_agent({doc.id:doc},[doc.id],'Rate?')
-    assert len(requests)==3 and not r['evidence']
+    # Three planner turns, then the writer; only the automatic read of the short document is evidence.
+    assert len(requests)==4 and [e.get('auto') for e in r['evidence']]==[True]
     assert r['protocol']['validation_errors']==3
     assert r['limitations']
 
