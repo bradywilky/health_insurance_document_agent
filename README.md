@@ -373,3 +373,56 @@ unread amendments, and answers stating what the insurer "will pay".
 
 Results include `protocol` counters (`coverage_prompts`, `auto_reads`, `calculation_prompts`,
 `answer_revisions`) and `coverage` (`examined`, `auto_read`, `unexamined`).
+
+## Messy spreadsheets
+
+Real exports often spell one value several ways (`Tehran`, `THR`, `tehr@n`), store missing data as text
+(`nan`, `null`), and use sentinel numbers (`-999999`). Exact filters then undercount silently.
+
+- **Profiling** (`backend/preprocessing/profiling.py`). Each column's metadata adds `all_values` (for up to
+  30 distinct values), `possible_variant_groups`, `possible_missing_markers` (`nan`, `null`, `none`, `n/a`, ...;
+  not `NA`, which is often a real code), `possible_placeholder_values` (repeated all-9s numbers such as
+  -999999), and `min`/`max`/`negative_count`. Grouping is conservative: values match after ignoring case,
+  spaces and punctuation, by dropped letters (Vsa/Visa, fail/failed), or as an all-caps abbreviation (THR).
+  Substitutions are never grouped, so Medicare/Medicaid, Male/Female and Plan A/Plan B stay separate.
+  These are suggestions; the exported CSVs keep every original value. The planner receives them as
+  `column_hints` in the document summary.
+- **Table tools** (`backend/tools/table_operations.py`). `query_table` accepts `recode`, applied before
+  filters and grouping: `[{"column":"city","map":{"THR":"Tehran","nan":null}}]` or the grouped form
+  `{"Tehran":["THR","tehr@n"]}`. Numeric columns only recode to null (e.g. to exclude a sentinel). Numeric
+  filters accept numbers written as text. Results include `filter_diagnostics` (similar spellings an exact
+  filter excluded; text missing markers an `is_null` filter missed) and `notes` (truncated row lists;
+  totals that include placeholder numbers).
+- **Large sheets.** Data sheets keep a 200-row text preview (`TABLE_PREVIEW_ROWS`); narrative sheets are
+  indexed in full. `search_documents` scans every row of every data sheet from the saved CSV, so the
+  preview does not limit search. The 2,000-block cap now applies only to PDF, Word and text content.
+
+The planner is told to check column hints, combine plausible variants with `recode` while still
+reporting the exact-match figure, and to use `group_by` for "which X" questions. The writer states
+which values were combined and mentions placeholders that affect totals.
+
+## Multi-tab mapping workbooks
+
+Attribute-mapping workbooks (one tab per subject area, plus about/assumptions/version tabs) need
+answers that span tabs and surface conflicting rows.
+
+- **Cross-tab queries.** `query_table` accepts `"sheet_names": ["*"]` (all data tabs) or a list in place
+  of `sheet_name`. Tabs sharing the referenced columns are stacked; rows gain `_sheet` and `_source_row`,
+  and `group_by: ["_sheet"]` counts per tab. Tabs lacking a column are skipped and listed. A single-tab
+  query that matches nothing names the other tabs with the same columns, so "not in the workbook" is
+  only concluded after checking every tab.
+- **Status words inside name columns.** Columns too varied to list in full get `frequent_values`
+  (e.g. `Out of Scope`, `Yet To Be Determined` in a column of field names).
+- **Diagnostics.** A text filter that matches nothing reports other columns where the value occurs
+  (`value_found_in_columns`). When rows share an identifier-like key (at least 10 distinct values,
+  mostly unique) but disagree elsewhere, `notes` says so and the writer reports every version with
+  its tab and row.
+- **Narrative tabs** are indexed, read (`read_sheet`) and queried (`query_table` on `text`) as one line
+  per sheet row. A small table inside a narrative tab (revision log, sign-offs) is rebuilt from its
+  header row, e.g. `Date: 2026-02-12; Version: 18; Author: ...`.
+- **Variant detection is limited to category-like columns** (at most 50 distinct values or 20%
+  distinct, short values). It never groups values that differ by an added word (`Account - Date` /
+  `Account - End Date`) or, in multi-word names, by a word extended at either end (`Pack` / `Package`).
+
+Bedrock calls use adaptive retries (`BEDROCK_MAX_ATTEMPTS`, default 6) so concurrent users sharing an
+account back off under throttling instead of failing.

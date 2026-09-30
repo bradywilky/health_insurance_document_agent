@@ -92,10 +92,10 @@ def create_samples(target):
         ('Crosswalk', [['Field ID', 'Definition', 'Units']] +
          [[f'F{i:05}', 'TAILMARKER' if i == 2105 else f'Synthetic field {i}', 1] for i in range(1, 2106)]),
         ('Late Dictionary', [['Code', 'Meaning'], ['LATE-77', 'Late sheet definition']])])
-    upload('large_crosswalk.xlsx', 'saved', ['2000 text blocks', 'heuristic headers'])
-    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; query Crosswalk table, source row 2106. Text search alone cannot find it.')
-    question('late-sheet', ['large_crosswalk.xlsx'], 'What does LATE-77 mean?', 'Late sheet definition; Late Dictionary row 2. Use table tools beyond the text cutoff.')
-    question('full-total', ['large_crosswalk.xlsx'], 'Count all Crosswalk records and total Units.', '2105 records and 2105 Units using query_table; never total the 2000 text snippets.')
+    upload('large_crosswalk.xlsx', 'saved', ['text preview holds the first 200 of 2105 rows', 'heuristic headers'])
+    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; Crosswalk source row 2106, beyond the 200-row text preview. search_documents or a table query finds it.')
+    question('late-sheet', ['large_crosswalk.xlsx'], 'What does LATE-77 mean?', 'Late sheet definition; Late Dictionary row 2.')
+    question('full-total', ['large_crosswalk.xlsx'], 'Count all Crosswalk records and total Units.', '2105 records and 2105 Units using query_table; never total the text preview or search snippets.')
 
     write_workbook(target/'formula_caches.xlsx', [('Calculations', [
         ['Record', 'Quantity', 'Rate', 'Amount'], ['cached', 2, 88, ('B2*C2', 176)],

@@ -51,7 +51,8 @@ def has_content(record):
     if record['tool']=='search_documents':
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
-        return record['parameters']['name'] in {'read_sheet','query_table','join_tables'} and not data.get('table_result',{}).get('error')
+        # Schemas count: they carry value counts and data-quality profiles computed over every row.
+        return record['parameters']['name'] in {'get_sheet_schema','read_sheet','query_table','join_tables'} and not data.get('table_result',{}).get('error')
     return False
 
 

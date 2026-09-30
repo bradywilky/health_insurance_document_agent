@@ -1,5 +1,6 @@
 """Document ingestion and optional persistence for selected document Q&A."""
 from backend.shared.models import Document
+from backend.shared.rows import narrative_rows, row_location, row_text
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -10,6 +11,7 @@ from tempfile import TemporaryDirectory
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 200
 MAX_BLOCKS = 2000
+TABLE_PREVIEW_ROWS = 200  # per data sheet; full rows stay searchable through the CSV
 SUPPORTED = {'.pdf', '.docx', '.xlsx', '.xls', '.csv', '.txt', '.md'}
 
 
@@ -94,17 +96,21 @@ def _populate_table_document(doc):
         doc.table_metadata = json.load(stream)
     for sheet, meta in doc.table_metadata['sheets'].items():
         frame = load_table(**doc.table_inputs, sheet_name=sheet, sheet_meta=meta)
-        for i, row in frame.iterrows():
-            source = meta.get('source_rows', [])
-            location = {'sheet':sheet, 'csv_record':int(i)+1}
-            if meta.get('sheet_type') == 'metadata' and 'source_row' in row:
-                location['row'] = int(row['source_row'])
-            elif i < len(source):
-                location['row'] = source[i]
-            _add_text(doc, '; '.join(f'{col}: {value}' for col,value in row.items()), location)
+        if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
+            # Narrative sheets are indexed in full, one block per sheet row (not per cell).
+            for number, text in narrative_rows(frame):
+                _add_text(doc, text, {'sheet': sheet, 'row': number})
+            continue
+        # Data sheets get a text preview; search_documents and table tools read every row from the CSV.
+        preview = frame if meta.get('sheet_type') == 'metadata' else frame.head(TABLE_PREVIEW_ROWS)
+        for i, row in preview.iterrows():
+            _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
+        if len(preview) < len(frame):
+            doc.warnings.append(f'{sheet}: text preview holds the first {len(preview)} of {len(frame)} rows. '
+                                'search_documents and table tools read all rows.')
         for row in meta.get('context_rows', []):
             _add_text(doc, ' | '.join(row['values']), {'sheet':sheet, 'row':row['source_row']})
-    doc.warnings.append('Spreadsheet ingestion uses heuristic headers; inspect ambiguous layouts. Formulas need cached values. Text retrieval is not an exhaustive table calculation.')
+    doc.warnings.append('Spreadsheet ingestion uses heuristic headers; inspect ambiguous layouts. Formulas need cached values. Use table tools, not text snippets, for counts and totals.')
 
 
 def document_from_table_inputs(*, s3_client, s3_bucket, s3_prefix, plan_domain, filename):

@@ -41,7 +41,9 @@ class LLM:
             self._client = session.client('bedrock-runtime',
                 region_name=os.getenv('AWS_REGION') or session.region_name or 'us-east-1',
                 config=Config(connect_timeout=10, read_timeout=180,
-                              retries={'mode':'standard', 'total_max_attempts':3}))
+                              # Adaptive mode slows down under throttling; shared accounts hit rate limits.
+                              retries={'mode':'adaptive',
+                                       'total_max_attempts':int(os.getenv('BEDROCK_MAX_ATTEMPTS', '6'))}))
         request = dict(modelId=self.model_id, system=[{'text':system}],
                        messages=messages, inferenceConfig=self.params)
         if tool_config is not None:

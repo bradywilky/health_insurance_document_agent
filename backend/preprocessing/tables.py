@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from backend.preprocessing.profiling import column_quality
+
 
 def _present(value):
     return value is not None and not pd.isna(value) and str(value).strip() != ""
@@ -46,7 +48,8 @@ def _profile(frame):
              "likely_junk": bool(str(col).startswith("Unnamed:") and frame[col].isna().all()),
              "top_values": [{"value": str(v), "count": int(n)}
                             for v, n in frame[col].value_counts().head(8).items()],
-             "value_breakdown_truncated": frame[col].nunique() > 8}
+             "value_breakdown_truncated": frame[col].nunique() > 8,
+             **column_quality(frame[col])}
             for col in frame.columns]
 
 

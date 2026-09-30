@@ -20,7 +20,7 @@ Use a separate test document library/prefix. Upload at most ten files per batch.
 
 | File | Expected upload result | What it exercises |
 | --- | --- | --- |
-| `large_crosswalk.xlsx` | Saved with 2,000-block and spreadsheet warnings | 2,105 records plus a later dictionary sheet; full tables survive text truncation |
+| `large_crosswalk.xlsx` | Saved with 200-row text-preview and spreadsheet warnings | 2,105 records plus a later dictionary sheet; search and table tools read rows beyond the preview |
 | `formula_caches.xlsx` | Saved with spreadsheet warning | Cached 176, missing cache, and cached zero are distinct |
 | `insurance_mappings.xlsx` | Saved with spreadsheet warning | Titles, repeated headers, duplicate headers/records, narrative sheets and source-row mapping |
 | `insurance_claims.csv` | Saved with spreadsheet warning | Leading-zero identifiers, literal NA, missing amount and zero amount |
@@ -45,7 +45,7 @@ Run every question in `questions.json`, selecting only its listed files. Grade t
 
 | Ask | Required behavior |
 | --- | --- |
-| Define F02105 | Find TAILMARKER in Crosswalk source row 2106 using table tools |
+| Define F02105 | Find TAILMARKER in Crosswalk source row 2106 by search or table query |
 | Define LATE-77 | Inspect Late Dictionary and return “Late sheet definition” |
 | Count records and total Units | Compute 2,105 for each using `query_table`; do not count text snippets |
 | Complete total of saved Amount | Known cached total 176; one value unavailable; zero is a real value. Do not call 176 complete |

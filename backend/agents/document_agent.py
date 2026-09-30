@@ -33,6 +33,10 @@ Tools:
   read_sheet parameters: {"sheet_name":"name","offset":0,"limit":50}.
   query_table: {"sheet_name":"name","filters":[{"column":"name","op":"eq","value":"value"}],"select":["column"],"group_by":["column"],"aggregations":[{"column":"numeric","op":"sum","as":"total"}],"limit":50}.
   select and aggregations cannot be combined; optional fields may be omitted. Filter ops: eq,ne,gt,ge,lt,le,in,contains,is_null,not_null. Aggregates: sum,mean,min,max,count,nunique,count_rows.
+  recode (applied before filters and grouping): [{"column":"city","map":{"THR":"Tehran","tehr@n":"Tehran"}}]
+  maps exact column values to one value, or to null ({"nan":null}) for text missing markers.
+  Several tabs at once: use "sheet_names": ["*"] (all data sheets) or a list instead of sheet_name. Rows gain
+  _sheet and _source_row; sheets lacking a referenced column are skipped and listed; group_by ["_sheet"] counts per tab.
   join_tables joins two sheets WITHIN this selected file: {"left_sheet":"name","right_sheet":"name","left_on":["key"],"right_on":["key"],"how":"left","relationship":"many_to_one","left_filters":[],"right_filters":[],"query":{}}. Duplicate right keys block many_to_one joins. Do not bypass diagnostics to force a total.
   Generated code execution is not available in this application.
 - calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
@@ -52,6 +56,16 @@ Use query_table for totals, not partial search snippets. Never repeat an identic
 Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
 and date arithmetic or comparisons with date_calculate, before calling answer.
 Extraction warnings describe real coverage limits. A missing search hit does not prove a fact is absent.
+Spreadsheet data quality: column_hints and get_sheet_schema list all_values, possible_variant_groups
+(spellings that may be one entity), possible_missing_markers and possible_placeholder_values. Before filtering or
+grouping a text column, check its values. When variants plausibly name the same entity, combine them with recode
+(or an "in" list) in the same query, and also note the exact-match figure. Treat text markers such as "nan" as
+possibly missing. Read filter_diagnostics and notes in every table result and fix the query when they apply.
+For "which X" questions use group_by X with count_rows, never a partial row list.
+When the tab holding an item is unknown, or a question spans tabs (totals, lookups, "is X listed"), query all
+sheets at once with "sheet_names": ["*"]. Never conclude an item is absent after checking only some tabs.
+frequent_values shows status words (e.g. "Out of Scope") stored inside name columns; filter on them, not is_null.
+Narrative tabs (about, assumptions, version history) explain statuses and changes; read them for "what does X mean".
 For spreadsheets with truncated text, use table tools to inspect later rows and other sheets.
 Do not treat missing formula caches as zero or claim that extracted Word body text covers headers,
 footers, text boxes or tracked changes. Do not invent PDF pages or Word page citations.
@@ -159,7 +173,9 @@ def node_tools(state: DocumentState) -> dict:
                 if len(state['actions']) != 1:
                     raise ValueError('Call answer alone on the next turn after reviewing tool results.')
                 if not any(has_content(e) for e in evidence):
-                    raise ValueError('Retrieve supporting passages or records before finishing.')
+                    raise ValueError('Retrieve supporting passages or records before finishing. The document '
+                                     'index is not evidence: use get_sheet_schema for column profiles, '
+                                     'query_table for records, or read_document/search_documents for text.')
                 unexamined = _unexamined(state['docs'], evidence)
                 if unexamined and not coverage_prompted:
                     # One coverage prompt; a second answer is accepted and the gap is disclosed.
@@ -235,7 +251,11 @@ State each amount once and consistently. Never say the insurer "will pay" an amo
 amounts and estimates exactly that, and say what a final payment would additionally require.
 Documents under unexamined_documents were not read: never say they lack information.
 Do not make an automatic operational decision. State source rules and supported calculations, and flag unresolved interpretation.
-Do not add hypothetical limitations that are not present in evidence.'''
+Do not add hypothetical limitations that are not present in evidence.
+When a table result used recode, state which original values were combined. When exact matching left similar
+spellings out (filter_diagnostics), say so and give their counts. Mention possible placeholder values (e.g. -999999)
+that affect a total, and text missing markers counted or excluded. When notes say several rows disagree,
+report every version with its tab and row instead of choosing one. Cite tab names and row numbers (_source_row).'''
 
 
 def node_synthesize(state: DocumentState) -> dict:

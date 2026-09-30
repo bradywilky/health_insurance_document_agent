@@ -57,11 +57,13 @@ def test_pack_upload_outcomes_and_warning_persistence(pack, library):
 def test_truncated_workbook_retains_late_rows_sheets_and_complete_totals(pack, library):
     uploaded = load_file(pack, 'large_crosswalk.xlsx', library)
     doc = library.load(uploaded.storage_ref['manifest_key'])
-    assert len(doc.blocks) == 2000
-    assert not search_documents({doc.id: doc}, 'TAILMARKER')['matches']
+    # 200 preview rows for the large data sheet plus the one-row late sheet.
+    assert len(doc.blocks) == 201
+    hit = search_documents({doc.id: doc}, 'TAILMARKER')['matches'][0]
+    assert hit['location'] == {'sheet': 'Crosswalk', 'csv_record': 2105, 'row': 2106}
     tail = query(doc, 'Crosswalk', filters=[{'column': 'Field ID', 'op': 'eq', 'value': 'F02105'}])
     assert tail['table_result']['rows'][0]['Definition'] == 'TAILMARKER'
-    assert any('2000' in w for w in tail['warnings'])
+    assert any('first 200 of 2105 rows' in w for w in tail['warnings'])
     assert query(doc, 'Late Dictionary')['table_result']['rows'][0]['Meaning'] == 'Late sheet definition'
     totals = query(doc, 'Crosswalk', aggregations=[{'op': 'count_rows', 'as': 'records'},
                    {'column': 'Units', 'op': 'sum', 'as': 'units'}])['table_result']
@@ -100,8 +102,8 @@ def test_table_only_answer_receives_extraction_warnings(pack, native_script):
         {'tool': 'answer', 'parameters': {}}, 'Definition: TAILMARKER [E1].'])
     result = run_document_agent({doc.id: doc}, [doc.id], 'Define F02105')
     payload = json.loads(requests[-1]['messages'][0]['content'][0]['text'])
-    assert any('2000 text blocks' in w for w in payload['limitations'])
-    assert any('2000 text blocks' in w for w in result['limitations'])
+    assert any('text preview holds the first 200' in w for w in payload['limitations'])
+    assert any('text preview holds the first 200' in w for w in result['limitations'])
     assert result['evidence'][0]['data']['table_result']['rows'][0]['Definition'] == 'TAILMARKER'
 
 

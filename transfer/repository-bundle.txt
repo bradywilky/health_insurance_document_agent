@@ -1,6 +1,6 @@
 REPOSITORY-TEXT-BUNDLE-V1
 ===== REPOSITORY FILE =====
-{"path": ".env.example", "characters": 604, "sha256": "7c1826d6a8429bafeafddf4d9261567733409d8fec73bb7d57dfa820128b19b6"}
+{"path": ".env.example", "characters": 711, "sha256": "130b91147866fb63c18461c2306de04f5c261d72b8820bd63b9b23f331ee2890"}
 # Replace with your own local profile name. Never add credentials here.
 AWS_PROFILE=dev-profile
 AWS_DEFAULT_REGION=us-east-1
@@ -8,6 +8,8 @@ TABLES_MODEL=maverick
 # Optional deployment-specific inference profile ID or ARN:
 # BEDROCK_MODEL_ID=
 BEDROCK_MAX_TOKENS=4096
+# Attempts per Bedrock call, including retries after throttling (adaptive backoff).
+BEDROCK_MAX_ATTEMPTS=6
 
 # Choose local for development or s3 for persistent uploads.
 DOCUMENTS_STORAGE=local
@@ -83,7 +85,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 29833, "sha256": "6ea47d63b966a7868378a914d3fe347ecceb5a905bf5e8283cab6329e34e59d6"}
+{"path": "README.md", "characters": 33835, "sha256": "38d5587fd280e6006aae112145be52ff9c29fa1aae75ecd8094dfc2a7b9fff5a"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama Maverick/Scout or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
@@ -460,6 +462,59 @@ unread amendments, and answers stating what the insurer "will pay".
 Results include `protocol` counters (`coverage_prompts`, `auto_reads`, `calculation_prompts`,
 `answer_revisions`) and `coverage` (`examined`, `auto_read`, `unexamined`).
 
+## Messy spreadsheets
+
+Real exports often spell one value several ways (`Tehran`, `THR`, `tehr@n`), store missing data as text
+(`nan`, `null`), and use sentinel numbers (`-999999`). Exact filters then undercount silently.
+
+- **Profiling** (`backend/preprocessing/profiling.py`). Each column's metadata adds `all_values` (for up to
+  30 distinct values), `possible_variant_groups`, `possible_missing_markers` (`nan`, `null`, `none`, `n/a`, ...;
+  not `NA`, which is often a real code), `possible_placeholder_values` (repeated all-9s numbers such as
+  -999999), and `min`/`max`/`negative_count`. Grouping is conservative: values match after ignoring case,
+  spaces and punctuation, by dropped letters (Vsa/Visa, fail/failed), or as an all-caps abbreviation (THR).
+  Substitutions are never grouped, so Medicare/Medicaid, Male/Female and Plan A/Plan B stay separate.
+  These are suggestions; the exported CSVs keep every original value. The planner receives them as
+  `column_hints` in the document summary.
+- **Table tools** (`backend/tools/table_operations.py`). `query_table` accepts `recode`, applied before
+  filters and grouping: `[{"column":"city","map":{"THR":"Tehran","nan":null}}]` or the grouped form
+  `{"Tehran":["THR","tehr@n"]}`. Numeric columns only recode to null (e.g. to exclude a sentinel). Numeric
+  filters accept numbers written as text. Results include `filter_diagnostics` (similar spellings an exact
+  filter excluded; text missing markers an `is_null` filter missed) and `notes` (truncated row lists;
+  totals that include placeholder numbers).
+- **Large sheets.** Data sheets keep a 200-row text preview (`TABLE_PREVIEW_ROWS`); narrative sheets are
+  indexed in full. `search_documents` scans every row of every data sheet from the saved CSV, so the
+  preview does not limit search. The 2,000-block cap now applies only to PDF, Word and text content.
+
+The planner is told to check column hints, combine plausible variants with `recode` while still
+reporting the exact-match figure, and to use `group_by` for "which X" questions. The writer states
+which values were combined and mentions placeholders that affect totals.
+
+## Multi-tab mapping workbooks
+
+Attribute-mapping workbooks (one tab per subject area, plus about/assumptions/version tabs) need
+answers that span tabs and surface conflicting rows.
+
+- **Cross-tab queries.** `query_table` accepts `"sheet_names": ["*"]` (all data tabs) or a list in place
+  of `sheet_name`. Tabs sharing the referenced columns are stacked; rows gain `_sheet` and `_source_row`,
+  and `group_by: ["_sheet"]` counts per tab. Tabs lacking a column are skipped and listed. A single-tab
+  query that matches nothing names the other tabs with the same columns, so "not in the workbook" is
+  only concluded after checking every tab.
+- **Status words inside name columns.** Columns too varied to list in full get `frequent_values`
+  (e.g. `Out of Scope`, `Yet To Be Determined` in a column of field names).
+- **Diagnostics.** A text filter that matches nothing reports other columns where the value occurs
+  (`value_found_in_columns`). When rows share an identifier-like key (at least 10 distinct values,
+  mostly unique) but disagree elsewhere, `notes` says so and the writer reports every version with
+  its tab and row.
+- **Narrative tabs** are indexed, read (`read_sheet`) and queried (`query_table` on `text`) as one line
+  per sheet row. A small table inside a narrative tab (revision log, sign-offs) is rebuilt from its
+  header row, e.g. `Date: 2026-02-12; Version: 18; Author: ...`.
+- **Variant detection is limited to category-like columns** (at most 50 distinct values or 20%
+  distinct, short values). It never groups values that differ by an added word (`Account - Date` /
+  `Account - End Date`) or, in multi-word names, by a word extended at either end (`Pack` / `Package`).
+
+Bedrock calls use adaptive retries (`BEDROCK_MAX_ATTEMPTS`, default 6) so concurrent users sharing an
+account back off under throttling instead of failing.
+
 ===== REPOSITORY FILE =====
 {"path": "apps/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
@@ -725,7 +780,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 20433, "sha256": "60bd001de88ecfaed43b0e6c6a834e2c84fef60f203ce1aa31d1bb268caef5b0"}
+{"path": "backend/agents/document_agent.py", "characters": 22614, "sha256": "8a4a24ef0dc6e7933b8b67c628dc2a3557b2a15652c7f7d21633855aff671e0b"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import re
 
@@ -761,6 +816,10 @@ Tools:
   read_sheet parameters: {"sheet_name":"name","offset":0,"limit":50}.
   query_table: {"sheet_name":"name","filters":[{"column":"name","op":"eq","value":"value"}],"select":["column"],"group_by":["column"],"aggregations":[{"column":"numeric","op":"sum","as":"total"}],"limit":50}.
   select and aggregations cannot be combined; optional fields may be omitted. Filter ops: eq,ne,gt,ge,lt,le,in,contains,is_null,not_null. Aggregates: sum,mean,min,max,count,nunique,count_rows.
+  recode (applied before filters and grouping): [{"column":"city","map":{"THR":"Tehran","tehr@n":"Tehran"}}]
+  maps exact column values to one value, or to null ({"nan":null}) for text missing markers.
+  Several tabs at once: use "sheet_names": ["*"] (all data sheets) or a list instead of sheet_name. Rows gain
+  _sheet and _source_row; sheets lacking a referenced column are skipped and listed; group_by ["_sheet"] counts per tab.
   join_tables joins two sheets WITHIN this selected file: {"left_sheet":"name","right_sheet":"name","left_on":["key"],"right_on":["key"],"how":"left","relationship":"many_to_one","left_filters":[],"right_filters":[],"query":{}}. Duplicate right keys block many_to_one joins. Do not bypass diagnostics to force a total.
   Generated code execution is not available in this application.
 - calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
@@ -780,6 +839,16 @@ Use query_table for totals, not partial search snippets. Never repeat an identic
 Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
 and date arithmetic or comparisons with date_calculate, before calling answer.
 Extraction warnings describe real coverage limits. A missing search hit does not prove a fact is absent.
+Spreadsheet data quality: column_hints and get_sheet_schema list all_values, possible_variant_groups
+(spellings that may be one entity), possible_missing_markers and possible_placeholder_values. Before filtering or
+grouping a text column, check its values. When variants plausibly name the same entity, combine them with recode
+(or an "in" list) in the same query, and also note the exact-match figure. Treat text markers such as "nan" as
+possibly missing. Read filter_diagnostics and notes in every table result and fix the query when they apply.
+For "which X" questions use group_by X with count_rows, never a partial row list.
+When the tab holding an item is unknown, or a question spans tabs (totals, lookups, "is X listed"), query all
+sheets at once with "sheet_names": ["*"]. Never conclude an item is absent after checking only some tabs.
+frequent_values shows status words (e.g. "Out of Scope") stored inside name columns; filter on them, not is_null.
+Narrative tabs (about, assumptions, version history) explain statuses and changes; read them for "what does X mean".
 For spreadsheets with truncated text, use table tools to inspect later rows and other sheets.
 Do not treat missing formula caches as zero or claim that extracted Word body text covers headers,
 footers, text boxes or tracked changes. Do not invent PDF pages or Word page citations.
@@ -887,7 +956,9 @@ def node_tools(state: DocumentState) -> dict:
                 if len(state['actions']) != 1:
                     raise ValueError('Call answer alone on the next turn after reviewing tool results.')
                 if not any(has_content(e) for e in evidence):
-                    raise ValueError('Retrieve supporting passages or records before finishing.')
+                    raise ValueError('Retrieve supporting passages or records before finishing. The document '
+                                     'index is not evidence: use get_sheet_schema for column profiles, '
+                                     'query_table for records, or read_document/search_documents for text.')
                 unexamined = _unexamined(state['docs'], evidence)
                 if unexamined and not coverage_prompted:
                     # One coverage prompt; a second answer is accepted and the gap is disclosed.
@@ -963,7 +1034,11 @@ State each amount once and consistently. Never say the insurer "will pay" an amo
 amounts and estimates exactly that, and say what a final payment would additionally require.
 Documents under unexamined_documents were not read: never say they lack information.
 Do not make an automatic operational decision. State source rules and supported calculations, and flag unresolved interpretation.
-Do not add hypothetical limitations that are not present in evidence.'''
+Do not add hypothetical limitations that are not present in evidence.
+When a table result used recode, state which original values were combined. When exact matching left similar
+spellings out (filter_diagnostics), say so and give their counts. Mention possible placeholder values (e.g. -999999)
+that affect a total, and text missing markers counted or excluded. When notes say several rows disagree,
+report every version with its tab and row instead of choosing one. Cite tab names and row numbers (_source_row).'''
 
 
 def node_synthesize(state: DocumentState) -> dict:
@@ -1072,7 +1147,7 @@ def run_document_agent_stream(documents, document_ids, question, *, history=None
                        ('steps', 'finished', 'stats', 'limitations') if k in update}}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_protocol.py", "characters": 4118, "sha256": "7b6cf12360dc8cb0b58c7690677203d14b921de7754a792dd97d4de79927cd08"}
+{"path": "backend/agents/document_protocol.py", "characters": 4237, "sha256": "cb4aadd95df5b74b2738fc1e48702f897bbc405483761799ab2d4b74c020deb6"}
 """Document tool schemas, evidence eligibility and source coverage."""
 
 SOURCE = {'type':'string', 'pattern':'^(E[0-9]+|question)$'}
@@ -1126,7 +1201,8 @@ def has_content(record):
     if record['tool']=='search_documents':
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
-        return record['parameters']['name'] in {'read_sheet','query_table','join_tables'} and not data.get('table_result',{}).get('error')
+        # Schemas count: they carry value counts and data-quality profiles computed over every row.
+        return record['parameters']['name'] in {'get_sheet_schema','read_sheet','query_table','join_tables'} and not data.get('table_result',{}).get('error')
     return False
 
 
@@ -1196,7 +1272,7 @@ def numeric_display_check(answer, evidence):
     return answer
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/llm.py", "characters": 2943, "sha256": "7f771dc4d0c9b6b4398f9ec4f3996f4928d60511e0b6570c02c89605a4d3b659"}
+{"path": "backend/agents/llm.py", "characters": 3132, "sha256": "0c397d9958c6c606d261057a0734448eb786d9ccc0eaf7a7fc014605f9ac11d2"}
 import time
 import os
 from botocore.config import Config
@@ -1240,7 +1316,9 @@ class LLM:
             self._client = session.client('bedrock-runtime',
                 region_name=os.getenv('AWS_REGION') or session.region_name or 'us-east-1',
                 config=Config(connect_timeout=10, read_timeout=180,
-                              retries={'mode':'standard', 'total_max_attempts':3}))
+                              # Adaptive mode slows down under throttling; shared accounts hit rate limits.
+                              retries={'mode':'adaptive',
+                                       'total_max_attempts':int(os.getenv('BEDROCK_MAX_ATTEMPTS', '6'))}))
         request = dict(modelId=self.model_id, system=[{'text':system}],
                        messages=messages, inferenceConfig=self.params)
         if tool_config is not None:
@@ -1363,9 +1441,10 @@ def get_model_config(alias="UNALIASED"):
 """Preprocessing components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/preprocessing/documents.py", "characters": 6340, "sha256": "7cec95436aae5f772e25ab539cec3501836005e8f1fee12a6f17ed1b6948828e"}
+{"path": "backend/preprocessing/documents.py", "characters": 6950, "sha256": "b9f5e9a977722d1811ec1fc036c203302340a595fd814d841455b6da51fb4907"}
 """Document ingestion and optional persistence for selected document Q&A."""
 from backend.shared.models import Document
+from backend.shared.rows import narrative_rows, row_location, row_text
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -1376,6 +1455,7 @@ from tempfile import TemporaryDirectory
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 200
 MAX_BLOCKS = 2000
+TABLE_PREVIEW_ROWS = 200  # per data sheet; full rows stay searchable through the CSV
 SUPPORTED = {'.pdf', '.docx', '.xlsx', '.xls', '.csv', '.txt', '.md'}
 
 
@@ -1460,17 +1540,21 @@ def _populate_table_document(doc):
         doc.table_metadata = json.load(stream)
     for sheet, meta in doc.table_metadata['sheets'].items():
         frame = load_table(**doc.table_inputs, sheet_name=sheet, sheet_meta=meta)
-        for i, row in frame.iterrows():
-            source = meta.get('source_rows', [])
-            location = {'sheet':sheet, 'csv_record':int(i)+1}
-            if meta.get('sheet_type') == 'metadata' and 'source_row' in row:
-                location['row'] = int(row['source_row'])
-            elif i < len(source):
-                location['row'] = source[i]
-            _add_text(doc, '; '.join(f'{col}: {value}' for col,value in row.items()), location)
+        if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
+            # Narrative sheets are indexed in full, one block per sheet row (not per cell).
+            for number, text in narrative_rows(frame):
+                _add_text(doc, text, {'sheet': sheet, 'row': number})
+            continue
+        # Data sheets get a text preview; search_documents and table tools read every row from the CSV.
+        preview = frame if meta.get('sheet_type') == 'metadata' else frame.head(TABLE_PREVIEW_ROWS)
+        for i, row in preview.iterrows():
+            _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
+        if len(preview) < len(frame):
+            doc.warnings.append(f'{sheet}: text preview holds the first {len(preview)} of {len(frame)} rows. '
+                                'search_documents and table tools read all rows.')
         for row in meta.get('context_rows', []):
             _add_text(doc, ' | '.join(row['values']), {'sheet':sheet, 'row':row['source_row']})
-    doc.warnings.append('Spreadsheet ingestion uses heuristic headers; inspect ambiguous layouts. Formulas need cached values. Text retrieval is not an exhaustive table calculation.')
+    doc.warnings.append('Spreadsheet ingestion uses heuristic headers; inspect ambiguous layouts. Formulas need cached values. Use table tools, not text snippets, for counts and totals.')
 
 
 def document_from_table_inputs(*, s3_client, s3_bucket, s3_prefix, plan_domain, filename):
@@ -1488,7 +1572,174 @@ def document_from_table_inputs(*, s3_client, s3_bucket, s3_prefix, plan_domain, 
     return doc
 
 ===== REPOSITORY FILE =====
-{"path": "backend/preprocessing/tables.py", "characters": 7838, "sha256": "d1db762dcea6fc53bf908b34cee3cb3bd18c41571ff4a6d2ba98f456945bcced"}
+{"path": "backend/preprocessing/profiling.py", "characters": 7277, "sha256": "a948b29ec4dac538ea5c41019041d684b3d2cc76abd9ff5b05e64ba99bec578c"}
+"""Column data-quality hints: possible spelling variants, missing markers and placeholder numbers.
+
+Everything here is a suggestion for the agent to verify and disclose. Nothing is merged or
+converted; the exported CSVs keep every original value.
+"""
+import re
+
+import pandas as pd
+
+MAX_VARIANT_DISTINCT = 200  # skip free-text / identifier-like columns
+ALL_VALUES_DISTINCT = 30    # list every value for low-cardinality columns
+CATEGORICAL_DISTINCT = 50   # variant checks run on columns with few distinct values (or <= 20% distinct)
+# "NA" is excluded on purpose: it is often a real code (e.g. "not applicable").
+MISSING_MARKERS = {'nan', 'null', 'none', 'nil', 'n/a', '#n/a', 'missing', '(blank)'}
+
+
+def normalize_key(value):
+    """Case-, space- and punctuation-insensitive comparison key."""
+    return re.sub(r'[^0-9a-z]+', '', str(value).casefold())
+
+
+def _subsequence(short, long):
+    rest = iter(long)
+    return all(ch in rest for ch in short)
+
+
+def _similar(raw_a, raw_b):
+    """True when two values plausibly name the same thing.
+
+    Deliberately conservative: only case/space/punctuation differences, or dropped letters
+    (Vsa/Visa, tehr@n/Tehran, fail/failed). Substitutions are never grouped, because pairs
+    such as Medicare/Medicaid, Male/Female and Dental/Rental are different things.
+    """
+    a, b = normalize_key(raw_a), normalize_key(raw_b)
+    if a == b:
+        return True
+    (short, raw_short), (long, raw_long) = sorted([(a, raw_a), (b, raw_b)], key=lambda p: len(p[0]))
+    if len(short) < 3 or short.isdigit() or len(long) - len(short) > 3 or short[0] != long[0]:
+        return False
+    # A separate qualifier word (Medicaid / Medicaid A, Premium / Premium Plus) is a different value.
+    if str(raw_long).strip().casefold().startswith(str(raw_short).strip().casefold() + ' '):
+        return False
+    if re.sub(r'\d', '', a) == re.sub(r'\d', '', b):  # Tier 1 / Tier 10
+        return False
+    fewer, more = sorted([_words(raw_a), _words(raw_b)], key=len)
+    # An added whole word makes a different element (Account - Date / Account - End Date).
+    if len(fewer) < len(more) and _subsequence(fewer, more):
+        return False
+    # In multi-word names, a word extended at either end is a different term (Pack / Package Amount).
+    # Mid-word typos (Acount / Account) and single words (fail / failed) are still grouped.
+    if len(fewer) == len(more) >= 2:
+        changed = [(x, y) for x, y in zip(fewer, more) if x != y]
+        if len(changed) == 1:
+            x, y = sorted(changed[0], key=len)
+            if y.startswith(x) or y.endswith(x):
+                return False
+    return _subsequence(short, long)
+
+
+def _words(raw):
+    return re.findall(r'[0-9a-z]+', str(raw).casefold())
+
+
+def _abbreviation(raw, key, other):
+    """All-caps codes such as THR whose letters appear in order in a longer value's key."""
+    if not (2 <= len(key) <= 4 and str(raw).strip().isupper() and len(other) > len(key) + 1):
+        return False
+    if key[0] != other[0]:
+        return False
+    return _subsequence(key, other)
+
+
+def variant_groups(counts):
+    """Group values (value -> count) that look like spellings of one thing.
+
+    Returns [{'suggested': most frequent value, 'variants': {value: count, ...}}], largest first.
+    """
+    values = [v for v in counts if str(v).strip().casefold() not in MISSING_MARKERS and normalize_key(v)]
+    parent = {v: v for v in values}
+
+    def find(v):
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
+
+    keys = {v: normalize_key(v) for v in values}
+    for i, a in enumerate(values):
+        for b in values[i + 1:]:
+            ka, kb = keys[a], keys[b]
+            if _similar(a, b) or _abbreviation(a, ka, kb) or _abbreviation(b, kb, ka):
+                parent[find(a)] = find(b)
+    groups = {}
+    for v in values:
+        groups.setdefault(find(v), []).append(v)
+    result = []
+    for members in groups.values():
+        if len(members) > 1:
+            # Most frequent first; on ties prefer a trimmed, non-all-caps spelling over a code such as THR.
+            members.sort(key=lambda v: (-counts[v], str(v).isupper(), str(v) != str(v).strip()))
+            result.append({'suggested': members[0], 'variants': {m: int(counts[m]) for m in members}})
+    return sorted(result, key=lambda g: -sum(g['variants'].values()))
+
+
+def placeholder_values(series):
+    """Repeated values made only of 9s (e.g. 999, -999999), a common 'unknown' sentinel."""
+    counts = series.dropna().value_counts()
+    found = {}
+    for value, count in counts.items():
+        digits = format(abs(float(value)), 'f').rstrip('0').rstrip('.')
+        if count > 1 and len(digits) >= 3 and set(digits) == {'9'}:
+            found[str(value)] = int(count)
+    return found
+
+
+def column_quality(series):
+    """Extra profile fields for one column; empty dict when nothing is notable."""
+    notes = {}
+    present = series.dropna()
+    if pd.api.types.is_numeric_dtype(series):
+        if len(present):
+            notes.update(min=str(present.min()), max=str(present.max()),
+                         negative_count=int((present < 0).sum()))
+        placeholders = placeholder_values(series)
+        if placeholders:
+            notes['possible_placeholder_values'] = placeholders
+        return notes
+    counts = present.value_counts()
+    markers = {str(v): int(n) for v, n in counts.items() if str(v).strip().casefold() in MISSING_MARKERS}
+    if markers:
+        notes['possible_missing_markers'] = markers
+    # Only category-like columns: name lists and free-text definitions are mostly unique, and their
+    # near-duplicates are usually distinct entries rather than misspellings.
+    categorical = len(counts) <= CATEGORICAL_DISTINCT or len(counts) <= 0.2 * len(present)
+    short_values = counts.index.map(lambda v: len(str(v))).to_series().mean() <= 40 if len(counts) else False
+    if 1 < len(counts) <= MAX_VARIANT_DISTINCT and categorical and short_values:
+        groups = variant_groups({str(v): int(n) for v, n in counts.items()})
+        if groups:
+            notes['possible_variant_groups'] = groups
+    if len(counts) <= ALL_VALUES_DISTINCT:
+        notes['all_values'] = {str(v): int(n) for v, n in counts.items()}
+    else:
+        # Status words inside a column too varied to list in full (e.g. "Out of Scope" in a list of field names).
+        threshold = max(3, 0.02 * len(present))
+        frequent = {str(v): int(n) for v, n in counts.head(8).items() if n >= threshold}
+        if frequent:
+            notes['frequent_values'] = frequent
+    return notes
+
+
+def similar_values(requested, counts):
+    """Values in counts (value -> count) that look like spellings of a requested value but were not requested."""
+    wanted = set(requested)
+    found = {}
+    for value, count in counts.items():
+        if value in wanted or value.strip().casefold() in MISSING_MARKERS:
+            continue
+        for target in wanted:
+            kv, kt = normalize_key(value), normalize_key(target)
+            if kv and kt and (_similar(value, target) or _abbreviation(value, kv, kt)
+                              or _abbreviation(target, kt, kv)):
+                found[value] = count
+                break
+    return found
+
+===== REPOSITORY FILE =====
+{"path": "backend/preprocessing/tables.py", "characters": 7941, "sha256": "b969a6ddb7c35ad3bd5498c523eb1582b1c6732ef7b0d3fe4f8d7595e211ef0a"}
 """Deterministic local preprocessing into the existing per-sheet CSV contract."""
 import argparse
 import csv
@@ -1498,6 +1749,8 @@ import re
 from pathlib import Path
 
 import pandas as pd
+
+from backend.preprocessing.profiling import column_quality
 
 
 def _present(value):
@@ -1537,7 +1790,8 @@ def _profile(frame):
              "likely_junk": bool(str(col).startswith("Unnamed:") and frame[col].isna().all()),
              "top_values": [{"value": str(v), "count": int(n)}
                             for v, n in frame[col].value_counts().head(8).items()],
-             "value_breakdown_truncated": frame[col].nunique() > 8}
+             "value_breakdown_truncated": frame[col].nunique() > 8,
+             **column_quality(frame[col])}
             for col in frame.columns]
 
 
@@ -1663,9 +1917,44 @@ if __name__ == "__main__":
 """Retrieval components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/retrieval/search.py", "characters": 1400, "sha256": "4f22a8d3487b1659c875a429b9886a1c94b8536d8b6544290559f54580d07a56"}
+{"path": "backend/retrieval/search.py", "characters": 2949, "sha256": "0f187d180b765724fcd402a7ad74350e15092561691a7f728d8ea116ba1f0c7c"}
 """Lexical retrieval over selected preprocessed documents."""
+from collections import OrderedDict
 import re
+
+from backend.shared.rows import row_location, row_text
+
+STOP = {'the','a','an','is','are','what','which','of','to','for','in','and','or','does','do','with'}
+_FRAMES = OrderedDict()  # (document id, sheet) -> DataFrame; small LRU so repeat searches are fast
+_FRAME_CACHE_SIZE = 16
+
+
+def _frame(doc, sheet, meta):
+    from backend.storage.tables import load_table
+    key = (doc.id, sheet)
+    if key not in _FRAMES:
+        _FRAMES[key] = load_table(**doc.table_inputs, sheet_name=sheet, sheet_meta=meta)
+        if len(_FRAMES) > _FRAME_CACHE_SIZE:
+            _FRAMES.popitem(last=False)
+    _FRAMES.move_to_end(key)
+    return _FRAMES[key]
+
+
+def _units(doc):
+    """Searchable units: text blocks, plus every row of each table data sheet read from its CSV."""
+    data_sheets = {}
+    if doc.table_inputs and doc.table_metadata:
+        data_sheets = {name: meta for name, meta in doc.table_metadata.get('sheets', {}).items()
+                       if meta.get('sheet_type') != 'metadata'}
+    for block in doc.blocks:
+        location = block.get('location', {})
+        # Preview rows of data sheets are covered by the full-row scan below.
+        if not ('csv_record' in location and location.get('sheet') in data_sheets):
+            yield block
+    for sheet, meta in data_sheets.items():
+        for index, row in _frame(doc, sheet, meta).iterrows():
+            location = row_location(sheet, meta, index, row)
+            yield {'block_id': f"{sheet}!R{location['csv_record']}", 'text': row_text(row), 'location': location}
 
 
 def search_documents(documents, query, *, limit=8):
@@ -1674,22 +1963,22 @@ def search_documents(documents, query, *, limit=8):
         raise ValueError('query must be a nonempty string')
     if type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError('limit must be 1..20')
-    stop = {'the','a','an','is','are','what','which','of','to','for','in','and','or','does','do','with'}
-    terms = set(re.findall(r'[\w]+', query.casefold())) - stop
+    terms = set(re.findall(r'[\w]+', query.casefold())) - STOP
     hits = []
     for doc in documents.values():
-        for block in doc.blocks:
-            text = block['text'].casefold()
+        for unit in _units(doc):
+            text = unit['text'].casefold()
             words = set(re.findall(r'[\w]+', text))
             score = len(terms & words)
             if query.casefold() in text:
                 score += len(terms) + 1
             if score:
-                hits.append({'document_id':doc.id, 'filename':doc.name, **block, 'score':score})
+                hits.append({'document_id':doc.id, 'filename':doc.name, **unit, 'score':score})
     hits.sort(key=lambda hit: (-hit['score'], hit['filename'], hit['block_id']))
     return {'matches':hits[:limit], 'total_matching_blocks':len(hits),
             'truncated':len(hits)>limit,
-            'retrieval_method':'lexical; no semantic matching or inferred policy precedence',
+            'retrieval_method':'lexical over text blocks and all spreadsheet rows; no semantic matching. '
+                               'Use table tools for counts and totals.',
             'warnings':{doc.name:doc.warnings for doc in documents.values() if doc.warnings}}
 
 ===== REPOSITORY FILE =====
@@ -1697,14 +1986,36 @@ def search_documents(documents, query, *, limit=8):
 """Shared components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/shared/metadata.py", "characters": 341, "sha256": "2fdb49949e7a575a05bc1e40dff301570641366a2ca8a03effb62ae32ecb3bc9"}
-"""Compact metadata views for documents and workbook backend.agents."""
+{"path": "backend/shared/metadata.py", "characters": 1353, "sha256": "147e188143f6ea165cdb8c5f19c51cc1228630973e5fd65f0e02bfa6035ee9ba"}
+"""Compact metadata views for documents and workbook agents."""
+
+QUALITY_KEYS = ('possible_variant_groups', 'possible_missing_markers', 'possible_placeholder_values',
+                'all_values', 'frequent_values', 'min', 'max', 'negative_count')
+
+
+def _column_hints(column):
+    """Data-quality hints the planner needs before choosing exact filters."""
+    hints = {key: column[key] for key in QUALITY_KEYS if key in column}
+    # Value lists help with categories; long free-text values stay in get_sheet_schema only.
+    if 'all_values' in hints and sum(len(v) for v in hints['all_values']) > 600:
+        del hints['all_values']
+    if 'possible_variant_groups' in hints:
+        hints['possible_variant_groups'] = {g['suggested']: sorted(g['variants'])
+                                            for g in hints['possible_variant_groups']}
+    return hints
 
 
 def sheet_index(metadata):
-    return {name: {'type': s.get('sheet_type'), 'rows': s.get('row_count'),
-                   'columns': [c['name'] for c in s.get('columns', []) if not c.get('likely_junk')]}
-            for name, s in metadata.get('sheets', {}).items()}
+    index = {}
+    for name, s in metadata.get('sheets', {}).items():
+        columns = [c for c in s.get('columns', []) if not c.get('likely_junk')]
+        entry = {'type': s.get('sheet_type'), 'rows': s.get('row_count'),
+                 'columns': [c['name'] for c in columns]}
+        hints = {c['name']: h for c in columns if (h := _column_hints(c))}
+        if hints:
+            entry['column_hints'] = hints
+        index[name] = entry
+    return index
 
 ===== REPOSITORY FILE =====
 {"path": "backend/shared/models.py", "characters": 761, "sha256": "40f0720952bf234128a0d99923381f0cc824944fe3f2c1e5ae2ae086a624b648"}
@@ -1731,6 +2042,55 @@ class Document:
             from backend.shared.metadata import sheet_index
             result['sheets'] = sheet_index(self.table_metadata)
         return result
+
+===== REPOSITORY FILE =====
+{"path": "backend/shared/rows.py", "characters": 1948, "sha256": "5dbee37ef618754e3b2367ca88a695a7ffd96d79dcbb81de90c97276a0cd6610"}
+"""One text form and source location for a table row, shared by preprocessing and search."""
+import re
+
+MIDNIGHT = re.compile(r"^(\d{4}-\d{2}-\d{2}) 00:00:00$")
+
+
+def row_text(row):
+    return '; '.join(f'{col}: {value}' for col, value in row.items())
+
+
+def narrative_rows(frame):
+    """Rebuild narrative-sheet cells (source_row, source_column, text) into one text line per sheet row.
+
+    A multi-cell row whose columns repeat in the rows below acts as a header, so small embedded
+    tables (revision logs, sign-offs) read as "Date: ...; Version: ...; Author: ...".
+    Yields (source_row, text).
+    """
+    rows = {}
+    for _, cell in frame.iterrows():
+        # Spreadsheet dates arrive as midnight timestamps; show the date alone.
+        text = MIDNIGHT.sub(r'\1', str(cell['text']))
+        rows.setdefault(int(cell['source_row']), {})[int(cell['source_column'])] = text
+    ordered = sorted(rows.items())
+    header = None
+    for position, (number, cells) in enumerate(ordered):
+        columns = sorted(cells)
+        following = ordered[position + 1][1] if position + 1 < len(ordered) else {}
+        if len(cells) < 2:
+            header = None
+            yield number, cells[columns[0]]
+        elif header and set(cells) <= set(header):
+            yield number, '; '.join(f'{header[c]}: {cells[c]}' for c in columns)
+        else:
+            # A new header only when the next row uses the same columns; otherwise plain text.
+            header = cells if following and set(following) <= set(cells) else None
+            yield number, ' | '.join(cells[c] for c in columns)
+
+
+def row_location(sheet, meta, index, row):
+    location = {'sheet': sheet, 'csv_record': int(index) + 1}
+    source = meta.get('source_rows', [])
+    if meta.get('sheet_type') == 'metadata' and 'source_row' in row:
+        location['row'] = int(row['source_row'])
+    elif index < len(source):
+        location['row'] = source[index]
+    return location
 
 ===== REPOSITORY FILE =====
 {"path": "backend/shared/serialization.py", "characters": 669, "sha256": "ac897f1b89c187a69b59b5c23c6c45ac9f2cd9cc5b507fe8b0c43f71df0b3bf6"}
@@ -2272,14 +2632,16 @@ def execute_document_tool(name, params, docs):
     raise ValueError(f'Unknown document tool: {name}')
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/table_operations.py", "characters": 12755, "sha256": "76cff3680a71f5d7b1a248351de6d68937f7e010fa305d9fc4e17ace094c738d"}
+{"path": "backend/tools/table_operations.py", "characters": 20941, "sha256": "67076154fae26514c88611871be81796328721a01354c450bb6e5c9c338b61ec"}
 """Validated, deterministic table operations. No eval or generated Python."""
 from decimal import Decimal, InvalidOperation, localcontext
 
 import pandas as pd
 
+from backend.preprocessing.profiling import MISSING_MARKERS, placeholder_values, similar_values
+
 MAX_JOIN_ROWS = 100_000
-QUERY_KEYS = {'filters', 'select', 'group_by', 'aggregations', 'sort', 'offset', 'limit', 'conversions'}
+QUERY_KEYS = {'filters', 'select', 'group_by', 'aggregations', 'sort', 'offset', 'limit', 'conversions', 'recode'}
 
 
 def _check_keys(params, allowed):
@@ -2296,6 +2658,56 @@ def _columns(frame, names):
     missing = set(names) - set(frame.columns)
     if missing:
         raise ValueError(f'Unknown columns: {sorted(missing)}; available: {list(frame.columns)}')
+
+
+def _coerce(series, value):
+    """Compare numeric columns numerically even when the value arrives as text ("-999999")."""
+    if (pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+            and isinstance(value, str)):
+        try:
+            return float(value.replace(',', '').strip())
+        except ValueError:
+            raise ValueError(f'Column {series.name!r} is numeric; {value!r} is not a number') from None
+    return value
+
+
+def recode(frame, specs):
+    """Apply explicit value mappings (variant -> canonical value, or -> null for missing markers).
+
+    Unmapped values are unchanged. The mapping is part of the request, so it stays auditable.
+    """
+    if not isinstance(specs, list):
+        raise ValueError('recode must be a list')
+    frame = frame.copy()
+    for spec in specs:
+        _check_keys(spec, {'column', 'map'})
+        col, mapping = spec['column'], spec['map']
+        _columns(frame, [col])
+        if not isinstance(mapping, dict) or not mapping:
+            raise ValueError('recode map must be a nonempty object of {"original": "replacement or null"}')
+        if all(isinstance(v, list) for v in mapping.values()):
+            # Also accept the grouped form {"canonical": ["variant", ...]}; it is unambiguous.
+            inverted = {}
+            for target, variants in mapping.items():
+                for variant in variants:
+                    if not isinstance(variant, str) or variant in inverted:
+                        raise ValueError('Grouped recode lists must hold distinct strings')
+                    inverted[variant] = target
+            mapping = inverted
+        elif not all(v is None or isinstance(v, str) for v in mapping.values()):
+            raise ValueError('recode map values must be strings or null, e.g. {"THR": "Tehran", "nan": null}')
+        series = frame[col]
+        if pd.api.types.is_numeric_dtype(series):
+            if any(v is not None for v in mapping.values()):
+                raise ValueError('Numeric recodes may only map values to null')
+            targets = {_coerce(series, k) for k in mapping}
+            frame[col] = series.where(~series.isin(targets))
+        else:
+            unknown = [k for k in mapping if k not in set(series.dropna())]
+            if unknown:
+                raise ValueError(f'recode keys not present in {col!r}: {unknown[:10]}. Use exact values from the column.')
+            frame[col] = series.map(lambda v: mapping.get(v, v) if pd.notna(v) else v).astype('string')
+    return frame
 
 
 def filter_rows(frame, filters):
@@ -2316,11 +2728,11 @@ def filter_rows(frame, filters):
         elif op == 'in':
             if not isinstance(value, list):
                 raise ValueError('in requires a list')
-            mask = series.isin(value)
+            mask = series.isin([_coerce(series, v) for v in value])
         elif op in {'eq', 'ne', 'gt', 'ge', 'lt', 'le'}:
             if value is None:
                 raise ValueError('Use is_null/not_null to filter missing values')
-            mask = getattr(series, op)(value) & series.notna()
+            mask = getattr(series, op)(_coerce(series, value)) & series.notna()
         else:
             raise ValueError(f'Unsupported filter operator: {op}')
         result = result.loc[mask.fillna(False)]
@@ -2365,8 +2777,86 @@ def _aggregate(frame, spec):
     return format(value, 'f')
 
 
+def _text_columns(frame):
+    return [c for c in frame.columns if not pd.api.types.is_numeric_dtype(frame[c]) and not str(c).startswith('_')]
+
+
+def _found_elsewhere(frame, condition):
+    """For a text filter that matches nothing, the other columns where its value does occur."""
+    col, op, value = condition.get('column'), condition.get('op'), condition.get('value')
+    wanted = [str(v).strip().casefold() for v in (value if isinstance(value, list) else [value])]
+    found = {}
+    for other in _text_columns(frame):
+        if other == col:
+            continue
+        values = frame[other].dropna().astype('string').str.strip().str.casefold()
+        mask = (values.str.contains(wanted[0], regex=False) if op == 'contains' else values.isin(wanted))
+        if mask.any():
+            found[other] = int(mask.sum())
+    return found
+
+
+def _filter_diagnostics(frame, filters):
+    """Point out likely spelling variants, missing markers, or a value that sits in another column."""
+    notes = []
+    for condition in filters:
+        col, op, value = condition.get('column'), condition.get('op'), condition.get('value')
+        if col not in frame or pd.api.types.is_numeric_dtype(frame[col]):
+            continue
+        if op in {'eq', 'in', 'contains'} and value is not None and filter_rows(frame, [condition]).empty:
+            elsewhere = _found_elsewhere(frame, condition)
+            if elsewhere:
+                notes.append({'column': col, 'requested': value, 'matched_rows': 0, 'value_found_in_columns': elsewhere,
+                              'message': 'This filter matched nothing in its column, but the value occurs in the '
+                                         'columns listed. Check that the query uses the right column.'})
+        counts = frame[col].dropna().value_counts()
+        if len(counts) > 1000:
+            continue
+        counts = {str(k): int(n) for k, n in counts.items()}
+        if op in {'eq', 'in'}:
+            requested = value if isinstance(value, list) else [value]
+            others = similar_values([str(v) for v in requested], counts)
+            if others:
+                notes.append({'column': col, 'requested': requested, 'similar_values_not_matched': others,
+                              'message': 'Exact matching excluded these similar spellings. If they are the same '
+                                         'entity, use recode or an "in" list, and say so in the answer.'})
+        elif op == 'is_null':
+            markers = {k: n for k, n in counts.items() if k.strip().casefold() in MISSING_MARKERS}
+            if markers:
+                notes.append({'column': col, 'possible_missing_markers': markers,
+                              'message': 'These text values may mean missing but are not null. Include them '
+                                         'with recode (value -> null) or an "in" filter if appropriate.'})
+    return notes
+
+
+def _conflicting_rows(frame, filtered, params):
+    """Rows that share an identifier-like key but disagree elsewhere (e.g. two different mappings).
+
+    Category filters (status = "Partial") naturally return differing rows, so only keys whose values
+    are mostly unique in the full table count.
+    """
+    def identifier_like(col):
+        present = frame[col].dropna()
+        # Enough distinct values to judge, and mostly unique (a list of names or IDs, not a status column).
+        return present.nunique() >= 10 and present.nunique() / len(present) >= 0.5
+    keys = [c['column'] for c in params.get('filters', [])
+            if c.get('op') in {'eq', 'in'} and c.get('column') in filtered and identifier_like(c['column'])]
+    shown = [c for c in (params.get('select') or list(filtered.columns))
+             if c in filtered and not str(c).startswith('_') and c not in keys]
+    notes = []
+    for key in keys[:1]:
+        for value, group in list(filtered.groupby(key, dropna=True))[:5]:
+            if len(group) > 1 and shown:
+                differing = [c for c in shown if group[c].astype('string').nunique(dropna=False) > 1]
+                if differing:
+                    notes.append(f'{len(group)} rows have {key} = {value!r} but disagree in {differing}. '
+                                 'Report every version with its sheet and row; do not pick one silently.')
+    return notes
+
+
 def query_table(frame, params):
     _check_keys(params, QUERY_KEYS)
+    frame = recode(frame, params.get('recode', []))
     filtered = filter_rows(frame, params.get('filters', []))
     conversions = params.get('conversions', [])
     if not isinstance(conversions, list):
@@ -2442,6 +2932,21 @@ def query_table(frame, params):
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('offset must be nonnegative and limit must be 1..100')
     page = result.iloc[offset:offset + limit]
+    notes = _conflicting_rows(frame, filtered, params) if not aggregates else []
+    if len(result) > offset + len(page):
+        notes.append(f'Only {len(page)} of {len(result)} result rows are shown. For distinct values use '
+                     'group_by with count_rows; for totals use aggregations; or page with offset.')
+    placeholders = {}
+    for spec in aggregates:
+        col = spec.get('column')
+        if spec.get('op') in {'sum', 'mean', 'min', 'max'} and col in frame and col in filtered:
+            suspicious = set(placeholder_values(frame[col]))
+            found = {str(k): int(n) for k, n in filtered[col].value_counts().items() if str(k) in suspicious}
+            if found:
+                placeholders[col] = found
+    if placeholders:
+        notes.append(f'Aggregated values include possible placeholder numbers {placeholders}; consider '
+                     'reporting results with and without them (filter ne, or recode to null).')
     # Carry available unit labels alongside numeric projections, even when the model omits them.
     unit_columns = [c for c in filtered if str(c).lower() in {'unit','units','source unit'}]
     unit_context = ({c: [str(v) for v in filtered[c].dropna().unique()[:20]] for c in unit_columns}
@@ -2454,7 +2959,9 @@ def query_table(frame, params):
             'contributing_row_indices': [int(i) for i in filtered.index[:100]],
             'provenance_truncated': len(filtered) > 100,
             'unit_context': unit_context, 'conversions': conversions,
-            'numeric_policy': 'Decimal arithmetic, 38 significant digits; means may repeat. No implicit rounding.'}
+            'numeric_policy': 'Decimal arithmetic, 38 significant digits; means may repeat. No implicit rounding.',
+            'recode': params.get('recode', []),
+            'filter_diagnostics': _filter_diagnostics(frame, params.get('filters', [])), 'notes': notes}
 
 
 def join_tables(left, right, params):
@@ -2516,11 +3023,12 @@ def join_tables(left, right, params):
     return result
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/tables.py", "characters": 7882, "sha256": "184e16deb3825c282c6da11d3d16f87dd1fecaeb258f4ab3a200790d7a8b97d0"}
+{"path": "backend/tools/tables.py", "characters": 13145, "sha256": "46bcffcd6a8a65779bf9f5f2ea9b67d16e0c627a0771993e13b28a34aec0c096"}
 """Deterministic table tools used by the document agent; no agent imports."""
 import logging
 from backend.shared.serialization import sanitize_result
 import pandas as pd
+from backend.shared.rows import narrative_rows
 from backend.storage.tables import load_table
 from backend.tools.table_operations import query_table, join_tables
 
@@ -2536,6 +3044,67 @@ def _source_rows(frame, meta, indices):
     rows = meta.get('source_rows', [])
     return [rows[i] for i in indices if i < len(rows)]
 
+def _load_for_query(load, name, meta):
+    """Narrative tabs are queried as one text line per sheet row, matching read_sheet and search."""
+    frame = load(name)
+    if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
+        lines = list(narrative_rows(frame))
+        frame = pd.DataFrame({'source_row': [n for n, _ in lines], 'text': [t for _, t in lines]})
+        frame['text'] = frame['text'].astype('string')
+    return frame
+
+
+def _referenced_columns(params):
+    names = set(params.get('select', [])) | set(params.get('group_by', []))
+    for key in ('filters', 'aggregations', 'recode', 'sort'):
+        names |= {item.get('column') for item in params.get(key, []) if isinstance(item, dict)}
+    return {n for n in names if n and n not in {'_sheet', '_source_row'}}
+
+
+def _query_many(sheet_names, params, load, sheets):
+    """Run one query over several sheets that share the referenced columns.
+
+    Rows gain _sheet and _source_row so results say where each came from.
+    """
+    names = [n for n, m in sheets.items() if m.get('sheet_type') == 'data'] if sheet_names == ['*'] else sheet_names
+    unknown = [n for n in names if n not in sheets]
+    if unknown or not names:
+        return {'error': f'Unknown sheets {unknown}; use exact names from list_sheets or ["*"] for all data sheets.'}
+    needed = _referenced_columns(params)
+    frames, skipped = [], {}
+    for name in names:
+        frame = load(name)
+        missing = sorted(needed - set(frame.columns))
+        if missing:
+            skipped[name] = f'missing columns {missing}'
+            continue
+        frame = frame.copy()
+        frame.insert(0, '_source_row', _source_rows(frame, sheets[name], range(len(frame))) or [None] * len(frame))
+        frame.insert(0, '_sheet', name)
+        frames.append(frame)
+    if not frames:
+        common = sorted(set.intersection(*[set(load(n).columns) for n in names])) if names else []
+        return {'error': f'No queried sheet has all referenced columns {sorted(needed)}. Columns shared by these '
+                         f'sheets: {common}. The tab name is the virtual column "_sheet" '
+                         '(e.g. group_by ["_sheet"]).', 'skipped_sheets': skipped}
+    combined = pd.concat(frames, ignore_index=True)
+    combined['_sheet'] = combined['_sheet'].astype('string')
+    params = dict(params)
+    if params.get('select') and not params.get('aggregations'):
+        params['select'] = ['_sheet', '_source_row'] + [c for c in params['select'] if c not in {'_sheet', '_source_row'}]
+    result = query_table(combined, params)
+    indices = result.pop('contributing_row_indices') if result['aggregated'] else result['result_row_indices']
+    result.pop('result_row_indices', None)
+    result.pop('contributing_row_indices', None)
+    by_sheet = {}
+    for i in indices:
+        by_sheet.setdefault(combined.at[i, '_sheet'], []).append(combined.at[i, '_source_row'])
+    result['sources'] = [{'sheet': n, 'source_rows': rows} for n, rows in by_sheet.items()]
+    result['sheets_queried'] = [f['_sheet'].iloc[0] for f in frames]
+    result['skipped_sheets'] = skipped
+    return result
+
+
 def execute_table_tool(
     tool_name: str,
     tool_input: dict,
@@ -2550,12 +3119,22 @@ def execute_table_tool(
     sheet_name = tool_input.get("sheet_name")
     sheets = metadata.get("sheets", {})
 
+    if tool_name == "query_table" and "sheet_names" in tool_input:
+        sheet_names = tool_input["sheet_names"]
+        if not isinstance(sheet_names, list) or not all(isinstance(n, str) for n in sheet_names):
+            return {"error": 'sheet_names must be a list of sheet names, or ["*"] for all data sheets.'}
+        def load(name):
+            return load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename, name, sheet_meta=sheets[name])
+        result = _query_many(sheet_names, {k: v for k, v in tool_input.items() if k not in {'sheet_names', 'sheet_name'}},
+                             load, sheets)
+        return sanitize_result(result)
+
     if tool_name in {"read_sheet", "query_table"} and sheet_name not in sheets:
         return {"error": "Provide an exact sheet_name from list_sheets."}
 
     if tool_name == "query_table":
-        df = load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename,
-                      sheet_name, sheet_meta=sheets[sheet_name])
+        df = _load_for_query(lambda name: load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename,
+                                                     name, sheet_meta=sheets[name]), sheet_name, sheets[sheet_name])
         result = query_table(df, {k:v for k,v in tool_input.items() if k != 'sheet_name'})
         indices = result.pop('contributing_row_indices') if result['aggregated'] else result['result_row_indices']
         result.pop('result_row_indices', None)
@@ -2565,6 +3144,14 @@ def execute_table_tool(
                               'csv_record_indices': indices,
                               'row_number_basis': 'CSV indices are zero-based; source rows are one-based'}]
         result['warnings'] = sheets[sheet_name].get('warnings', [])
+        if result['matched_rows'] == 0 and tool_input.get('filters'):
+            needed = _referenced_columns(tool_input)
+            others = [n for n, m in sheets.items() if n != sheet_name and m.get('sheet_type') == 'data'
+                      and needed <= {c['name'] for c in m.get('columns', [])}]
+            if others:
+                result['notes'].append(f'No rows matched in {sheet_name!r}, but {len(others)} other sheets have the '
+                                       f'same columns: {others}. Query them with "sheet_names": ["*"] before '
+                                       'concluding the value is absent.')
 
     elif tool_name == "join_tables":
         left_name, right_name = tool_input.get('left_sheet'), tool_input.get('right_sheet')
@@ -2625,6 +3212,13 @@ def execute_table_tool(
         smeta = sheets[sheet_name]
         df = load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename,
                       sheet_name, sheet_meta=smeta)
+        if smeta.get("sheet_type") == "metadata" and {"source_row", "source_column", "text"} <= set(df.columns):
+            # Narrative sheets read as one line per sheet row, with embedded table headers applied.
+            lines = [{"source_row": number, "text": text} for number, text in narrative_rows(df)]
+            end = min(offset + limit, len(lines))
+            return sanitize_result({"sheet_name": sheet_name, "offset": offset, "total_rows": len(lines),
+                                    "rows": lines[offset:end], "next_offset": end if end < len(lines) else None,
+                                    "warnings": smeta.get("warnings", [])})
         end = min(offset + limit, len(df))
         result = {"sheet_name": sheet_name, "offset": offset, "total_rows": len(df),
                   "rows": df.iloc[offset:end].to_dict(orient="records"),
@@ -2964,7 +3558,7 @@ question-answering acceptance criteria, and commands for offline and live-model 
 Generate it with `python -m development.scripts.make_robustness_samples --output data/robustness`.
 
 ===== REPOSITORY FILE =====
-{"path": "development/fixtures/ROBUSTNESS.md", "characters": 7300, "sha256": "c6c042b91285cdb6298c9fd365edc922c03dd5df1626c0d79b332ec535bd9cbf"}
+{"path": "development/fixtures/ROBUSTNESS.md", "characters": 7332, "sha256": "393b7df3d3d9e9d48c06810e1f0f390afc1549a8b173ea2f4580c8deae35ccde"}
 # Upload and question-answering robustness tests
 
 These are wholly synthetic files that reproduce the VDI warnings without copying private documents. A successful upload means the file was saved, not that every source feature was extracted. Test both the upload result and the answer's evidence/limitations.
@@ -2987,7 +3581,7 @@ Use a separate test document library/prefix. Upload at most ten files per batch.
 
 | File | Expected upload result | What it exercises |
 | --- | --- | --- |
-| `large_crosswalk.xlsx` | Saved with 2,000-block and spreadsheet warnings | 2,105 records plus a later dictionary sheet; full tables survive text truncation |
+| `large_crosswalk.xlsx` | Saved with 200-row text-preview and spreadsheet warnings | 2,105 records plus a later dictionary sheet; search and table tools read rows beyond the preview |
 | `formula_caches.xlsx` | Saved with spreadsheet warning | Cached 176, missing cache, and cached zero are distinct |
 | `insurance_mappings.xlsx` | Saved with spreadsheet warning | Titles, repeated headers, duplicate headers/records, narrative sheets and source-row mapping |
 | `insurance_claims.csv` | Saved with spreadsheet warning | Leading-zero identifiers, literal NA, missing amount and zero amount |
@@ -3012,7 +3606,7 @@ Run every question in `questions.json`, selecting only its listed files. Grade t
 
 | Ask | Required behavior |
 | --- | --- |
-| Define F02105 | Find TAILMARKER in Crosswalk source row 2106 using table tools |
+| Define F02105 | Find TAILMARKER in Crosswalk source row 2106 by search or table query |
 | Define LATE-77 | Inspect Late Dictionary and return “Late sheet definition” |
 | Count records and total Units | Compute 2,105 for each using `query_table`; do not count text snippets |
 | Complete total of saved Amount | Known cached total 176; one value unavailable; zero is a real value. Do not call 176 complete |
@@ -3344,7 +3938,7 @@ DEMO-IMAGING is not listed. No rate for it can be inferred from this schedule. N
 """Scripts components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/scripts/make_robustness_samples.py", "characters": 11862, "sha256": "07615819d41a492497992ae2c52837c5335825c8155c16c554773e455f10ca0d"}
+{"path": "development/scripts/make_robustness_samples.py", "characters": 11894, "sha256": "c1de922387cd5ff8163c35db3bc7a357beb519a6eb0bb90c94f04438c8a88304"}
 """Generate deliberately imperfect, wholly synthetic upload/Q&A fixtures. No AWS calls.
 
 The minimal OOXML writer controls formula caches exactly; do not recalculate these
@@ -3439,10 +4033,10 @@ def create_samples(target):
         ('Crosswalk', [['Field ID', 'Definition', 'Units']] +
          [[f'F{i:05}', 'TAILMARKER' if i == 2105 else f'Synthetic field {i}', 1] for i in range(1, 2106)]),
         ('Late Dictionary', [['Code', 'Meaning'], ['LATE-77', 'Late sheet definition']])])
-    upload('large_crosswalk.xlsx', 'saved', ['2000 text blocks', 'heuristic headers'])
-    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; query Crosswalk table, source row 2106. Text search alone cannot find it.')
-    question('late-sheet', ['large_crosswalk.xlsx'], 'What does LATE-77 mean?', 'Late sheet definition; Late Dictionary row 2. Use table tools beyond the text cutoff.')
-    question('full-total', ['large_crosswalk.xlsx'], 'Count all Crosswalk records and total Units.', '2105 records and 2105 Units using query_table; never total the 2000 text snippets.')
+    upload('large_crosswalk.xlsx', 'saved', ['text preview holds the first 200 of 2105 rows', 'heuristic headers'])
+    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; Crosswalk source row 2106, beyond the 200-row text preview. search_documents or a table query finds it.')
+    question('late-sheet', ['large_crosswalk.xlsx'], 'What does LATE-77 mean?', 'Late sheet definition; Late Dictionary row 2.')
+    question('full-total', ['large_crosswalk.xlsx'], 'Count all Crosswalk records and total Units.', '2105 records and 2105 Units using query_table; never total the text preview or search snippets.')
 
     write_workbook(target/'formula_caches.xlsx', [('Calculations', [
         ['Record', 'Quantity', 'Rate', 'Amount'], ['cached', 2, 88, ('B2*C2', 176)],
@@ -4420,6 +5014,314 @@ def test_failed_replacement_not_listed(tmp_path, monkeypatch):
     assert LocalDocumentStore(tmp_path).list_documents() == []
 
 ===== REPOSITORY FILE =====
+{"path": "development/tests/test_mapping_workbooks.py", "characters": 7657, "sha256": "a57cf0b68d792f5c85ac095320c926c4700585110f098d3440b9c7423d51bcd4"}
+"""Multi-tab attribute-mapping workbooks: cross-tab queries, status words in name columns,
+conflicting duplicate mappings, and narrative tabs with embedded tables. Synthetic data only."""
+from datetime import datetime
+
+import openpyxl
+import pytest
+
+from backend.preprocessing.documents import ingest_document
+from backend.preprocessing.profiling import column_quality, variant_groups
+from backend.retrieval.search import search_documents
+from backend.tools.documents import execute_document_tool
+
+HEADER = ['Legacy Name', 'New Name', 'Cloud Name', 'Definition', 'Notes']
+
+
+def mapping_rows(prefix, count):
+    rows = [[f'{prefix} - Field {i}', f'{prefix} Field {i}', f'{prefix} Field {i}', f'Definition {i}', None]
+            for i in range(count)]
+    for i in range(0, count, 7):
+        rows[i][1:3] = ['Out of Scope', 'Out of Scope']
+        rows[i][4] = 'Not populated in the new system.'
+    return rows
+
+
+@pytest.fixture(scope='module')
+def workbook(tmp_path_factory):
+    wb = openpyxl.Workbook()
+    history = wb.active
+    history.title = 'Version History'
+    history['A2'] = 'Mapping Workbook Title'
+    history['A4'] = 'Revision History'
+    history.append(['Date', 'Version', 'Description', 'Author'])
+    history.append([datetime(2026, 1, 5), 3, 'Added Billing tab', 'Dana Park'])
+    history.append([datetime(2026, 3, 9), 4, 'Removed retired fields', 'Lee Ortiz'])
+    assumptions = wb.create_sheet('Assumptions')
+    assumptions.append(['Pending means availability is still being confirmed.'])
+    for name, prefix, count in [('Billing', 'Invoice', 40), ('Shipping', 'Parcel', 45)]:
+        sheet = wb.create_sheet(name)
+        sheet.append(HEADER)
+        for row in mapping_rows(prefix, count):
+            sheet.append(row)
+    shipping = wb['Shipping']
+    shipping.append(['Invoice - Field 3', 'Invoice Field 3', 'Invoice Field 3', 'Definition 3', None])
+    shipping.append(['Parcel - Field 2', 'Pending', 'Pending', 'Definition 2', 'Availability being confirmed.'])
+    areas = wb.create_sheet('Subject Areas')
+    areas.append(['Area', 'Cloud', 'Wave'])
+    areas.append(['Billing', 'Available', 'Wave 1'])
+    areas.append(['Shipping', 'Partial', 'Wave 2'])
+    areas.append(['Returns', 'Partial', 'Wave 2'])
+    path = tmp_path_factory.mktemp('mapping') / 'mapping.xlsx'
+    wb.save(path)
+    return ingest_document(path.name, path.read_bytes())
+
+
+def query(doc, **params):
+    return execute_document_tool('table_tool', {'document_id': doc.id, 'name': 'query_table', 'parameters': params},
+                                 {doc.id: doc})['table_result']
+
+
+def test_query_all_tabs_with_provenance(workbook):
+    result = query(workbook, sheet_names=['*'], filters=[{'column': 'Legacy Name', 'op': 'eq',
+                   'value': 'Invoice - Field 3'}], select=['New Name'])
+    assert [(r['_sheet'], r['_source_row'], r['New Name']) for r in result['rows']] == [
+        ('Billing', 5, 'Invoice Field 3'), ('Shipping', 47, 'Invoice Field 3')]
+    assert 'Subject Areas' in result['skipped_sheets']
+    per_tab = query(workbook, sheet_names=['*'], filters=[{'column': 'New Name', 'op': 'eq', 'value': 'Out of Scope'}],
+                    group_by=['_sheet'], aggregations=[{'op': 'count_rows', 'as': 'n'}])
+    assert {r['_sheet']: r['n'] for r in per_tab['rows']} == {'Billing': 6, 'Shipping': 7}
+    absent = query(workbook, sheet_names=['*'], filters=[{'column': 'Legacy Name', 'op': 'eq', 'value': 'Nope'}],
+                   aggregations=[{'op': 'count_rows', 'as': 'n'}])
+    assert absent['rows'] == [{'n': 0}] and absent['sheets_queried'] == ['Billing', 'Shipping']
+    assert 'error' in query(workbook, sheet_names=['Missing'], select=['New Name'])
+
+
+def test_single_tab_miss_points_to_other_tabs(workbook):
+    result = query(workbook, sheet_name='Billing', filters=[{'column': 'Legacy Name', 'op': 'eq',
+                   'value': 'Parcel - Field 1'}])
+    assert result['matched_rows'] == 0
+    assert any("['Shipping']" in note and 'sheet_names' in note for note in result['notes'])
+
+
+def test_value_in_another_column_is_reported(workbook):
+    result = query(workbook, sheet_name='Billing', filters=[{'column': 'Notes', 'op': 'contains', 'value': 'out of scope'}])
+    assert result['matched_rows'] == 0
+    assert result['filter_diagnostics'][0]['value_found_in_columns'] == {'New Name': 6, 'Cloud Name': 6}
+
+
+def test_conflicting_mappings_flagged_only_for_identifier_keys(workbook):
+    conflict = query(workbook, sheet_names=['*'], filters=[{'column': 'Legacy Name', 'op': 'eq',
+                     'value': 'Parcel - Field 2'}], select=['New Name'])
+    assert any("disagree in ['New Name']" in note for note in conflict['notes'])
+    category = query(workbook, sheet_name='Subject Areas', filters=[{'column': 'Cloud', 'op': 'eq', 'value': 'Partial'}],
+                     select=['Area'])
+    assert category['matched_rows'] == 2 and category['notes'] == []
+
+
+def test_status_words_in_name_columns_are_hinted(workbook):
+    hints = workbook.summary()['sheets']['Shipping']['column_hints']
+    assert hints['New Name']['frequent_values'] == {'Out of Scope': 7}
+    assert 'possible_variant_groups' not in hints.get('Legacy Name', {})
+
+
+@pytest.mark.parametrize('values,grouped', [
+    (['Account - Date', 'Account - End Date'], False),
+    (['Pack - Amount', 'Package - Amount'], False),
+    (['Order Date', 'Order Date Display'], False),
+    (['Customer Acount', 'Customer Account'], True),
+    (['fail', 'failed'], True),
+])
+def test_added_words_and_extended_terms_are_distinct(values, grouped):
+    assert bool(variant_groups({v: 3 for v in values})) is grouped
+
+
+def test_mostly_unique_name_columns_skip_variant_checks():
+    import pandas as pd
+    names = pd.Series([f'Item {i} - Date' for i in range(60)] + [f'Item {i} - End Date' for i in range(60)],
+                      dtype='string')
+    assert 'possible_variant_groups' not in column_quality(names)
+
+
+def test_narrative_tab_tables_read_as_rows(workbook):
+    lines = [b['text'] for b in workbook.blocks if b['location']['sheet'] == 'Version History']
+    assert lines == ['Mapping Workbook Title', 'Revision History', 'Date | Version | Description | Author',
+                     'Date: 2026-01-05; Version: 3; Description: Added Billing tab; Author: Dana Park',
+                     'Date: 2026-03-09; Version: 4; Description: Removed retired fields; Author: Lee Ortiz']
+    hit = search_documents({workbook.id: workbook}, 'version 4 author')['matches'][0]
+    assert 'Lee Ortiz' in hit['text'] and hit['location'] == {'sheet': 'Version History', 'row': 7}
+    page = execute_document_tool('table_tool', {'document_id': workbook.id, 'name': 'read_sheet', 'parameters': {
+        'sheet_name': 'Version History', 'offset': 3, 'limit': 1}}, {workbook.id: workbook})['table_result']
+    assert page['rows'] == [{'source_row': 6, 'text': lines[3]}] and page['total_rows'] == 5
+
+
+def test_query_narrative_tab_uses_row_text(workbook):
+    result = query(workbook, sheet_name='Version History',
+                   filters=[{'column': 'text', 'op': 'contains', 'value': 'Version: 4'}])
+    assert result['rows'] == [{'source_row': 7, 'text': 'Date: 2026-03-09; Version: 4; Description: Removed '
+                                                          'retired fields; Author: Lee Ortiz'}]
+    assert result['sources'][0]['source_rows'] == [7]
+
+
+def test_missing_column_error_suggests_sheet_column(workbook):
+    result = query(workbook, sheet_names=['Billing', 'Shipping'], group_by=['Subject Area'],
+                   aggregations=[{'op': 'count_rows', 'as': 'n'}])
+    assert '_sheet' in result['error'] and 'Legacy Name' in result['error']
+
+===== REPOSITORY FILE =====
+{"path": "development/tests/test_messy_tables.py", "characters": 7878, "sha256": "addb30cfad117b6de88e306db52d9b19f434d96548f0ff57cf3b5eb9cfd6778e"}
+"""Messy categorical data: variant spellings, text missing markers, placeholder numbers, large sheets."""
+import json
+
+import pandas as pd
+import pytest
+
+from backend.agents.document_agent import run_document_agent
+from backend.preprocessing.documents import TABLE_PREVIEW_ROWS, ingest_document
+from backend.preprocessing.profiling import column_quality, variant_groups
+from backend.retrieval.search import search_documents
+from backend.tools.documents import execute_document_tool
+from backend.tools.table_operations import query_table
+
+ROWS = [('fail', 'Visa', 'Denver', -999999), ('FAIL', 'VISA', 'DENVER', 120.0), ('failed', 'Vsa', 'DEN', 80.0),
+        ('success', 'MasterCard', 'Denver ', 50.0), ('Success', 'Master Card', 'Boulder', 0.0),
+        ('success', 'nan', 'nan', 30.0), ('success', 'Amex', 'boulder', -999999)]
+
+
+@pytest.fixture
+def frame():
+    d = pd.DataFrame(ROWS * 3, columns=['status', 'card', 'city', 'amount'])
+    for col in ['status', 'card', 'city']:
+        d[col] = d[col].astype('string')
+    return d
+
+
+def count(frame, **params):
+    return query_table(frame, {**params, 'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
+
+
+def test_profile_suggests_variants_markers_and_placeholders(frame):
+    city = column_quality(frame['city'])
+    groups = {g['suggested']: set(g['variants']) for g in city['possible_variant_groups']}
+    assert groups == {'Denver': {'Denver', 'DENVER', 'DEN', 'Denver '}, 'Boulder': {'Boulder', 'boulder'}}
+    assert city['possible_missing_markers'] == {'nan': 3}
+    assert 'nan' not in str(city['possible_variant_groups'])
+    amount = column_quality(frame['amount'])
+    assert amount['possible_placeholder_values'] == {'-999999.0': 6}
+    assert amount['negative_count'] == 6
+
+
+@pytest.mark.parametrize('values', [
+    ['Medicare', 'Medicaid', 'Medical', 'Medicaid A'], ['Male', 'Female'], ['Dental', 'Rental'],
+    ['Plan A', 'Plan B'], ['Tier 1', 'Tier 2', 'Tier 10'], ['Premium', 'Premium Plus'],
+    ['In-network', 'Out-of-network'], ['Inpatient', 'Outpatient'], ['NA', 'NY', 'NJ'],
+    ['DEMO-SESSION', 'DEMO-VISIT', 'DEMO-REMOTE'], ['Approved', 'Draft', 'Denied'],
+])
+def test_distinct_values_are_never_grouped(values):
+    assert variant_groups({v: 2 for v in values}) == []
+
+
+def test_literal_na_code_is_not_a_missing_marker():
+    assert 'possible_missing_markers' not in column_quality(pd.Series(['NA', 'DEMO', 'NA'], dtype='string'))
+
+
+def test_numeric_filters_accept_text_numbers(frame):
+    assert count(frame, filters=[{'column': 'amount', 'op': 'eq', 'value': '-999999'}])['rows'] == [{'n': 6}]
+    assert count(frame, filters=[{'column': 'amount', 'op': 'in', 'value': ['0', 50]}])['rows'] == [{'n': 6}]
+    with pytest.raises(ValueError, match='numeric'):
+        count(frame, filters=[{'column': 'amount', 'op': 'eq', 'value': 'lots'}])
+
+
+def test_exact_filter_reports_unmatched_spellings(frame):
+    result = count(frame, filters=[{'column': 'city', 'op': 'eq', 'value': 'Denver'}])
+    assert result['rows'] == [{'n': 3}]
+    diag = result['filter_diagnostics'][0]
+    assert diag['similar_values_not_matched'] == {'DENVER': 3, 'DEN': 3, 'Denver ': 3}
+
+
+def test_is_null_reports_text_missing_markers(frame):
+    result = count(frame, filters=[{'column': 'card', 'op': 'is_null'}])
+    assert result['rows'] == [{'n': 0}]
+    assert result['filter_diagnostics'][0]['possible_missing_markers'] == {'nan': 3}
+
+
+@pytest.mark.parametrize('mapping', [
+    {'DENVER': 'Denver', 'DEN': 'Denver', 'Denver ': 'Denver'},
+    {'Denver': ['Denver', 'DENVER', 'DEN', 'Denver ']},
+])
+def test_recode_combines_variants_in_either_form(frame, mapping):
+    result = count(frame, recode=[{'column': 'city', 'map': mapping}],
+                   filters=[{'column': 'city', 'op': 'eq', 'value': 'Denver'}])
+    assert result['rows'] == [{'n': 12}] and result['filter_diagnostics'] == []
+    grouped = query_table(frame, {'recode': [{'column': 'city', 'map': mapping}], 'group_by': ['city'],
+                                  'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
+    assert {r['city']: r['n'] for r in grouped['rows']}['Denver'] == 12
+
+
+def test_recode_to_null_and_validation(frame):
+    assert count(frame, recode=[{'column': 'card', 'map': {'nan': None}}],
+                 filters=[{'column': 'card', 'op': 'is_null'}])['rows'] == [{'n': 3}]
+    total = query_table(frame, {'recode': [{'column': 'amount', 'map': {'-999999': None}}],
+                                'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
+    assert total['rows'] == [{'t': '840.0'}]
+    with pytest.raises(ValueError, match='not present'):
+        count(frame, recode=[{'column': 'city', 'map': {'Denvr': 'Denver'}}])
+    with pytest.raises(ValueError, match='strings or null'):
+        count(frame, recode=[{'column': 'city', 'map': {'DEN': 5}}])
+    with pytest.raises(ValueError, match='only map values to null'):
+        count(frame, recode=[{'column': 'amount', 'map': {'0': 'zero'}}])
+
+
+def test_notes_flag_truncated_lists_and_placeholder_totals(frame):
+    listed = query_table(frame, {'select': ['city'], 'limit': 5})
+    assert 'Only 5 of 21 result rows' in listed['notes'][0]
+    total = query_table(frame, {'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
+    assert '-999999.0' in total['notes'][0]
+
+
+def large_csv(rows=TABLE_PREVIEW_ROWS + 300):
+    lines = ['Code,City,Amount'] + [f'C{i:04},{"Tehran" if i % 2 else "THR"},{i}' for i in range(rows)]
+    lines[-1] = f'LASTROW,Boulder,{rows}'
+    return ingest_document('large.csv', '\n'.join(lines).encode())
+
+
+def test_large_sheet_preview_is_labeled_and_search_reads_every_row():
+    doc = large_csv()
+    assert len(doc.blocks) == TABLE_PREVIEW_ROWS
+    assert any('first 200 of 500 rows' in w for w in doc.warnings)
+    assert not any('Extraction limited' in w for w in doc.warnings)
+    hit = search_documents({doc.id: doc}, 'LASTROW')['matches'][0]
+    assert hit['location']['csv_record'] == 500 and hit['block_id'] == 'Sheet1!R500'
+    # Preview rows are not double counted: each row is one searchable unit.
+    assert search_documents({doc.id: doc}, 'THR')['total_matching_blocks'] == 250
+
+
+def test_planner_summary_carries_column_hints():
+    doc = large_csv()
+    hints = doc.summary()['sheets']['Sheet1']['column_hints']
+    # THR 250 vs Tehran 249 (the last row became Boulder), so the most frequent spelling leads.
+    assert hints['City']['possible_variant_groups'] == {'THR': ['THR', 'Tehran']}
+    assert hints['City']['all_values'] == {'THR': 250, 'Tehran': 249, 'Boulder': 1}
+
+
+def test_schema_alone_can_support_a_data_quality_answer(native_script):
+    doc = large_csv()
+    native_script([
+        {'tool': 'table_tool', 'parameters': {'document_id': doc.id, 'name': 'get_sheet_schema',
+                                              'parameters': {'sheet_name': 'Sheet1'}}},
+        {'tool': 'answer', 'parameters': {}}, 'City has variant spellings THR and Tehran [E1].'])
+    result = run_document_agent({doc.id: doc}, [doc.id], 'Any data quality issues?')
+    assert result['protocol']['repair_attempts'] == 0
+    assert result['answer'].startswith('City has variant')
+
+
+def test_recode_through_the_document_tool():
+    doc = large_csv()
+    result = execute_document_tool('table_tool', {'document_id': doc.id, 'name': 'query_table', 'parameters': {
+        'sheet_name': 'Sheet1', 'recode': [{'column': 'City', 'map': {'THR': 'Tehran'}}],
+        'filters': [{'column': 'City', 'op': 'eq', 'value': 'Tehran'}],
+        'aggregations': [{'op': 'count_rows', 'as': 'n'}]}}, {doc.id: doc})['table_result']
+    assert result['rows'] == [{'n': 499}]
+    assert json.dumps(result['recode']) == '[{"column": "City", "map": {"THR": "Tehran"}}]'
+
+
+def test_tie_prefers_readable_spelling_over_code():
+    groups = variant_groups({'THR': 5, 'Tehran': 5, 'Tehran ': 5})
+    assert groups[0]['suggested'] == 'Tehran'
+
+===== REPOSITORY FILE =====
 {"path": "development/tests/test_preprocess.py", "characters": 4516, "sha256": "fa556f2edd85fd7b9ccd7f556681216b45a71bbd244d3e191aafee8cc7232a81"}
 import json
 from pathlib import Path
@@ -4590,7 +5492,7 @@ def test_export_excludes_bundle_and_is_repeatable(tmp_path):
     assert alternate.read_bytes()==original
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_robustness.py", "characters": 9709, "sha256": "4424c90c3a61174a74d5106849d276db05e3e7cbd63ddc2d78a6c1381940965d"}
+{"path": "development/tests/test_robustness.py", "characters": 9919, "sha256": "d1adb7af65860dd749cc82644950c6b2b7f92bbab54a524e182552adfe7696d9"}
 """Real file parsers/storage/tools; scripted model calls do not grade model reasoning."""
 import json
 from pathlib import Path
@@ -4650,11 +5552,13 @@ def test_pack_upload_outcomes_and_warning_persistence(pack, library):
 def test_truncated_workbook_retains_late_rows_sheets_and_complete_totals(pack, library):
     uploaded = load_file(pack, 'large_crosswalk.xlsx', library)
     doc = library.load(uploaded.storage_ref['manifest_key'])
-    assert len(doc.blocks) == 2000
-    assert not search_documents({doc.id: doc}, 'TAILMARKER')['matches']
+    # 200 preview rows for the large data sheet plus the one-row late sheet.
+    assert len(doc.blocks) == 201
+    hit = search_documents({doc.id: doc}, 'TAILMARKER')['matches'][0]
+    assert hit['location'] == {'sheet': 'Crosswalk', 'csv_record': 2105, 'row': 2106}
     tail = query(doc, 'Crosswalk', filters=[{'column': 'Field ID', 'op': 'eq', 'value': 'F02105'}])
     assert tail['table_result']['rows'][0]['Definition'] == 'TAILMARKER'
-    assert any('2000' in w for w in tail['warnings'])
+    assert any('first 200 of 2105 rows' in w for w in tail['warnings'])
     assert query(doc, 'Late Dictionary')['table_result']['rows'][0]['Meaning'] == 'Late sheet definition'
     totals = query(doc, 'Crosswalk', aggregations=[{'op': 'count_rows', 'as': 'records'},
                    {'column': 'Units', 'op': 'sum', 'as': 'units'}])['table_result']
@@ -4693,8 +5597,8 @@ def test_table_only_answer_receives_extraction_warnings(pack, native_script):
         {'tool': 'answer', 'parameters': {}}, 'Definition: TAILMARKER [E1].'])
     result = run_document_agent({doc.id: doc}, [doc.id], 'Define F02105')
     payload = json.loads(requests[-1]['messages'][0]['content'][0]['text'])
-    assert any('2000 text blocks' in w for w in payload['limitations'])
-    assert any('2000 text blocks' in w for w in result['limitations'])
+    assert any('text preview holds the first 200' in w for w in payload['limitations'])
+    assert any('text preview holds the first 200' in w for w in result['limitations'])
     assert result['evidence'][0]['data']['table_result']['rows'][0]['Definition'] == 'TAILMARKER'
 
 
