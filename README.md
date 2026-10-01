@@ -17,7 +17,7 @@ backend/         Reusable application backend
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
   services/      Question service: agent run with audit record and trace
-  observability/ Audit records, OpenTelemetry spans, user identity
+  observability/ Audit records and OpenTelemetry spans
 apps/            Replaceable Streamlit interfaces
   chat/app.py    Saved-document selection and questions (port 8501)
   upload/app.py  Upload, preprocessing and saving (port 8502)
@@ -503,8 +503,8 @@ use. It writes the audit record whether the question succeeds or fails.
 
 | Tier | Written | Contains |
 | --- | --- | --- |
-| `metadata/questions` | always | request and session IDs, user, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
-| `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with user, file SHA-256 and size |
+| `metadata/questions` | always | request and session IDs, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
+| `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with file SHA-256 and size |
 | `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation, evidence and every prompt and response |
 
 The content tier can contain PHI. Store it under its own prefix with a separate KMS key, tighter IAM access,
@@ -517,11 +517,6 @@ confirm that a question or answer matches the record without the metadata tier h
 per-tier lifecycle rules apply cleanly; Athena can query either tier. A failed write logs a warning, or fails
 the request when `AUDIT_REQUIRED=true`.
 
-The user comes from an authenticating proxy header (`X-Amzn-Oidc-Identity` from an ALB with OIDC/Cognito,
-`X-Forwarded-User`, and similar) only when `AUDIT_TRUST_HEADERS=true`. Enable that only behind such a proxy,
-because any client can send those headers otherwise. Without it the record uses `AUDIT_USER` or the operating
-system user and marks the identity `authenticated: false`.
-
 `prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
 `APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
 
@@ -530,7 +525,7 @@ system user and marks the identity `authenticated: false`.
 Spans follow the OpenTelemetry GenAI conventions:
 
 ```text
-invoke_agent document_agent           session.id, app.request_id, app.user.id, document IDs, status
+invoke_agent document_agent           session.id, app.request_id, document IDs, status
   graph.node init | assess | plan | tools | synthesize
     chat <model id>                    gen_ai.request.model, gen_ai.usage.input/output_tokens, finish reason, tool calls
     execute_tool <tool name>           gen_ai.tool.name, app.evidence_id, document IDs, match/row counts; error status

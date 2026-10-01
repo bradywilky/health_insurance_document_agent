@@ -6,7 +6,7 @@ from backend.agents.llm import LLMCallLog
 from backend.observability import audit, tracing
 
 
-def answer_question(documents, document_ids, question, *, user, app, session_id=None, sink=None, history=None,
+def answer_question(documents, document_ids, question, *, app, session_id=None, sink=None, history=None,
                     call_log=None, model=None, ambiguity='off', clarification=None, on_step=None):
     """Run the document agent. Returns its result plus request_id, trace_id and usage.
 
@@ -19,7 +19,7 @@ def answer_question(documents, document_ids, question, *, user, app, session_id=
     with tracing.span('invoke_agent document_agent', **{
             'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'document_agent',
             'session.id': session_id, 'app.request_id': request_id, 'app.name': app,
-            'app.user.id': user.get('id'), 'app.ambiguity_mode': ambiguity, 'app.model': model,
+            'app.ambiguity_mode': ambiguity, 'app.model': model,
             'app.document_ids': [d['id'] for d in docs]}) as root:
         trace_id = tracing.trace_id_of(root)
         tracing.add_content(root, 'app.question', question=question, clarification=clarification)
@@ -37,7 +37,7 @@ def answer_question(documents, document_ids, question, *, user, app, session_id=
             raise
         finally:
             records = audit.question_records(
-                request_id=request_id, timestamp=timestamp, user=user, app=app, session_id=session_id,
+                request_id=request_id, timestamp=timestamp, app=app, session_id=session_id,
                 model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
                 documents=docs, question=question, clarification=clarification, result=result,
                 call_records=log.records, duration_ms=round((time.monotonic() - start) * 1000), error=error,
@@ -46,9 +46,9 @@ def answer_question(documents, document_ids, question, *, user, app, session_id=
     return {**result, 'request_id': request_id, 'trace_id': trace_id, 'usage': audit.totals(log.records)}
 
 
-def record_document_event(event, *, user, app, sink=None, **fields):
+def record_document_event(event, *, app, sink=None, **fields):
     """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
     sink = sink if sink is not None else audit.configured_audit_sink()
     from opentelemetry import trace
-    audit.write(sink, audit.document_event(event, user=user, app=app,
+    audit.write(sink, audit.document_event(event, app=app,
                                            trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))

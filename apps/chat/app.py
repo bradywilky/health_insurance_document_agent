@@ -4,8 +4,6 @@ from dotenv import load_dotenv
 load_dotenv()
 import uuid
 import streamlit as st
-from backend.agents.llm import LLMCallLog
-from backend.observability.identity import resolve_user
 from backend.observability.tracing import configure_tracing
 from backend.services.questions import answer_question
 from backend.storage.s3 import configured_store
@@ -134,19 +132,18 @@ def ask(question, clarification=None):
         st.markdown(shown)
     with st.chat_message('assistant'):
         status = st.empty()
-        log = LLMCallLog()
         try:
             # A per-call model setting is passed to the agent; never share user file caches.
             result = answer_question(st.session_state.documents,selected,question,
-                user=resolve_user(getattr(st.context, 'headers', None)), app='chat',
-                session_id=st.session_state.session_id, history=history,call_log=log,
+                app='chat',
+                session_id=st.session_state.session_id, history=history,
                 on_step=lambda _:status.caption('Checking the selected sources…'),model=model,
                 ambiguity=ambiguity, clarification=clarification)
             status.empty()
             st.markdown(result['answer'])
             show_evidence(result)
-            st.caption(f"{len(log.records)} model calls · "
-                       f"{sum(r['usage'].get('inputTokens',0) for r in log.records):,} input tokens · "
+            st.caption(f"{result['usage']['llm_calls']} model calls · "
+                       f"{result['usage']['input_tokens']:,} input tokens · "
                        f"reference {result['request_id'][:12]}")
             st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result,
                                               'question':question})

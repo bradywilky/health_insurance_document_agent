@@ -1,6 +1,6 @@
 REPOSITORY-TEXT-BUNDLE-V1
 ===== REPOSITORY FILE =====
-{"path": ".env.example", "characters": 1911, "sha256": "b7c4c4ba50ab7ac1df07902258465944dfc37fcd5de4e4d977bcdf6e9976c6e4"}
+{"path": ".env.example", "characters": 1757, "sha256": "28947ccfc47f8580d8376246c408d0002dc3bbd69f69540f895f7ab4245b64ef"}
 # Replace with your own local profile name. Never add credentials here.
 AWS_PROFILE=dev-profile
 AWS_DEFAULT_REGION=us-east-1
@@ -31,9 +31,6 @@ AUDIT_LOCAL_DIR=data/audit
 AUDIT_CONTENT=false
 # Fail a question when its audit record cannot be written.
 AUDIT_REQUIRED=false
-# Trust identity headers from an authenticating proxy (ALB OIDC, identity-aware proxy). Only behind such a proxy.
-AUDIT_TRUST_HEADERS=false
-# AUDIT_USER=
 # APP_VERSION=                # e.g. the deployed git SHA; otherwise a hash of the backend source
 
 # OpenTelemetry spans (backend/observability/tracing.py). off, file or console. In AWS, leave off and run under
@@ -108,7 +105,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 43539, "sha256": "5a7b8af20646871e87264b2e69a009a9982964380ec16d9c688d77b1df5ad2fa"}
+{"path": "README.md", "characters": 43117, "sha256": "aaac2d0c72e5909ecc256441e5de2f59427890edbeace1e72100837f3f0304fd"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
@@ -128,7 +125,7 @@ backend/         Reusable application backend
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
   services/      Question service: agent run with audit record and trace
-  observability/ Audit records, OpenTelemetry spans, user identity
+  observability/ Audit records and OpenTelemetry spans
 apps/            Replaceable Streamlit interfaces
   chat/app.py    Saved-document selection and questions (port 8501)
   upload/app.py  Upload, preprocessing and saving (port 8502)
@@ -614,8 +611,8 @@ use. It writes the audit record whether the question succeeds or fails.
 
 | Tier | Written | Contains |
 | --- | --- | --- |
-| `metadata/questions` | always | request and session IDs, user, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
-| `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with user, file SHA-256 and size |
+| `metadata/questions` | always | request and session IDs, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
+| `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with file SHA-256 and size |
 | `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation, evidence and every prompt and response |
 
 The content tier can contain PHI. Store it under its own prefix with a separate KMS key, tighter IAM access,
@@ -628,11 +625,6 @@ confirm that a question or answer matches the record without the metadata tier h
 per-tier lifecycle rules apply cleanly; Athena can query either tier. A failed write logs a warning, or fails
 the request when `AUDIT_REQUIRED=true`.
 
-The user comes from an authenticating proxy header (`X-Amzn-Oidc-Identity` from an ALB with OIDC/Cognito,
-`X-Forwarded-User`, and similar) only when `AUDIT_TRUST_HEADERS=true`. Enable that only behind such a proxy,
-because any client can send those headers otherwise. Without it the record uses `AUDIT_USER` or the operating
-system user and marks the identity `authenticated: false`.
-
 `prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
 `APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
 
@@ -641,7 +633,7 @@ system user and marks the identity `authenticated: false`.
 Spans follow the OpenTelemetry GenAI conventions:
 
 ```text
-invoke_agent document_agent           session.id, app.request_id, app.user.id, document IDs, status
+invoke_agent document_agent           session.id, app.request_id, document IDs, status
   graph.node init | assess | plan | tools | synthesize
     chat <model id>                    gen_ai.request.model, gen_ai.usage.input/output_tokens, finish reason, tool calls
     execute_tool <tool name>           gen_ai.tool.name, app.evidence_id, document IDs, match/row counts; error status
@@ -692,15 +684,13 @@ cannot misreport.
 {"path": "apps/chat/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/chat/app.py", "characters": 9315, "sha256": "a01e94dfef1635098bbd7b56963ae5b1827cecf531550ed13a9bc017990c1f32"}
+{"path": "apps/chat/app.py", "characters": 9106, "sha256": "4db9f132dc592fe6622992708c86cdc77d94fb1e5c9e5b88da1a891dbe0f322b"}
 """Saved-document selection and chat. Run: streamlit run apps/chat/app.py"""
 import os
 from dotenv import load_dotenv
 load_dotenv()
 import uuid
 import streamlit as st
-from backend.agents.llm import LLMCallLog
-from backend.observability.identity import resolve_user
 from backend.observability.tracing import configure_tracing
 from backend.services.questions import answer_question
 from backend.storage.s3 import configured_store
@@ -829,19 +819,18 @@ def ask(question, clarification=None):
         st.markdown(shown)
     with st.chat_message('assistant'):
         status = st.empty()
-        log = LLMCallLog()
         try:
             # A per-call model setting is passed to the agent; never share user file caches.
             result = answer_question(st.session_state.documents,selected,question,
-                user=resolve_user(getattr(st.context, 'headers', None)), app='chat',
-                session_id=st.session_state.session_id, history=history,call_log=log,
+                app='chat',
+                session_id=st.session_state.session_id, history=history,
                 on_step=lambda _:status.caption('Checking the selected sources…'),model=model,
                 ambiguity=ambiguity, clarification=clarification)
             status.empty()
             st.markdown(result['answer'])
             show_evidence(result)
-            st.caption(f"{len(log.records)} model calls · "
-                       f"{sum(r['usage'].get('inputTokens',0) for r in log.records):,} input tokens · "
+            st.caption(f"{result['usage']['llm_calls']} model calls · "
+                       f"{result['usage']['input_tokens']:,} input tokens · "
                        f"reference {result['request_id'][:12]}")
             st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result,
                                               'question':question})
@@ -898,7 +887,7 @@ elif typed:
 {"path": "apps/upload/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/upload/app.py", "characters": 8948, "sha256": "cbdc759ddde3831f1967a27064e46d0d0449090059cf93ea9e793cb9208df82b"}
+{"path": "apps/upload/app.py", "characters": 8835, "sha256": "df3cc9f0e26937fc506fcd8b755e9bcf786f9116b4bdb81c39498dc662b50a4b"}
 """Document upload portal. Run: streamlit run apps/upload/app.py --server.port 8502"""
 from pathlib import Path
 from dotenv import load_dotenv
@@ -908,14 +897,13 @@ from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
 from backend.observability import tracing
-from backend.observability.identity import resolve_user
 from backend.services.questions import record_document_event
 
 tracing.configure_tracing()
 
 
 def audit_event(event, **fields):
-    record_document_event(event, user=resolve_user(getattr(st.context, 'headers', None)), app='upload', **fields)
+    record_document_event(event, app='upload', **fields)
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
 st.title('Document Upload Portal')
@@ -2241,7 +2229,7 @@ def get_model_config(alias="UNALIASED"):
 """Audit records and tracing."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/audit.py", "characters": 11802, "sha256": "e3b08c33364a226d455600dac196ceca095e311ba17dd32d83be7a5c49ca932b"}
+{"path": "backend/observability/audit.py", "characters": 11748, "sha256": "4c2680837af625adc62baa43addfc970e87400326f980a00bb1ac142e11e33de"}
 """Application audit records: one per question and one per document event.
 
 Two tiers, written to separate locations so they can have separate access policies and retention:
@@ -2453,13 +2441,13 @@ def totals(records):
             'output_tokens': sum((r.get('usage') or {}).get('outputTokens', 0) for r in records or [])}
 
 
-def question_records(*, request_id, timestamp, user, app, session_id, model, ambiguity, prompt_version,
+def question_records(*, request_id, timestamp, app, session_id, model, ambiguity, prompt_version,
                      documents, question, clarification, result, call_records, duration_ms, error, trace_id):
     """Metadata record (always) and content record (AUDIT_CONTENT=true) for one question."""
     result = result or {}
     metadata = {
         'schema_version': SCHEMA_VERSION, 'record_type': 'question', 'request_id': request_id,
-        'timestamp': timestamp, 'user': user, 'session_id': session_id, 'app': app,
+        'timestamp': timestamp, 'session_id': session_id, 'app': app,
         'code_version': code_version(), 'prompt_version': prompt_version, 'model': model,
         'ambiguity_mode': ambiguity, 'clarified': bool(clarification), 'documents': documents,
         'question_sha256': digest(question), 'question_chars': len(question or ''),
@@ -2474,18 +2462,18 @@ def question_records(*, request_id, timestamp, user, app, session_id, model, amb
     if content_enabled():
         records.append(('content', 'questions', {
             'schema_version': SCHEMA_VERSION, 'record_type': 'question_content', 'request_id': request_id,
-            'timestamp': timestamp, 'user': user, 'question': question, 'clarification': clarification,
+            'timestamp': timestamp, 'question': question, 'clarification': clarification,
             'answer': result.get('answer'), 'interpretation': result.get('interpretation'),
             'clarification_request': result.get('clarification'), 'limitations': result.get('limitations'),
             'evidence': result.get('evidence'), 'llm_calls': call_records}))
     return records
 
 
-def document_event(event, *, user, app, document=None, filename=None, content=None, details=None, error=None,
+def document_event(event, *, app, document=None, filename=None, content=None, details=None, error=None,
                    trace_id=None):
     """Metadata record for document_uploaded, upload_failed, profile_generated or profile_reviewed."""
     record = {'schema_version': SCHEMA_VERSION, 'record_type': 'document_event', 'event': event,
-              'event_id': new_id(), 'timestamp': now(), 'user': user, 'app': app,
+              'event_id': new_id(), 'timestamp': now(), 'app': app,
               'code_version': code_version(), 'filename': filename or (document.name if document else None),
               'document': document_summary(document) if document else None, 'error': error,
               'trace_id': trace_id, **(details or {})}
@@ -2494,48 +2482,6 @@ def document_event(event, *, user, app, document=None, filename=None, content=No
     if document is not None:
         record['warnings_count'] = len(getattr(document, 'warnings', []) or [])
     return [('metadata', 'documents', record)]
-
-===== REPOSITORY FILE =====
-{"path": "backend/observability/identity.py", "characters": 1522, "sha256": "5b65530ea32e19360f277d146c1d8c0ded9c9ba52af56d6810a23571b53802e7"}
-"""Who is asking, for audit records.
-
-Behind an authenticating proxy (an ALB with OIDC/Cognito, or an identity-aware proxy) the proxy sets the user in a
-request header. Those headers are trusted only when AUDIT_TRUST_HEADERS=true, because without such a proxy any
-client can send them. Otherwise AUDIT_USER, then the operating-system user, are recorded as unauthenticated.
-"""
-import getpass
-import os
-
-# Checked in order; the first present header wins.
-IDENTITY_HEADERS = ('X-Amzn-Oidc-Identity', 'X-Forwarded-User', 'X-Forwarded-Email', 'X-Auth-Request-Email',
-                    'X-Auth-Request-User', 'X-Remote-User')
-
-
-def _get(headers, name):
-    if not headers:
-        return None
-    for key in (name, name.lower()):
-        try:
-            value = headers.get(key)
-        except Exception:
-            value = None
-        if value:
-            return str(value).strip()[:256]
-    return None
-
-
-def resolve_user(headers=None):
-    if os.getenv('AUDIT_TRUST_HEADERS', 'false').strip().lower() == 'true':
-        for name in IDENTITY_HEADERS:
-            value = _get(headers, name)
-            if value:
-                return {'id': value, 'source': f'header:{name}', 'authenticated': True}
-    if os.getenv('AUDIT_USER'):
-        return {'id': os.getenv('AUDIT_USER'), 'source': 'env:AUDIT_USER', 'authenticated': False}
-    try:
-        return {'id': getpass.getuser(), 'source': 'os', 'authenticated': False}
-    except Exception:
-        return {'id': 'unknown', 'source': 'none', 'authenticated': False}
 
 ===== REPOSITORY FILE =====
 {"path": "backend/observability/tracing.py", "characters": 5522, "sha256": "374b00f78e1c3719b0fb53cc2a3aff1200728b5ceaa96fdb8f0e2ba6aeef1aca"}
@@ -3237,7 +3183,7 @@ def search_documents(documents, query, *, limit=8):
 """Application services: agent runs with audit records and traces."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/services/questions.py", "characters": 3387, "sha256": "ffaf94af2d7a98609936a14a0c00cd79d88ff15eb7e72d99dee76c9cb2c7cf5d"}
+{"path": "backend/services/questions.py", "characters": 3322, "sha256": "bf4d37134b3b0d738ffae92dd1d8c7e80353616537e3f1341cf5a927c55296b4"}
 """Answer a question with an audit record and a trace. Apps and the CLI call this instead of the agent."""
 import time
 
@@ -3246,7 +3192,7 @@ from backend.agents.llm import LLMCallLog
 from backend.observability import audit, tracing
 
 
-def answer_question(documents, document_ids, question, *, user, app, session_id=None, sink=None, history=None,
+def answer_question(documents, document_ids, question, *, app, session_id=None, sink=None, history=None,
                     call_log=None, model=None, ambiguity='off', clarification=None, on_step=None):
     """Run the document agent. Returns its result plus request_id, trace_id and usage.
 
@@ -3259,7 +3205,7 @@ def answer_question(documents, document_ids, question, *, user, app, session_id=
     with tracing.span('invoke_agent document_agent', **{
             'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'document_agent',
             'session.id': session_id, 'app.request_id': request_id, 'app.name': app,
-            'app.user.id': user.get('id'), 'app.ambiguity_mode': ambiguity, 'app.model': model,
+            'app.ambiguity_mode': ambiguity, 'app.model': model,
             'app.document_ids': [d['id'] for d in docs]}) as root:
         trace_id = tracing.trace_id_of(root)
         tracing.add_content(root, 'app.question', question=question, clarification=clarification)
@@ -3277,7 +3223,7 @@ def answer_question(documents, document_ids, question, *, user, app, session_id=
             raise
         finally:
             records = audit.question_records(
-                request_id=request_id, timestamp=timestamp, user=user, app=app, session_id=session_id,
+                request_id=request_id, timestamp=timestamp, app=app, session_id=session_id,
                 model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
                 documents=docs, question=question, clarification=clarification, result=result,
                 call_records=log.records, duration_ms=round((time.monotonic() - start) * 1000), error=error,
@@ -3286,11 +3232,11 @@ def answer_question(documents, document_ids, question, *, user, app, session_id=
     return {**result, 'request_id': request_id, 'trace_id': trace_id, 'usage': audit.totals(log.records)}
 
 
-def record_document_event(event, *, user, app, sink=None, **fields):
+def record_document_event(event, *, app, sink=None, **fields):
     """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
     sink = sink if sink is not None else audit.configured_audit_sink()
     from opentelemetry import trace
-    audit.write(sink, audit.document_event(event, user=user, app=app,
+    audit.write(sink, audit.document_event(event, app=app,
                                            trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))
 
 ===== REPOSITORY FILE =====
@@ -4687,7 +4633,7 @@ def execute_table_tool(
 """Cli components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/cli/run_local.py", "characters": 3676, "sha256": "7217d250db7bcaa6b67d59a257c923a822534319b07783b9dce24add9b590452"}
+{"path": "development/cli/run_local.py", "characters": 3595, "sha256": "bbe161d032045554b6cbe2d2d0a71b97a0734911fede5fb773c8fc2bdc625e71"}
 """Run the document agent on local data using native Bedrock tool calls."""
 import argparse
 import json
@@ -4723,7 +4669,6 @@ def main():
     from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
     from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent_stream
-    from backend.observability.identity import resolve_user
     from backend.observability.tracing import configure_tracing
     from backend.services.questions import answer_question
     configure_tracing()
@@ -4746,7 +4691,7 @@ def main():
             for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
                 print(json.dumps(event, default=str), flush=True)
         else:
-            result = answer_question(documents, [doc.id], args.question, user=resolve_user(), app="cli",
+            result = answer_question(documents, [doc.id], args.question, app="cli",
                                      call_log=log, model=args.model)
             print(result["answer"])
             print(f"Reference: {result['request_id']}")
@@ -5696,7 +5641,7 @@ if __name__ == '__main__':
     print(create_samples('data'))
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/conftest.py", "characters": 2038, "sha256": "031436b43cb77e51548767104f7a52c055eea0d42c3a5185fb0df35c2b970eec"}
+{"path": "development/tests/conftest.py", "characters": 2001, "sha256": "c58edf07da2e24c6b11b8c95f30a61d6dab1a67a31feb42b2435e063a94022b8"}
 import pytest
 from development.scripts.make_samples import create_samples
 
@@ -5744,7 +5689,7 @@ def isolated_audit(monkeypatch, tmp_path):
     """Audit records from tests go to a temporary directory; tracing and content capture stay off."""
     monkeypatch.setenv('AUDIT_STORAGE', 'local')
     monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
-    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED', 'AUDIT_TRUST_HEADERS', 'AUDIT_USER', 'TRACING', 'TRACE_CONTENT']:
+    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED', 'TRACING', 'TRACE_CONTENT']:
         monkeypatch.delenv(name, raising=False)
     return tmp_path / 'audit'
 
@@ -7254,7 +7199,7 @@ def test_tie_prefers_readable_spelling_over_code():
     assert groups[0]['suggested'] == 'Tehran'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_observability.py", "characters": 11984, "sha256": "1af944a59f5d75f8aca979ce6db0774919daff66f617c44bb37cba82da9cda50"}
+{"path": "development/tests/test_observability.py", "characters": 11173, "sha256": "3a3f6f3a0de7adf1b98e448b73d44ccb9b0961c98db1a925eac93990f77407e6"}
 import json
 from pathlib import Path
 
@@ -7267,11 +7212,9 @@ from streamlit.testing.v1 import AppTest
 
 from backend.agents import document_agent
 from backend.observability import audit, tracing
-from backend.observability.identity import resolve_user
 from backend.preprocessing.documents import ingest_document
 from backend.services.questions import answer_question, record_document_event
 
-USER = {'id': 'tester', 'source': 'test', 'authenticated': False}
 QUESTION = 'What is the member rate for plan Alpha?'
 APPS = Path(__file__).resolve().parents[2] / 'apps'
 
@@ -7300,7 +7243,7 @@ def rates_run(native_script):
 
 
 def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audit):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test',
+    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
                              session_id='s1')
     [meta] = records(isolated_audit, 'metadata', 'questions')
     text = json.dumps(meta)
@@ -7320,7 +7263,7 @@ def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audi
 
 def test_content_tier_is_opt_in_and_separate(rates_run, isolated_audit, monkeypatch):
     monkeypatch.setenv('AUDIT_CONTENT', 'true')
-    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test')
+    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test')
     [meta] = records(isolated_audit, 'metadata', 'questions')
     [content] = records(isolated_audit, 'content', 'questions')
     assert meta['content_recorded'] and content['request_id'] == meta['request_id']
@@ -7334,7 +7277,7 @@ def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
         raise RuntimeError('Bedrock unavailable')
     monkeypatch.setattr(document_agent, 'run_document_agent', fail)
     with pytest.raises(RuntimeError, match='unavailable'):
-        answer_question({doc.id: doc}, [doc.id], QUESTION, user=USER, app='test')
+        answer_question({doc.id: doc}, [doc.id], QUESTION, app='test')
     [meta] = records(isolated_audit, 'metadata', 'questions')
     assert meta['status'] == 'error' and 'Bedrock unavailable' in meta['error']
 
@@ -7345,7 +7288,7 @@ class BrokenSink:
 
 
 def test_audit_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test',
+    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
                              sink=BrokenSink())
     assert result['status'] == 'answered' and 'disk full' in caplog.text
     monkeypatch.setenv('AUDIT_REQUIRED', 'true')
@@ -7388,7 +7331,7 @@ def test_audit_storage_modes(monkeypatch):
 
 
 def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, isolated_audit):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test',
+    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
                              session_id='s1')
     finished = spans.get_finished_spans()
     by_id = {s.context.span_id: s for s in finished}
@@ -7419,7 +7362,7 @@ def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, iso
 
 def test_trace_content_is_opt_in(rates_run, spans, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test')
+    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test')
     chat = next(s for s in spans.get_finished_spans() if s.name.startswith('chat '))
     assert {e.name for e in chat.events} == {'gen_ai.input', 'gen_ai.output'}
 
@@ -7429,7 +7372,7 @@ def test_tool_errors_mark_their_span(native_script, spans):
     # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
     native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
                    {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
-    answer_question({doc.id: doc}, [doc.id], 'Rate?', user=USER, app='test')
+    answer_question({doc.id: doc}, [doc.id], 'Rate?', app='test')
     tool = next(s for s in spans.get_finished_spans() if s.name == 'execute_tool calculate')
     assert tool.status.status_code == StatusCode.ERROR
 
@@ -7437,23 +7380,12 @@ def test_tool_errors_mark_their_span(native_script, spans):
 def test_document_events_record_hashes_not_contents(isolated_audit):
     content = b'Plan Alpha member rate is USD 88.'
     doc = ingest_document('rates.txt', content)
-    record_document_event('document_uploaded', user=USER, app='upload', document=doc, content=content,
+    record_document_event('document_uploaded', app='upload', document=doc, content=content,
                           details={'profile_generated': False})
     [event] = records(isolated_audit, 'metadata', 'documents')
     assert event['event'] == 'document_uploaded' and event['filename'] == 'rates.txt'
     assert event['size_bytes'] == len(content) and len(event['content_sha256']) == 64
     assert 'Alpha' not in json.dumps(event)
-
-
-def test_identity_headers_are_trusted_only_when_configured(monkeypatch):
-    headers = {'X-Forwarded-User': 'someone@example.com'}
-    monkeypatch.setenv('AUDIT_USER', 'local-dev')
-    assert resolve_user(headers) == {'id': 'local-dev', 'source': 'env:AUDIT_USER', 'authenticated': False}
-    monkeypatch.setenv('AUDIT_TRUST_HEADERS', 'true')
-    assert resolve_user(headers) == {'id': 'someone@example.com', 'source': 'header:X-Forwarded-User',
-                                     'authenticated': True}
-    monkeypatch.delenv('AUDIT_USER')
-    assert resolve_user({})['source'] in {'os', 'none'}
 
 
 def test_versions_are_stable_identifiers(monkeypatch):

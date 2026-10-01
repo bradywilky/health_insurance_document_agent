@@ -33,7 +33,6 @@ def main():
     from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
     from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent_stream
-    from backend.observability.identity import resolve_user
     from backend.observability.tracing import configure_tracing
     from backend.services.questions import answer_question
     configure_tracing()
@@ -56,7 +55,7 @@ def main():
             for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
                 print(json.dumps(event, default=str), flush=True)
         else:
-            result = answer_question(documents, [doc.id], args.question, user=resolve_user(), app="cli",
+            result = answer_question(documents, [doc.id], args.question, app="cli",
                                      call_log=log, model=args.model)
             print(result["answer"])
             print(f"Reference: {result['request_id']}")

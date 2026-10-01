@@ -209,13 +209,13 @@ def totals(records):
             'output_tokens': sum((r.get('usage') or {}).get('outputTokens', 0) for r in records or [])}
 
 
-def question_records(*, request_id, timestamp, user, app, session_id, model, ambiguity, prompt_version,
+def question_records(*, request_id, timestamp, app, session_id, model, ambiguity, prompt_version,
                      documents, question, clarification, result, call_records, duration_ms, error, trace_id):
     """Metadata record (always) and content record (AUDIT_CONTENT=true) for one question."""
     result = result or {}
     metadata = {
         'schema_version': SCHEMA_VERSION, 'record_type': 'question', 'request_id': request_id,
-        'timestamp': timestamp, 'user': user, 'session_id': session_id, 'app': app,
+        'timestamp': timestamp, 'session_id': session_id, 'app': app,
         'code_version': code_version(), 'prompt_version': prompt_version, 'model': model,
         'ambiguity_mode': ambiguity, 'clarified': bool(clarification), 'documents': documents,
         'question_sha256': digest(question), 'question_chars': len(question or ''),
@@ -230,18 +230,18 @@ def question_records(*, request_id, timestamp, user, app, session_id, model, amb
     if content_enabled():
         records.append(('content', 'questions', {
             'schema_version': SCHEMA_VERSION, 'record_type': 'question_content', 'request_id': request_id,
-            'timestamp': timestamp, 'user': user, 'question': question, 'clarification': clarification,
+            'timestamp': timestamp, 'question': question, 'clarification': clarification,
             'answer': result.get('answer'), 'interpretation': result.get('interpretation'),
             'clarification_request': result.get('clarification'), 'limitations': result.get('limitations'),
             'evidence': result.get('evidence'), 'llm_calls': call_records}))
     return records
 
 
-def document_event(event, *, user, app, document=None, filename=None, content=None, details=None, error=None,
+def document_event(event, *, app, document=None, filename=None, content=None, details=None, error=None,
                    trace_id=None):
     """Metadata record for document_uploaded, upload_failed, profile_generated or profile_reviewed."""
     record = {'schema_version': SCHEMA_VERSION, 'record_type': 'document_event', 'event': event,
-              'event_id': new_id(), 'timestamp': now(), 'user': user, 'app': app,
+              'event_id': new_id(), 'timestamp': now(), 'app': app,
               'code_version': code_version(), 'filename': filename or (document.name if document else None),
               'document': document_summary(document) if document else None, 'error': error,
               'trace_id': trace_id, **(details or {})}

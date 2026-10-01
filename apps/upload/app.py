@@ -7,14 +7,13 @@ from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
 from backend.observability import tracing
-from backend.observability.identity import resolve_user
 from backend.services.questions import record_document_event
 
 tracing.configure_tracing()
 
 
 def audit_event(event, **fields):
-    record_document_event(event, user=resolve_user(getattr(st.context, 'headers', None)), app='upload', **fields)
+    record_document_event(event, app='upload', **fields)
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
 st.title('Document Upload Portal')
