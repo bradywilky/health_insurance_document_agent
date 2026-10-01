@@ -13,6 +13,7 @@ class Document:
     table_metadata: dict | None = None
 
     storage_ref: dict | None = None
+    profile: dict | None = None
 
     def summary(self):
         result = {'document_id':self.id, 'filename':self.name, 'type':self.kind,
@@ -20,4 +21,7 @@ class Document:
         if self.table_metadata:
             from backend.shared.metadata import sheet_index
             result['sheets'] = sheet_index(self.table_metadata)
+        if self.profile:
+            from backend.shared.profile import profile_hints
+            result['semantic_profile'] = profile_hints(self.profile)
         return result

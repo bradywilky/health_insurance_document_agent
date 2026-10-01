@@ -1,5 +1,6 @@
 """Run the synthetic selected-document evaluation with real Bedrock inference."""
 import argparse
+from backend.agents.enrichment import make_enricher
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,15 @@ from backend.agents.llm import LLMCallLog
 from backend.config.settings import MODELS
 
 
+def save_profiles(docs, output):
+    """Write generated profiles next to the results for human review."""
+    import json as _json
+    folder = output.with_name(output.stem + '-profiles')
+    folder.mkdir(parents=True, exist_ok=True)
+    for doc in docs:
+        (folder / (doc.name + '.json')).write_text(_json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
+
+
 def main():
     load_dotenv()
     parser=argparse.ArgumentParser(description=__doc__)
@@ -19,6 +29,8 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--case',action='append')
     parser.add_argument('--traces', type=Path, help='Save full local model-call traces')
+    parser.add_argument('--enrich', action='store_true',
+                        help='Generate semantic profiles (one extra model call per document chunk) before asking')
     parser.add_argument('--fixtures', type=Path,
                         help='Generated fixture directory containing questions.json and upload files')
     args=parser.parse_args()
@@ -38,8 +50,11 @@ def main():
         path=(root/name).resolve()
         if not path.is_relative_to(root.resolve()):
             raise ValueError('Fixture path escapes the fixture directory')
-        docs.append(ingest_document(path.name,path.read_bytes()))
+        docs.append(ingest_document(path.name,path.read_bytes(),
+                                    enrich=make_enricher() if args.enrich else None))
     documents={d.id:d for d in docs}
+    if args.enrich:
+        save_profiles(docs, args.output)
     by_name={d.name:d.id for d in docs}
     if args.traces:
         args.traces.mkdir(parents=True, exist_ok=True)

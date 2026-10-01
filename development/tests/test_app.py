@@ -103,6 +103,6 @@ def test_model_switch_clears_history_and_no_protocol_selector(monkeypatch):
     assert calls[-1]['model']=='claude-sonnet-4.5'
     assert 'planner_mode' not in calls[-1]
     assert not any(s.label=='Tool calling' for s in app.selectbox)
-    next(s for s in app.selectbox if s.label=='Model').set_value('scout').run()
+    next(s for s in app.selectbox if s.label=='Model').set_value('claude-haiku-4.5').run()
     assert app.session_state['messages']==[]
     assert not app.exception

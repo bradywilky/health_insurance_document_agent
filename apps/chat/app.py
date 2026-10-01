@@ -8,6 +8,9 @@ from backend.agents.llm import LLMCallLog
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
 
+AMBIGUITY_MODES = {'Off: answer directly': 'off', 'State assumptions': 'assumptions',
+                   'Ask when ambiguous': 'ask'}
+
 st.set_page_config(page_title='Health Insurance Document Agent', layout='wide')
 st.title('Health Insurance Document Agent')
 st.caption('Choose your sources. Ask a question. Check the evidence.')
@@ -44,6 +47,11 @@ with st.sidebar:
         format_func=lambda key: saved[key]['filename'], max_selections=10,
         help='Only these files are available to the answering agent.')
     model = st.selectbox('Model', list(MODELS))
+    ambiguity = AMBIGUITY_MODES[st.selectbox(
+        'Ambiguous questions', list(AMBIGUITY_MODES),
+        help='Off answers directly. State assumptions answers the most likely reading and names it. '
+             'Ask when ambiguous offers the possible readings for you to choose when they would give '
+             'different answers. The last two add one model call per question.')]
     if os.getenv('BEDROCK_MODEL_ID'):
         st.info('BEDROCK_MODEL_ID is set and overrides this model choice.')
     st.button('Clear selection and chat', on_click=clear_session)
@@ -78,6 +86,11 @@ else:
 
 
 def show_evidence(result):
+    if result.get('status') == 'needs_clarification':
+        return
+    interpretation = result.get('interpretation')
+    if interpretation and interpretation.get('alternatives'):
+        st.caption('Answered as: ' + interpretation['used'])
     protocol = result.get('protocol')
     if protocol:
         st.caption(f"{protocol['planner_mode']} tools · {protocol['repair_attempts']} corrective retries")
@@ -107,18 +120,13 @@ def show_evidence(result):
                 st.caption('This evidence contains only part of the available text.')
 
 
-for message in st.session_state.messages:
-    with st.chat_message(message['role']):
-        st.markdown(message['content'])
-        if 'result' in message:
-            show_evidence(message['result'])
-
-question = st.chat_input('Ask about the selected files', disabled=not selected)
-if question:
+def ask(question, clarification=None):
+    """Run the agent. A clarification re-runs the original question with the reading the user chose."""
+    shown = f'{question}\n\n*Meaning: {clarification}*' if clarification else question
     history = [{'role':m['role'],'content':m['content']} for m in st.session_state.messages]
-    st.session_state.messages.append({'role':'user','content':question})
+    st.session_state.messages.append({'role':'user','content':shown})
     with st.chat_message('user'):
-        st.markdown(question)
+        st.markdown(shown)
     with st.chat_message('assistant'):
         status = st.empty()
         log = LLMCallLog()
@@ -126,16 +134,60 @@ if question:
             # A per-call model setting is passed to the agent; never share user file caches.
             result = run_document_agent(st.session_state.documents,selected,question,
                 history=history,call_log=log,
-                on_step=lambda _:status.caption('Checking the selected sources…'),model=model)
+                on_step=lambda _:status.caption('Checking the selected sources…'),model=model,
+                ambiguity=ambiguity, clarification=clarification)
             status.empty()
             st.markdown(result['answer'])
             show_evidence(result)
             st.caption(f"{len(log.records)} model calls · "
                        f"{sum(r['usage'].get('inputTokens',0) for r in log.records):,} input tokens")
-            st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result})
+            st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result,
+                                              'question':question})
+            if result.get('status') == 'needs_clarification':
+                st.rerun()  # redraw so the reading buttons appear
         except Exception as exc:
             status.empty()
             if 'expired' in str(exc).lower() or 'LoginRefreshRequired' in type(exc).__name__:
                 st.error('AWS login has expired. Renew your configured AWS profile, then try again.')
             else:
                 st.error(f'The question could not be completed: {type(exc).__name__}: {exc}')
+
+
+def pending_clarification():
+    """The last assistant message, when it is an unanswered clarifying question."""
+    messages = st.session_state.messages
+    if messages and messages[-1].get('result', {}).get('status') == 'needs_clarification':
+        return messages[-1]
+    return None
+
+
+for index, message in enumerate(st.session_state.messages):
+    with st.chat_message(message['role']):
+        if message.get('result', {}).get('status') == 'needs_clarification':
+            clarification = message['result']['clarification']
+            st.markdown(clarification['question'])
+            if clarification.get('why'):
+                st.caption(clarification['why'])
+            if message is pending_clarification():
+                for number, option in enumerate(clarification['options']):
+                    if st.button(option, key=f'reading-{index}-{number}'):
+                        st.session_state.chosen_reading = (message['question'], option)
+                        st.rerun()
+                st.caption('Or type what you meant below.')
+            else:
+                st.markdown('\n'.join(f'- {option}' for option in clarification['options']))
+            continue
+        st.markdown(message['content'])
+        if 'result' in message:
+            show_evidence(message['result'])
+
+waiting = pending_clarification()
+typed = st.chat_input('Describe what you meant' if waiting else 'Ask about the selected files',
+                      disabled=not selected)
+chosen = st.session_state.pop('chosen_reading', None)
+if chosen:
+    ask(*chosen)
+elif typed and waiting:
+    ask(waiting['question'], clarification=typed)
+elif typed:
+    ask(typed)

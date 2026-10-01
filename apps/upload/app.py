@@ -5,6 +5,7 @@ load_dotenv()
 import streamlit as st
 from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
+from backend.agents.enrichment import make_enricher
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
 st.title('Document Upload Portal')
@@ -19,13 +20,18 @@ st.info('Saving the same filename replaces the saved document. Use different fil
 uploaded = st.file_uploader('Upload documents', type=[s[1:] for s in sorted(SUPPORTED)],
                             accept_multiple_files=True)
 st.caption('Up to 10 files per batch, 20 MB per file. Scanned PDFs require OCR; this portal reads text PDFs and Word body text/tables.')
+profile_at_upload = st.checkbox(
+    'Generate a semantic profile (document type, status, dates, references, glossary)',
+    help='Sends each file\'s full extracted text to Amazon Bedrock once at upload. The profile guides the '
+         'answering agent but is never cited as evidence. Review it below.')
 
 
 def save_files(files):
     for name, content in files:
         try:
             with st.spinner(f'Processing {name}...'):
-                doc = ingest_document(name, content, store=store)
+                enrich = make_enricher() if profile_at_upload else None
+                doc = ingest_document(name, content, store=store, enrich=enrich)
             st.success(f'Saved {doc.name}')
             for warning in doc.warnings:
                 st.warning(f'{doc.name}: {warning}')
@@ -48,3 +54,68 @@ with st.expander('Development examples'):
                    for name in names)
 
 st.caption('Open the chat app and click Refresh saved files to select your documents.')
+
+st.header('Review semantic profiles')
+st.caption('Confirm or correct what the model inferred. Confirmed glossary meanings are marked for the answering '
+           'agent; inferred ones stay labeled as guesses.')
+try:
+    saved = {item['manifest_key']: item for item in store.list_documents()}
+except Exception as exc:
+    st.error(f'Could not list saved files: {exc}')
+    saved = {}
+key = st.selectbox('Saved document', list(saved), index=None, format_func=lambda k: saved[k]['filename'],
+                   placeholder='Choose a saved document')
+if key:
+    doc = store.load(key)
+    profile = doc.profile
+    label = 'Regenerate profile' if profile else 'Generate profile'
+    if st.button(label, help='Sends the extracted text to Amazon Bedrock. Regenerating discards earlier review.'):
+        with st.spinner('Generating profile...'):
+            try:
+                store.save_profile(key, make_enricher()(doc))
+                st.rerun()
+            except Exception as exc:
+                st.error(f'Could not generate a profile: {type(exc).__name__}: {exc}')
+    if not profile:
+        st.info('No semantic profile for this document yet.')
+    else:
+        meta = profile.get('meta', {})
+        st.markdown(f"**{profile.get('document_type') or 'Unknown type'}** · status: {profile.get('status', 'unknown')}"
+                    + (' · reviewed' if meta.get('reviewed') else ''))
+        st.write(profile.get('summary', ''))
+        for title, field, show in [
+                ('Effective dates', 'effective_dates', lambda i: f"{i['label']}: {i['value']}"),
+                ('Identifiers', 'identifiers', lambda i: i['identifier']),
+                ('References to other documents', 'references', lambda i: f"{i['relationship']} {i['target']}"),
+                ('Status values', 'status_values', lambda i: f"{i['value']}: {i['meaning']}")]:
+            if profile.get(field):
+                st.markdown(f'**{title}**')
+                st.markdown('\n'.join(f'- {show(i)} — "{i.get("quote", "")}"' for i in profile[field]))
+        st.markdown('**Glossary**')
+        edited = st.data_editor(
+            [{'term': g['term'], 'meaning': g['meaning'], 'source': g['source'], 'quote': g.get('quote', '')}
+             for g in profile.get('glossary', [])],
+            num_rows='dynamic', key=f'glossary-{key}', use_container_width=True,
+            column_config={'source': st.column_config.SelectboxColumn(options=['defined', 'inferred', 'confirmed'],
+                                                                      required=True),
+                           'quote': st.column_config.TextColumn(disabled=True)})
+        if st.button('Save reviewed profile'):
+            rows = edited.to_dict('records') if hasattr(edited, 'to_dict') else list(edited)
+            locations = {g['term']: g.get('location') for g in profile.get('glossary', [])}
+            glossary = [{'term': r['term'].strip(), 'meaning': (r.get('meaning') or '').strip(),
+                         'source': r.get('source') or 'inferred', 'quote': r.get('quote') or '',
+                         'location': locations.get(r['term'])} for r in rows if (r.get('term') or '').strip()]
+            from datetime import datetime, timezone
+            reviewed = {**profile, 'glossary': glossary,
+                        'meta': {**meta, 'reviewed': True,
+                                 'reviewed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}}
+            try:
+                store.save_profile(key, reviewed)
+                st.success('Saved. The chat app uses the reviewed profile after Refresh saved files.')
+            except Exception as exc:
+                st.error(f'Could not save: {type(exc).__name__}: {exc}')
+        dropped = {k: v for k, v in profile.get('dropped', {}).items() if v}
+        if dropped:
+            st.caption(f'Claims removed or downgraded because their quotes were not found in the document: {dropped}')
+        if not meta.get('coverage', {}).get('complete', True):
+            st.warning('This profile covers only the beginning of a long document.')

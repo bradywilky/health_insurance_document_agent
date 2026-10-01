@@ -75,10 +75,12 @@ class ObjectDocumentStore:
                             'application/json' if name.endswith('.json') else 'text/csv')
         self._json(root + 'extracted.json', {'blocks':doc.blocks, 'warnings':doc.warnings,
                                             'table_metadata':doc.table_metadata})
+        if doc.profile:
+            self._json(root + 'semantic_profile.json', doc.profile)
         # Publish the manifest last. Failed uploads do not appear in the saved-file picker.
         key = root + 'manifest.json'
         manifest = {'schema_version':2, 'document_id':doc.id, 'filename':doc.name,
-                    'kind':doc.kind, 'has_tables':bool(doc.table_inputs)}
+                    'kind':doc.kind, 'has_tables':bool(doc.table_inputs), 'has_profile':bool(doc.profile)}
         self._json(key, manifest)
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':key}
         return doc.storage_ref
@@ -107,8 +109,21 @@ class ObjectDocumentStore:
                     raise ValueError('Invalid saved CSV filename')
             doc.table_inputs = dict(s3_client=self.client, s3_bucket=self.bucket,
                                     s3_prefix=self.prefix, plan_domain='documents', filename=name)
+        if manifest.get('has_profile'):
+            doc.profile = self._read_json(root + 'semantic_profile.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
         return doc
+
+    def save_profile(self, manifest_key, profile):
+        """Store a generated or reviewed profile for an already saved document."""
+        if self.read_only:
+            raise PermissionError("This document store is read-only")
+        root = self._root(manifest_key)
+        manifest = self._read_json(manifest_key)
+        if not isinstance(profile, dict) or not profile:
+            raise ValueError('Profile must be a nonempty object')
+        self._json(root + 'semantic_profile.json', profile)
+        self._json(manifest_key, {**manifest, 'has_profile': True})
 
     def list_documents(self, limit=100):
         if type(limit) is not int or limit < 1:

@@ -93,7 +93,7 @@ def test_native_log_snapshots_are_immutable():
     assert log.records[0]['stop_reason']=='tool_use'
 
 
-@pytest.mark.parametrize('model',['maverick','scout','claude-haiku-4.5','claude-sonnet-4.5','claude-opus-4.5'])
+@pytest.mark.parametrize('model',['maverick','claude-haiku-4.5','claude-sonnet-4.5','claude-opus-4.5'])
 def test_every_model_uses_native_even_with_obsolete_json_setting(monkeypatch,native_script,model):
     from backend.config.settings import MODELS
     monkeypatch.setenv('DOCUMENTS_PLANNER_MODE','json')

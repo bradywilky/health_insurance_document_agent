@@ -1,6 +1,6 @@
 # Health Insurance Document Agent
 
-`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama Maverick/Scout or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
+`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
 
 ## Project layout
 
@@ -60,7 +60,7 @@ In a second terminal, start the upload portal:
 
 Open http://127.0.0.1:8502 to upload and preprocess files, or click **Load Bingle-Dingle examples** there. Open http://127.0.0.1:8501 for chat, click **Refresh saved files**, and use **Files to answer from** to select sources. Changing selected files or model clears the conversation to keep comparisons independent.
 
-The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with at most 10 files per upload batch or chat selection and 20 MB per file. PDF references use page numbers; Word references use paragraph/table locations; spreadsheets preserve sheet and row references. Extraction warnings and the retrieved evidence appear alongside answers. Choose Maverick, Scout, or Claude Haiku/Sonnet/Opus 4.5; `BEDROCK_MODEL_ID`, if set, overrides that choice.
+The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with at most 10 files per upload batch or chat selection and 20 MB per file. PDF references use page numbers; Word references use paragraph/table locations; spreadsheets preserve sheet and row references. Extraction warnings and the retrieved evidence appear alongside answers. Choose Maverick or Claude Haiku/Sonnet/Opus 4.5; `BEDROCK_MODEL_ID`, if set, overrides that choice.
 
 `backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
 
@@ -82,7 +82,7 @@ This makes billable model calls. Results require human comparison with the expec
 
 The document agent uses native Bedrock Converse `toolConfig`, `toolUse`, and matching
 `toolResult` messages. The chat app, local CLI, streaming entry point, and both evaluation CLIs all use this workflow. Model choice is independent of tool calling:
-Maverick, Scout, and Claude Haiku/Sonnet/Opus 4.5 all use the same native protocol.
+Maverick and Claude Haiku/Sonnet/Opus 4.5 all use the same native protocol.
 There is no prompt-based JSON tool planner or automatic fallback. Unsupported model/API
 configurations fail explicitly. Final answer writing returns text through Converse; its response is never parsed as a tool request.
 
@@ -103,7 +103,6 @@ Run matched evaluations with local files and real Bedrock models (output paths m
 
 ```powershell
 .\.venv\Scripts\python -m development.evaluation.documents --model maverick --output development\runs\maverick-native.jsonl --traces development\runs\maverick-native-traces
-.\.venv\Scripts\python -m development.evaluation.documents --model scout --output development\runs\scout-native.jsonl
 .\.venv\Scripts\python -m development.evaluation.documents --model claude-haiku-4.5 --output development\runs\haiku-native.jsonl
 .\.venv\Scripts\python -m development.evaluation.documents --model claude-sonnet-4.5 --output development\runs\sonnet-native.jsonl
 .\.venv\Scripts\python -m development.evaluation.documents --model claude-opus-4.5 --output development\runs\opus-native.jsonl
@@ -138,7 +137,7 @@ Run the real agent using your existing local AWS profile:
 
 ```powershell
 .\.venv\Scripts\python -m development.cli.run_local data\insurance_mappings.xlsx "What is the total known billed amount in Claim Samples?" --profile dev-profile --model maverick --trace development\runs\maverick.json
-.\.venv\Scripts\python -m development.cli.run_local data\insurance_claims.csv "What is the total known billed amount?" --profile dev-profile --model scout --stream
+.\.venv\Scripts\python -m development.cli.run_local data\insurance_claims.csv "What is the total known billed amount?" --profile dev-profile --model maverick --stream
 ```
 
 Replace the file path and question to test your own files. CSV options include `--encoding cp1252` and `--delimiter ';'`. `.xlsx` and `.xls` files load all worksheets. The local preprocessor detects headers below title rows and preserves free-text metadata sheets. Explicit header/type overrides handle ambiguous layouts. Multiple tables per sheet and uncached formulas are not supported. See development/fixtures/README.md for details.
@@ -156,14 +155,13 @@ Defaults:
 | Selection | Bedrock inference profile |
 | --- | --- |
 | maverick | `us.meta.llama4-maverick-17b-instruct-v1:0` |
-| scout | `us.meta.llama4-scout-17b-instruct-v1:0` |
 | claude-haiku-4.5 | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
 | claude-sonnet-4.5 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` |
 | claude-opus-4.5 | `us.anthropic.claude-opus-4-5-20251101-v1:0` |
 
-`BEDROCK_MODEL_ID` overrides the selection when your deployment uses a specific inference profile ARN or ID. Remove that override when comparing `--model scout` and `--model maverick`. `BEDROCK_MAX_TOKENS` controls the output limit per call. These US profiles may route requests across US regions.
+`BEDROCK_MODEL_ID` overrides the selection when your deployment uses a specific inference profile ARN or ID. Remove that override when comparing models with `--model`. `BEDROCK_MAX_TOKENS` controls the output limit per call. These US profiles may route requests across US regions.
 
-AWS references: [Maverick](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-4-maverick-17b-instruct.html), [Scout](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-4-scout-17b-instruct.html), [using inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
+AWS references: [Maverick](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-meta-llama-4-maverick-17b-instruct.html), [using inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html).
 
 ## Files and AWS migration
 
@@ -426,3 +424,64 @@ answers that span tabs and surface conflicting rows.
 
 Bedrock calls use adaptive retries (`BEDROCK_MAX_ATTEMPTS`, default 6) so concurrent users sharing an
 account back off under throttling instead of failing.
+
+## Ambiguous questions
+
+The chat sidebar's **Ambiguous questions** setting (library: `run_document_agent(..., ambiguity=...)`):
+
+| Mode | Behavior |
+|---|---|
+| `off` (default) | Answer directly; no extra model call. |
+| `assumptions` | Answer the most likely reading. When other readings would change the answer, the answer opens by naming the reading used and the alternatives. |
+| `ask` | When other readings would change the answer, return `status: "needs_clarification"` with a question, a one-line reason and 2-4 readings instead of researching. The chat shows the readings as buttons or accepts a typed reply; the original question is re-run with `clarification=<chosen reading>`, which skips the check. |
+
+The check (`backend/agents/ambiguity.py`, LangGraph node `assess` between `init` and `plan`) is one native
+tool call that sees the question, recent conversation, each selected document's summary and column hints,
+and a 1,200-character preview of text documents. The model reports the ambiguous phrase, the most likely
+reading, alternative readings and why. The decision is made in code: ask only when there are real
+alternatives and the named phrase actually appears in the question, which rejects invented ambiguity.
+The chosen reading is passed to the planner and the answer writer (`result["interpretation"]`). A failed
+check never blocks an answer (`protocol.ambiguity_decision == "assessment_failed"`).
+
+`python -m development.evaluation.ambiguity --model maverick --output development/runs/ambiguity.jsonl`
+runs `development/fixtures/ambiguity_questions.json` (questions labeled ambiguous or clear) and records each
+decision, the offered readings and answers for review. In a small live run (16 questions per model),
+Maverick asked on 6 of 6 ambiguous questions and 1 of 10 clear ones.
+Offered readings were sometimes off target (a different axis than the one intended), so the typed reply
+remains available. This is a small sample; measure on your own questions before relying on it.
+
+`query_table` also accepts `derive`: `[{"column":"Element","as":"prefix","split":" - ","part":0}]` adds a
+column holding one part of each value (part -1 = last). Group by it to count by prefix or family exactly.
+
+## Models
+
+Llama 4 Scout was removed after it trailed Maverick in every evaluation (document, table, mapping-workbook
+and ambiguity question sets). Maverick is the default; Claude Haiku/Sonnet/Opus 4.5 remain available. To
+restore Scout, add `"scout": "us.meta.llama4-scout-17b-instruct-v1:0"` back to `MODELS` in
+`backend/config/settings.py`.
+
+## Semantic profiles (optional, at upload)
+
+The upload portal's **Generate a semantic profile** option (off by default) makes one Bedrock call per
+16,000-character chunk of a document's extracted text (spreadsheets: sheet index, narrative tabs in full and
+15 sample rows per data tab) and stores `semantic_profile.json` next to `extracted.json`. It sends the full
+extracted text to the model at upload, unlike questions, which send only retrieved excerpts.
+
+The profile (`backend/agents/enrichment.py`) holds a document card (type, status, dates, identifiers),
+references to other documents, a glossary, column roles and status meanings. Every claim must quote the
+document; code keeps only quotes found in the extracted text. Unquoted "defined" meanings become "inferred",
+ungrounded dates, identifiers, references and statuses are dropped, a draft or proposal cannot amend or
+supersede anything, version numbers are not identifiers, and guesses that restate the term are dropped.
+
+The planner receives a small view (`backend/shared/profile.py`): the card, references, and only glossary
+meanings the document states (in its own words) or the uploader confirmed. Model guesses and column roles stay
+in the stored profile and the portal's **Review semantic profiles** section, where an uploader can correct
+meanings, mark them confirmed, or generate a profile for an already saved document. Profiles are never cited
+as evidence. A failed profile never blocks an upload.
+
+Measured effect: on the 13 Bingle-Dingle and 13 Northstar questions, profiles did not change accuracy
+(Maverick 24/26 without, 23/26 with; individual cases flipped both ways) and added input tokens to every
+planner call. These question sets do not need cross-document terminology or document triage, which is where
+profiles are expected to help. Keep the option off unless your documents use undefined terms across files,
+and measure on your own questions. `--enrich` on `development.evaluation.documents` and
+`development.evaluation.tables` runs the same comparison and saves each profile next to the results.

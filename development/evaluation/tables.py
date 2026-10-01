@@ -9,6 +9,15 @@ from dotenv import load_dotenv
 from backend.config.settings import MODELS
 
 
+def save_profiles(docs, output):
+    """Write generated profiles next to the results for human review."""
+    import json as _json
+    folder = output.with_name(output.stem + '-profiles')
+    folder.mkdir(parents=True, exist_ok=True)
+    for doc in docs:
+        (folder / (doc.name + '.json')).write_text(_json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
+
+
 def main():
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -17,6 +26,8 @@ def main():
     parser.add_argument('--case', action='append', help='Case ID; repeat to select several. Default: all.')
     parser.add_argument('--model', choices=list(MODELS), default='maverick')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--enrich', action='store_true',
+                        help='Generate a semantic profile for the file before asking')
     parser.add_argument('--traces', type=Path, help='Save prompts and evidence per case under this local directory')
     args = parser.parse_args()
     os.environ['TABLES_MODEL'] = args.model
@@ -33,6 +44,10 @@ def main():
             raise ValueError(f'Unknown cases: {sorted(unknown)}')
         questions = [q for q in questions if q['id'] in args.case]
     doc = document_from_table_inputs(**prepare_local_file(args.file))
+    if args.enrich:
+        from backend.agents.enrichment import make_enricher
+        doc.profile = make_enricher()(doc)
+        save_profiles([doc], args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation protects earlier evaluation evidence.
     with args.output.open('x', encoding='utf-8') as output:

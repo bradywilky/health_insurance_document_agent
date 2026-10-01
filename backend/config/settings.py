@@ -6,7 +6,6 @@ MODELS = {
     "claude-haiku-4.5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "claude-sonnet-4.5": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "claude-opus-4.5": "us.anthropic.claude-opus-4-5-20251101-v1:0",
-    "scout": "us.meta.llama4-scout-17b-instruct-v1:0",
 }
 
 

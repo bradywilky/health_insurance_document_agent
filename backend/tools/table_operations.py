@@ -6,7 +6,8 @@ import pandas as pd
 from backend.preprocessing.profiling import MISSING_MARKERS, placeholder_values, similar_values
 
 MAX_JOIN_ROWS = 100_000
-QUERY_KEYS = {'filters', 'select', 'group_by', 'aggregations', 'sort', 'offset', 'limit', 'conversions', 'recode'}
+QUERY_KEYS = {'filters', 'select', 'group_by', 'aggregations', 'sort', 'offset', 'limit', 'conversions', 'recode',
+              'derive'}
 
 
 def _check_keys(params, allowed):
@@ -72,6 +73,30 @@ def recode(frame, specs):
             if unknown:
                 raise ValueError(f'recode keys not present in {col!r}: {unknown[:10]}. Use exact values from the column.')
             frame[col] = series.map(lambda v: mapping.get(v, v) if pd.notna(v) else v).astype('string')
+    return frame
+
+
+def derive(frame, specs):
+    """Add columns holding one part of a text value, e.g. the prefix of "Address - Code" split on " - ".
+
+    Lets questions group by a family, domain or prefix exactly instead of counting by eye.
+    """
+    if not isinstance(specs, list):
+        raise ValueError('derive must be a list')
+    frame = frame.copy()
+    for spec in specs:
+        _check_keys(spec, {'column', 'as', 'split', 'part'})
+        col, name, sep, part = spec.get('column'), spec.get('as'), spec.get('split'), spec.get('part', 0)
+        _columns(frame, [col])
+        if not isinstance(name, str) or not name or name in frame:
+            raise ValueError('derive "as" must name a new column')
+        if not isinstance(sep, str) or not sep:
+            raise ValueError('derive "split" must be a nonempty separator such as " - "')
+        if type(part) is not int:
+            raise ValueError('derive "part" must be an integer index (0 = first, -1 = last)')
+        pieces = frame[col].astype('string').str.split(sep, regex=False)
+        frame[name] = pieces.map(lambda p: p[part].strip() if isinstance(p, list) and -len(p) <= part < len(p)
+                                 else pd.NA).astype('string')
     return frame
 
 
@@ -221,7 +246,7 @@ def _conflicting_rows(frame, filtered, params):
 
 def query_table(frame, params):
     _check_keys(params, QUERY_KEYS)
-    frame = recode(frame, params.get('recode', []))
+    frame = derive(recode(frame, params.get('recode', [])), params.get('derive', []))
     filtered = filter_rows(frame, params.get('filters', []))
     conversions = params.get('conversions', [])
     if not isinstance(conversions, list):
@@ -325,7 +350,7 @@ def query_table(frame, params):
             'provenance_truncated': len(filtered) > 100,
             'unit_context': unit_context, 'conversions': conversions,
             'numeric_policy': 'Decimal arithmetic, 38 significant digits; means may repeat. No implicit rounding.',
-            'recode': params.get('recode', []),
+            'recode': params.get('recode', []), 'derive': params.get('derive', []),
             'filter_diagnostics': _filter_diagnostics(frame, params.get('filters', [])), 'notes': notes}
 
 

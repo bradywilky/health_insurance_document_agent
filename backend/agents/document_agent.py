@@ -1,4 +1,5 @@
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
+import json
 import re
 
 from backend.config.settings import get_model_config, MODELS
@@ -14,6 +15,7 @@ from backend.agents.document_protocol import tool_specs, has_content, examined_d
 from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.native import NativePlanner, validate_action
+from backend.agents import ambiguity as amb
 
 MAX_STEPS = 16
 MAX_REPAIRS = 2
@@ -35,6 +37,8 @@ Tools:
   select and aggregations cannot be combined; optional fields may be omitted. Filter ops: eq,ne,gt,ge,lt,le,in,contains,is_null,not_null. Aggregates: sum,mean,min,max,count,nunique,count_rows.
   recode (applied before filters and grouping): [{"column":"city","map":{"THR":"Tehran","tehr@n":"Tehran"}}]
   maps exact column values to one value, or to null ({"nan":null}) for text missing markers.
+  derive (applied after recode): [{"column":"Element Name","as":"prefix","split":" - ","part":0}] adds a column
+  holding one part of each value; group_by it to count by prefix, family or domain exactly.
   Several tabs at once: use "sheet_names": ["*"] (all data sheets) or a list instead of sheet_name. Rows gain
   _sheet and _source_row; sheets lacking a referenced column are skipped and listed; group_by ["_sheet"] counts per tab.
   join_tables joins two sheets WITHIN this selected file: {"left_sheet":"name","right_sheet":"name","left_on":["key"],"right_on":["key"],"how":"left","relationship":"many_to_one","left_filters":[],"right_filters":[],"query":{}}. Duplicate right keys block many_to_one joins. Do not bypass diagnostics to force a total.
@@ -66,6 +70,9 @@ When the tab holding an item is unknown, or a question spans tabs (totals, looku
 sheets at once with "sheet_names": ["*"]. Never conclude an item is absent after checking only some tabs.
 frequent_values shows status words (e.g. "Out of Scope") stored inside name columns; filter on them, not is_null.
 Narrative tabs (about, assumptions, version history) explain statuses and changes; read them for "what does X mean".
+semantic_profile (when present) is an upload-time LLM summary: document type, status, dates, references to other
+documents, glossary and column roles. Use it to decide where to look and which selected document governs; never cite
+it, and retrieve the source passage or row before relying on any of it. "inferred" glossary meanings are guesses.
 For spreadsheets with truncated text, use table tools to inspect later rows and other sheets.
 Do not treat missing formula caches as zero or claim that extracted Word body text covers headers,
 footers, text boxes or tracked changes. Do not invent PDF pages or Word page citations.
@@ -101,6 +108,9 @@ class DocumentState(TypedDict, total=False):
     finished: bool
     coverage_prompted: bool
     calculation_prompted: bool
+    ambiguity: str
+    clarification: str | None
+    interpretation: dict | None
     result: dict
 
 
@@ -108,6 +118,9 @@ def node_init(state: DocumentState) -> dict:
     model = state.get('model') or os.getenv('TABLES_MODEL', 'maverick').lower()
     if model not in MODELS:
         raise ValueError(f'Model must be one of {list(MODELS)}')
+    mode = state.get('ambiguity') or 'off'
+    if mode not in amb.MODES:
+        raise ValueError(f'ambiguity must be one of {list(amb.MODES)}')
     docs = selected_documents(state['documents'], state['document_ids'])
     question = state['question']
     if not isinstance(question, str) or not question.strip():
@@ -128,7 +141,8 @@ def node_init(state: DocumentState) -> dict:
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
             'stats': {'planner_mode': 'native', 'validation_errors': 0, 'repair_attempts': 0,
                       'duplicate_requests': 0, 'coverage_prompts': 0, 'auto_reads': 0, 'calculation_prompts': 0,
-                      'answer_revisions': 0}}
+                      'answer_revisions': 0, 'ambiguity_mode': mode, 'ambiguity_decision': 'off'},
+            'ambiguity': mode, 'interpretation': None}
 
 
 def _unexamined(docs, evidence):
@@ -148,6 +162,49 @@ def _calculation(name, params, evidence, question):
     if set(params.get('sources', [])) - set(known):
         raise ValueError('date_calculate sources must be existing evidence IDs or "question"')
     return date_calculate(params)
+
+
+def node_assess(state: DocumentState) -> dict:
+    """Optionally check the question for ambiguity before research (see backend/agents/ambiguity.py)."""
+    stats = dict(state['stats'])
+    if state.get('clarification'):
+        interpretation = {'used': state['clarification'], 'alternatives': []}
+        stats['ambiguity_decision'] = 'clarified_by_user'
+    elif state['ambiguity'] == 'off':
+        return {}
+    else:
+        _, inference = get_model_config()
+        llm = LLM(agent_name='health_insurance_document_agent', tool_name='Ambiguity Assessment',
+                  model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[state['model']], params=inference,
+                  call_log=state['call_log'])
+        payload = {'question': state['question'],
+                   'history': bounded((state.get('history') or [])[-6:], max_chars=4000),
+                   'selected_documents': [amb.document_view(doc) for doc in state['docs'].values()]}
+        try:
+            assessment = amb.assess(llm, payload)
+            decision = amb.decide(assessment, state['ambiguity'], state['question'])
+            stats['ambiguity_assessment'] = assessment
+        except (ValueError, KeyError, TypeError):
+            # Fail open: a failed check never blocks an answer.
+            stats['ambiguity_decision'] = 'assessment_failed'
+            return {'stats': stats}
+        stats['ambiguity_decision'] = decision['decision']
+        if decision['decision'] == 'ask':
+            clarification = decision['clarification']
+            return {'stats': stats, 'result': {
+                'status': 'needs_clarification', 'answer': amb.clarification_text(clarification),
+                'clarification': clarification, 'evidence': [], 'limitations': [],
+                'document_ids': list(state['docs']), 'protocol': stats, 'interpretation': None,
+                'coverage': {'examined': [], 'auto_read': [], 'unexamined': []}}}
+        interpretation = decision['interpretation']
+    # The planner researches the chosen reading; the writer states it.
+    state['planner'].messages[0]['content'].append({'text': 'Answer this reading of the question: '
+                                                    + json.dumps(interpretation)})
+    return {'stats': stats, 'interpretation': interpretation}
+
+
+def route_after_assess(state: DocumentState) -> str:
+    return END if 'result' in state else 'plan'
 
 
 def node_plan(state: DocumentState) -> dict:
@@ -254,8 +311,14 @@ Do not make an automatic operational decision. State source rules and supported 
 Do not add hypothetical limitations that are not present in evidence.
 When a table result used recode, state which original values were combined. When exact matching left similar
 spellings out (filter_diagnostics), say so and give their counts. Mention possible placeholder values (e.g. -999999)
-that affect a total, and text missing markers counted or excluded. When notes say several rows disagree,
-report every version with its tab and row instead of choosing one. Cite tab names and row numbers (_source_row).'''
+that affect a total, and text missing markers counted or excluded.
+When notes say several rows disagree, report every version with its tab and row instead of choosing one.
+Cite tab names and row numbers (_source_row).'''
+
+# Only sent when the ambiguity step chose a reading; otherwise models narrate "the reading used" unprompted.
+INTERPRETATION_RULE = '''
+Answer the reading in "interpretation". If it lists alternatives, open with one sentence naming the reading used
+and the alternatives. If it lists none, do not mention readings or interpretation.'''
 
 
 def node_synthesize(state: DocumentState) -> dict:
@@ -269,7 +332,10 @@ def node_synthesize(state: DocumentState) -> dict:
     usable = substantive + [e for e in evidence if e['tool'] in {'calculate', 'date_calculate'}]
     payload = {'question': question, 'evidence': bounded(usable, max_chars=50000),
                'limitations': limitations, 'unexamined_documents': unexamined}
-    answer = _call(WRITER, payload, log, phase='Document Answer', model=model)
+    if state.get('interpretation'):
+        payload['interpretation'] = state['interpretation']
+    writer = WRITER + (INTERPRETATION_RULE if state.get('interpretation') else '')
+    answer = _call(writer, payload, log, phase='Document Answer', model=model)
     if not isinstance(answer, str):
         raise ValueError('Model did not return an answer')
     amounts = unsupported_amounts(answer, usable, question)
@@ -284,7 +350,7 @@ def node_synthesize(state: DocumentState) -> dict:
     if issues:
         # One bounded revision with specific, deterministic feedback.
         stats['answer_revisions'] += 1
-        answer = _call(WRITER + '\nRevise draft_answer to fix every listed issue; change nothing else.',
+        answer = _call(writer + '\nRevise draft_answer to fix every listed issue; change nothing else.',
                        {**payload, 'draft_answer': answer, 'issues': issues},
                        log, phase='Document Answer Revision', model=model)
         limitations.extend('Answer check: ' + issue for issue in answer_issues(answer, usable, question))
@@ -308,8 +374,9 @@ def _result(state, answer, limitations, stats):
     coverage = {'examined': [docs[d].name for d in docs if d in examined_documents(evidence)],
                 'auto_read': [docs[e['parameters']['document_id']].name for e in evidence if e.get('auto')],
                 'unexamined': unexamined}
-    return {'result': {'answer': answer, 'evidence': evidence, 'limitations': limitations,
-                       'document_ids': list(docs), 'protocol': stats, 'coverage': coverage}}
+    return {'result': {'status': 'answered', 'answer': answer, 'evidence': evidence, 'limitations': limitations,
+                       'document_ids': list(docs), 'protocol': stats, 'coverage': coverage,
+                       'interpretation': state.get('interpretation')}}
 
 
 def route_after_tools(state: DocumentState) -> str:
@@ -328,7 +395,9 @@ def build_document_graph():
     graph.add_node('tools', node_tools)
     graph.add_node('synthesize', node_synthesize)
     graph.add_edge(START, 'init')
-    graph.add_edge('init', 'plan')
+    graph.add_node('assess', node_assess)
+    graph.add_edge('init', 'assess')
+    graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
     graph.add_edge('plan', 'tools')
     graph.add_conditional_edges('tools', route_after_tools,
                                 {'plan': 'plan', 'synthesize': 'synthesize'})
@@ -339,22 +408,27 @@ def build_document_graph():
 DOCUMENT_GRAPH = build_document_graph()
 
 
-def run_document_agent(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None):
+def run_document_agent(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,
+                       ambiguity='off', clarification=None):
     """Run the LangGraph workflow while preserving the document-agent API."""
     state = DOCUMENT_GRAPH.invoke(
         {'documents': documents, 'document_ids': document_ids, 'question': question,
-         'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model},
+         'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model,
+              'ambiguity': ambiguity, 'clarification': clarification},
         config={'recursion_limit': MAX_STEPS * 2 + 10})
     return state['result']
 
 
-def run_document_agent_stream(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None):
+def run_document_agent_stream(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,
+                       ambiguity='off', clarification=None):
     """Stream progress from the same graph; omit runtime objects and raw evidence from updates."""
     inputs = {'documents': documents, 'document_ids': document_ids, 'question': question,
-              'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model}
+              'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model,
+              'ambiguity': ambiguity, 'clarification': clarification}
     for event in DOCUMENT_GRAPH.stream(inputs, stream_mode='updates',
                                       config={'recursion_limit': MAX_STEPS * 2 + 10}):
         for node, update in event.items():
+            update = update or {}  # a step that changes nothing (e.g. assess when off) streams None
             if 'result' in update:
                 result = update['result']
                 yield {'answer': result['answer'], 'limitations': result['limitations'],

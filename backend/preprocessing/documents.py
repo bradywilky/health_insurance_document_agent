@@ -28,7 +28,7 @@ def _add_text(doc, text, location):
                            'location':location})
 
 
-def ingest_document(name: str, content: bytes, *, store=None) -> Document:
+def ingest_document(name: str, content: bytes, *, store=None, enrich=None) -> Document:
     name = name.replace('\\','/').rsplit('/',1)[-1]
     extension = Path(name).suffix.lower()
     if extension not in SUPPORTED:
@@ -83,6 +83,12 @@ def ingest_document(name: str, content: bytes, *, store=None) -> Document:
             _add_text(doc, paragraph, {'paragraph':number})
     if not doc.blocks:
         doc.warnings.append('No searchable text was extracted from this file.')
+    if enrich is not None:
+        # Optional LLM semantic profile (backend/agents/enrichment.py). Sends the extracted text to the model.
+        try:
+            doc.profile = enrich(doc)
+        except Exception as exc:
+            doc.warnings.append(f'Semantic profile not generated: {type(exc).__name__}: {exc}')
     if store is not None:
         store.save(doc, content)
     return doc

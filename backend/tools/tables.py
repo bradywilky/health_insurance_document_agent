@@ -30,9 +30,10 @@ def _load_for_query(load, name, meta):
 
 def _referenced_columns(params):
     names = set(params.get('select', [])) | set(params.get('group_by', []))
-    for key in ('filters', 'aggregations', 'recode', 'sort'):
+    for key in ('filters', 'aggregations', 'recode', 'sort', 'derive'):
         names |= {item.get('column') for item in params.get(key, []) if isinstance(item, dict)}
-    return {n for n in names if n and n not in {'_sheet', '_source_row'}}
+    derived = {item.get('as') for item in params.get('derive', []) if isinstance(item, dict)}
+    return {n for n in names if n and n not in {'_sheet', '_source_row'} | derived}
 
 
 def _query_many(sheet_names, params, load, sheets):
