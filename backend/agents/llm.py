@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 import boto3
 
+from backend.observability import tracing
+
 
 @dataclass
 class LLMCallLog:
@@ -49,7 +51,22 @@ class LLM:
         if tool_config is not None:
             request['toolConfig'] = tool_config
         start = time.monotonic()
-        response = self._client.converse(**request)
+        # GenAI semantic-convention span; prompt/response text only when TRACE_CONTENT=true.
+        with tracing.span(f'chat {self.model_id}', **{
+                'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'aws.bedrock', 'gen_ai.system': 'aws.bedrock',
+                'gen_ai.request.model': self.model_id, 'app.llm.step': self.tool_name,
+                'gen_ai.request.max_tokens': (self.params or {}).get('maxTokens'),
+                'app.llm.tools_offered': len((tool_config or {}).get('tools', []))}) as current:
+            tracing.add_content(current, 'gen_ai.input', system=system, messages=messages)
+            response = self._client.converse(**request)
+            usage = response.get('usage', {})
+            message = response['output']['message']
+            tracing.set_attributes(current, **{
+                'gen_ai.usage.input_tokens': usage.get('inputTokens'),
+                'gen_ai.usage.output_tokens': usage.get('outputTokens'),
+                'gen_ai.response.finish_reasons': [response.get('stopReason')],
+                'app.llm.tool_calls': [b['toolUse']['name'] for b in message.get('content', []) if 'toolUse' in b]})
+            tracing.add_content(current, 'gen_ai.output', message=message)
         self.usage = response.get('usage', {})
         if self.call_log is not None:
             self.call_log.append(dict(timestamp=datetime.now(timezone.utc).isoformat(),

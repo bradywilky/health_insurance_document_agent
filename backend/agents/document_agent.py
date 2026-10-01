@@ -16,6 +16,7 @@ from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.native import NativePlanner, validate_action
 from backend.agents import ambiguity as amb
+from backend.observability import tracing
 
 MAX_STEPS = 16
 MAX_REPAIRS = 2
@@ -257,15 +258,28 @@ def node_tools(state: DocumentState) -> dict:
                 raise ValueError('Tool execution budget reached. Finish with available evidence.')
             if state.get('on_step'):
                 state['on_step'](f"Step {state['steps']}: {name}")
-            if name in {'calculate', 'date_calculate'}:
-                try:
-                    data = _calculation(name, params, evidence, state['question'])
-                except ValueError as exc:
-                    # Bad inputs are a tool result for the planner to fix, not a protocol failure.
-                    results.append({'error': str(exc)})
-                    continue
-            else:
-                data = execute_document_tool(name, params, state['docs'])
+            with tracing.span(f'execute_tool {name}', **{
+                    'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.name': name,
+                    'app.tool.operation': params.get('name') if name == 'table_tool' else None,
+                    'app.document_id': params.get('document_id'), 'app.document_ids': params.get('document_ids'),
+                    'app.evidence_id': f'E{len(evidence)+1}'}) as tool_span:
+                if name in {'calculate', 'date_calculate'}:
+                    try:
+                        data = _calculation(name, params, evidence, state['question'])
+                    except ValueError as exc:
+                        # Bad inputs are a tool result for the planner to fix, not a protocol failure.
+                        tracing.mark_error(tool_span, exc)
+                        results.append({'error': str(exc)})
+                        continue
+                else:
+                    data = execute_document_tool(name, params, state['docs'])
+                failed = data.get('error') or (data.get('table_result') or {}).get('error')
+                if failed:
+                    tracing.mark_error(tool_span, failed)
+                tracing.set_attributes(tool_span, **{
+                    'app.tool.matches': len(data.get('matches', [])) if 'matches' in data else None,
+                    'app.tool.blocks': len(data.get('blocks', [])) if 'blocks' in data else None,
+                    'app.tool.matched_rows': (data.get('table_result') or {}).get('matched_rows')})
             record = {'id': f'E{len(evidence)+1}', 'tool': name, 'parameters': params, 'data': data}
             seen[key] = record['id']
             evidence.append(record)
@@ -319,6 +333,14 @@ Cite tab names and row numbers (_source_row).'''
 INTERPRETATION_RULE = '''
 Answer the reading in "interpretation". If it lists alternatives, open with one sentence naming the reading used
 and the alternatives. If it lists none, do not mention readings or interpretation.'''
+
+
+def _prompt_version():
+    """Hash of every instruction and tool definition the models see; recorded in each audit record."""
+    from hashlib import sha256
+    parts = [SYSTEM, WRITER, INTERPRETATION_RULE, amb.ASSESS_SYSTEM,
+             json.dumps(amb.ASSESS_SPEC, sort_keys=True), json.dumps(tool_specs(['<document>']), sort_keys=True)]
+    return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 
 def node_synthesize(state: DocumentState) -> dict:
@@ -390,12 +412,12 @@ def route_after_synthesize(state: DocumentState) -> str:
 def build_document_graph():
     """Compile the research workflow; each invocation has its own runtime state."""
     graph = StateGraph(DocumentState)
-    graph.add_node('init', node_init)
-    graph.add_node('plan', node_plan)
-    graph.add_node('tools', node_tools)
-    graph.add_node('synthesize', node_synthesize)
+    graph.add_node('init', tracing.traced_node('init')(node_init))
+    graph.add_node('plan', tracing.traced_node('plan')(node_plan))
+    graph.add_node('tools', tracing.traced_node('tools')(node_tools))
+    graph.add_node('synthesize', tracing.traced_node('synthesize')(node_synthesize))
     graph.add_edge(START, 'init')
-    graph.add_node('assess', node_assess)
+    graph.add_node('assess', tracing.traced_node('assess')(node_assess))
     graph.add_edge('init', 'assess')
     graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
     graph.add_edge('plan', 'tools')
@@ -406,6 +428,7 @@ def build_document_graph():
 
 
 DOCUMENT_GRAPH = build_document_graph()
+PROMPT_VERSION = _prompt_version()
 
 
 def run_document_agent(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,

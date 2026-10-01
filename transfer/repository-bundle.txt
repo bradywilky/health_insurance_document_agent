@@ -1,6 +1,6 @@
 REPOSITORY-TEXT-BUNDLE-V1
 ===== REPOSITORY FILE =====
-{"path": ".env.example", "characters": 711, "sha256": "130b91147866fb63c18461c2306de04f5c261d72b8820bd63b9b23f331ee2890"}
+{"path": ".env.example", "characters": 1911, "sha256": "b7c4c4ba50ab7ac1df07902258465944dfc37fcd5de4e4d977bcdf6e9976c6e4"}
 # Replace with your own local profile name. Never add credentials here.
 AWS_PROFILE=dev-profile
 AWS_DEFAULT_REGION=us-east-1
@@ -19,6 +19,29 @@ DOCUMENTS_S3_BUCKET=
 DOCUMENTS_S3_PREFIX=document-agent/
 # Optional; otherwise the destination bucket encryption policy applies.
 # DOCUMENTS_S3_KMS_KEY_ID=
+
+# Audit records (backend/observability/audit.py). local writes JSON lines under AUDIT_LOCAL_DIR; s3 writes one
+# object per record. Metadata records hold no question or answer text. Relative paths resolve from the project root.
+AUDIT_STORAGE=local
+AUDIT_LOCAL_DIR=data/audit
+# AUDIT_S3_BUCKET=            # defaults to DOCUMENTS_S3_BUCKET
+# AUDIT_S3_PREFIX=document-agent/
+# AUDIT_S3_KMS_KEY_ID=        # defaults to DOCUMENTS_S3_KMS_KEY_ID
+# Also record question, answer, evidence and full model calls in a separate content tier. Can contain PHI.
+AUDIT_CONTENT=false
+# Fail a question when its audit record cannot be written.
+AUDIT_REQUIRED=false
+# Trust identity headers from an authenticating proxy (ALB OIDC, identity-aware proxy). Only behind such a proxy.
+AUDIT_TRUST_HEADERS=false
+# AUDIT_USER=
+# APP_VERSION=                # e.g. the deployed git SHA; otherwise a hash of the backend source
+
+# OpenTelemetry spans (backend/observability/tracing.py). off, file or console. In AWS, leave off and run under
+# ADOT's opentelemetry-instrument instead (see README).
+TRACING=off
+TRACING_FILE=data/traces/spans.jsonl
+# Attach prompt and response text to spans. Can contain PHI.
+TRACE_CONTENT=false
 
 ===== REPOSITORY FILE =====
 {"path": ".gitignore", "characters": 1053, "sha256": "aa8e0f14451ced0526af967258e89e2275e982c958d9a7e0ed0b97685ae9ed30"}
@@ -85,7 +108,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 38165, "sha256": "d5bbe683a7566ae90429ff3e105299eddfc3ef9ee21a2a1f968ffe3ae60c0d98"}
+{"path": "README.md", "characters": 43539, "sha256": "5a7b8af20646871e87264b2e69a009a9982964380ec16d9c688d77b1df5ad2fa"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
@@ -104,6 +127,8 @@ backend/         Reusable application backend
   storage/       Local/S3 persistence and table loading
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
+  services/      Question service: agent run with audit record and trace
+  observability/ Audit records, OpenTelemetry spans, user identity
 apps/            Replaceable Streamlit interfaces
   chat/app.py    Saved-document selection and questions (port 8501)
   upload/app.py  Upload, preprocessing and saving (port 8502)
@@ -128,7 +153,8 @@ Dependencies and local configuration stay at the root (`requirements*.txt`, `.en
 `.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
 managed dependency/cache folders, not application code.
 
-Import integrations from `backend.agents.document_agent`. Root-level Python
+Import integrations from `backend.services.questions` (`answer_question`, which audits and traces each run)
+or, without auditing, `backend.agents.document_agent`. Root-level Python
 modules have been relocated, so update imports and launch commands to the paths shown here.
 The former table-agent entry points have been removed; migrate callers as shown below.
 
@@ -574,6 +600,91 @@ profiles are expected to help. Keep the option off unless your documents use und
 and measure on your own questions. `--enrich` on `development.evaluation.documents` and
 `development.evaluation.tables` runs the same comparison and saves each profile next to the results.
 
+## Audit and tracing
+
+Two separate records answer different questions. The **audit record** is the system of record for who asked
+what, of which documents, with which model and prompts, and what came back. **Traces** show how a run behaved:
+each graph step, Bedrock call and tool execution with its latency, tokens and errors. Both carry the same
+`trace_id`, and the chat app shows the first 12 characters of the `request_id` under every answer.
+
+`backend/services/questions.py` `answer_question(...)` is the entry point the chat app and the command-line tool
+use. It writes the audit record whether the question succeeds or fails.
+
+### Audit records (`backend/observability/audit.py`)
+
+| Tier | Written | Contains |
+| --- | --- | --- |
+| `metadata/questions` | always | request and session IDs, user, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
+| `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with user, file SHA-256 and size |
+| `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation, evidence and every prompt and response |
+
+The content tier can contain PHI. Store it under its own prefix with a separate KMS key, tighter IAM access,
+and its own retention; the metadata tier can be kept longer and shared with reviewers. Hashes let a reviewer
+confirm that a question or answer matches the record without the metadata tier holding the text.
+
+`AUDIT_STORAGE=local` (default) appends JSON lines to `data/audit/{tier}/{kind}/YYYY-MM-DD.jsonl`.
+`AUDIT_STORAGE=s3` writes one object per record to
+`{AUDIT_S3_PREFIX}audit/{tier}/{kind}/YYYY/MM/DD/{timestamp}-{id}.json`, never rewritten, so S3 Object Lock and
+per-tier lifecycle rules apply cleanly; Athena can query either tier. A failed write logs a warning, or fails
+the request when `AUDIT_REQUIRED=true`.
+
+The user comes from an authenticating proxy header (`X-Amzn-Oidc-Identity` from an ALB with OIDC/Cognito,
+`X-Forwarded-User`, and similar) only when `AUDIT_TRUST_HEADERS=true`. Enable that only behind such a proxy,
+because any client can send those headers otherwise. Without it the record uses `AUDIT_USER` or the operating
+system user and marks the identity `authenticated: false`.
+
+`prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
+`APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
+
+### Traces (`backend/observability/tracing.py`)
+
+Spans follow the OpenTelemetry GenAI conventions:
+
+```text
+invoke_agent document_agent           session.id, app.request_id, app.user.id, document IDs, status
+  graph.node init | assess | plan | tools | synthesize
+    chat <model id>                    gen_ai.request.model, gen_ai.usage.input/output_tokens, finish reason, tool calls
+    execute_tool <tool name>           gen_ai.tool.name, app.evidence_id, document IDs, match/row counts; error status
+ingest_document                        (upload portal) file kind, size, profile requested
+```
+
+Prompt and response text is attached as span events only with `TRACE_CONTENT=true` (PHI risk; keep it off in
+shared environments). Without a tracer provider the OpenTelemetry API is a no-op.
+
+For development, `TRACING=file` writes spans to `data/traces/spans.jsonl` and `TRACING=console` prints them.
+
+### AWS: CloudWatch GenAI Observability (AgentCore Observability)
+
+The spans work with AgentCore Observability without running on AgentCore Runtime:
+
+1. Enable CloudWatch Transaction Search once per account and Region.
+2. `pip install "aws-opentelemetry-distro>=0.18.0"` in the deployment image.
+3. Set `TRACING=off` (ADOT installs the provider) and the ADOT variables, for example:
+
+   ```text
+   AGENT_OBSERVABILITY_ENABLED=true
+   OTEL_PYTHON_DISTRO=aws_distro
+   OTEL_PYTHON_CONFIGURATOR=aws_configurator
+   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+   OTEL_TRACES_EXPORTER=otlp
+   OTEL_RESOURCE_ATTRIBUTES=service.name=document-agent
+   OTEL_EXPORTER_OTLP_LOGS_HEADERS=x-aws-log-group=<log group>,x-aws-log-stream=<stream>,x-aws-metric-namespace=document-agent
+   ```
+
+4. Launch through the instrumenter:
+
+   ```text
+   opentelemetry-instrument streamlit run apps/chat/app.py --server.port 8501
+   ```
+
+ADOT also instruments botocore, so each Bedrock call gets an AWS SDK span next to the `chat` span. Traces then
+appear in the CloudWatch GenAI Observability console with token, latency and error views, and an audit
+record's `trace_id` finds its trace. Check current ADOT settings in the AWS documentation before deploying.
+
+Alongside these, turn on Bedrock model invocation logging (to an encrypted, restricted bucket; it holds full
+prompts) and CloudTrail data events for the document and audit buckets. Those record calls the application
+cannot misreport.
+
 ===== REPOSITORY FILE =====
 {"path": "apps/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
@@ -581,14 +692,17 @@ and measure on your own questions. `--enrich` on `development.evaluation.documen
 {"path": "apps/chat/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/chat/app.py", "characters": 8924, "sha256": "72af2d8824e424bf7734e30ab2015701b213024dce8944cff067381e913c2918"}
+{"path": "apps/chat/app.py", "characters": 9315, "sha256": "a01e94dfef1635098bbd7b56963ae5b1827cecf531550ed13a9bc017990c1f32"}
 """Saved-document selection and chat. Run: streamlit run apps/chat/app.py"""
 import os
 from dotenv import load_dotenv
 load_dotenv()
+import uuid
 import streamlit as st
-from backend.agents.document_agent import run_document_agent
 from backend.agents.llm import LLMCallLog
+from backend.observability.identity import resolve_user
+from backend.observability.tracing import configure_tracing
+from backend.services.questions import answer_question
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
 
@@ -599,6 +713,8 @@ st.set_page_config(page_title='Health Insurance Document Agent', layout='wide')
 st.title('Health Insurance Document Agent')
 st.caption('Choose your sources. Ask a question. Check the evidence.')
 st.session_state.setdefault('messages', [])
+st.session_state.setdefault('session_id', uuid.uuid4().hex)
+configure_tracing()
 st.session_state.setdefault('selection_signature', ())
 try:
     store = configured_store(read_only=True)
@@ -716,15 +832,17 @@ def ask(question, clarification=None):
         log = LLMCallLog()
         try:
             # A per-call model setting is passed to the agent; never share user file caches.
-            result = run_document_agent(st.session_state.documents,selected,question,
-                history=history,call_log=log,
+            result = answer_question(st.session_state.documents,selected,question,
+                user=resolve_user(getattr(st.context, 'headers', None)), app='chat',
+                session_id=st.session_state.session_id, history=history,call_log=log,
                 on_step=lambda _:status.caption('Checking the selected sources…'),model=model,
                 ambiguity=ambiguity, clarification=clarification)
             status.empty()
             st.markdown(result['answer'])
             show_evidence(result)
             st.caption(f"{len(log.records)} model calls · "
-                       f"{sum(r['usage'].get('inputTokens',0) for r in log.records):,} input tokens")
+                       f"{sum(r['usage'].get('inputTokens',0) for r in log.records):,} input tokens · "
+                       f"reference {result['request_id'][:12]}")
             st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result,
                                               'question':question})
             if result.get('status') == 'needs_clarification':
@@ -780,7 +898,7 @@ elif typed:
 {"path": "apps/upload/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/upload/app.py", "characters": 6907, "sha256": "8186b302f4de04fb811a2a959c0b669c100d3d58a5fec3227dff32badcd6e611"}
+{"path": "apps/upload/app.py", "characters": 8948, "sha256": "cbdc759ddde3831f1967a27064e46d0d0449090059cf93ea9e793cb9208df82b"}
 """Document upload portal. Run: streamlit run apps/upload/app.py --server.port 8502"""
 from pathlib import Path
 from dotenv import load_dotenv
@@ -789,6 +907,15 @@ import streamlit as st
 from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
+from backend.observability import tracing
+from backend.observability.identity import resolve_user
+from backend.services.questions import record_document_event
+
+tracing.configure_tracing()
+
+
+def audit_event(event, **fields):
+    record_document_event(event, user=resolve_user(getattr(st.context, 'headers', None)), app='upload', **fields)
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
 st.title('Document Upload Portal')
@@ -812,13 +939,21 @@ profile_at_upload = st.checkbox(
 def save_files(files):
     for name, content in files:
         try:
-            with st.spinner(f'Processing {name}...'):
+            with st.spinner(f'Processing {name}...'), tracing.span('ingest_document', **{
+                    'app.document.kind': Path(name).suffix.lower(), 'app.document.bytes': len(content),
+                    'app.profile_requested': profile_at_upload}):
                 enrich = make_enricher() if profile_at_upload else None
                 doc = ingest_document(name, content, store=store, enrich=enrich)
+                profile_meta = (doc.profile or {}).get('meta', {}) if getattr(doc, 'profile', None) else {}
+                audit_event('document_uploaded', document=doc, content=content,
+                            details={'profile_requested': profile_at_upload,
+                                     'profile_generated': bool(getattr(doc, 'profile', None)),
+                                     'profile_model_id': profile_meta.get('model_id')})
             st.success(f'Saved {doc.name}')
             for warning in doc.warnings:
                 st.warning(f'{doc.name}: {warning}')
         except Exception as exc:
+            audit_event('upload_failed', filename=name, content=content, error=f'{type(exc).__name__}: {exc}'[:1000])
             st.error(f'Could not save {name}: {type(exc).__name__}: {exc}')
 
 
@@ -855,7 +990,11 @@ if key:
     if st.button(label, help='Sends the extracted text to Amazon Bedrock. Regenerating discards earlier review.'):
         with st.spinner('Generating profile...'):
             try:
-                store.save_profile(key, make_enricher()(doc))
+                generated = make_enricher()(doc)
+                store.save_profile(key, generated)
+                audit_event('profile_generated', document=doc, details={
+                    'manifest_key': key, 'profile_model_id': generated.get('meta', {}).get('model_id'),
+                    'glossary_terms': len(generated.get('glossary', []))})
                 st.rerun()
             except Exception as exc:
                 st.error(f'Could not generate a profile: {type(exc).__name__}: {exc}')
@@ -894,6 +1033,14 @@ if key:
                                  'reviewed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}}
             try:
                 store.save_profile(key, reviewed)
+                before = {g['term']: (g['meaning'], g['source']) for g in profile.get('glossary', [])}
+                after = {g['term']: (g['meaning'], g['source']) for g in glossary}
+                audit_event('profile_reviewed', document=doc, details={
+                    'manifest_key': key,
+                    'terms_added': sorted(set(after) - set(before)),
+                    'terms_removed': sorted(set(before) - set(after)),
+                    'terms_changed': sorted(t for t in set(after) & set(before) if after[t] != before[t]),
+                    'terms_confirmed': sum(1 for v in after.values() if v[1] == 'confirmed')})
                 st.success('Saved. The chat app uses the reviewed profile after Refresh saved files.')
             except Exception as exc:
                 st.error(f'Could not save: {type(exc).__name__}: {exc}')
@@ -1067,7 +1214,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 27054, "sha256": "ad18bc41b275ce81d4394d746048b2c1ffc7aff812b3a2bc81629546f58614fa"}
+{"path": "backend/agents/document_agent.py", "characters": 28760, "sha256": "f0d425cf89d082abad01fd11d6f30a490294e2d174d667127a0f32e7520e65c1"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1086,6 +1233,7 @@ from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.native import NativePlanner, validate_action
 from backend.agents import ambiguity as amb
+from backend.observability import tracing
 
 MAX_STEPS = 16
 MAX_REPAIRS = 2
@@ -1327,15 +1475,28 @@ def node_tools(state: DocumentState) -> dict:
                 raise ValueError('Tool execution budget reached. Finish with available evidence.')
             if state.get('on_step'):
                 state['on_step'](f"Step {state['steps']}: {name}")
-            if name in {'calculate', 'date_calculate'}:
-                try:
-                    data = _calculation(name, params, evidence, state['question'])
-                except ValueError as exc:
-                    # Bad inputs are a tool result for the planner to fix, not a protocol failure.
-                    results.append({'error': str(exc)})
-                    continue
-            else:
-                data = execute_document_tool(name, params, state['docs'])
+            with tracing.span(f'execute_tool {name}', **{
+                    'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.name': name,
+                    'app.tool.operation': params.get('name') if name == 'table_tool' else None,
+                    'app.document_id': params.get('document_id'), 'app.document_ids': params.get('document_ids'),
+                    'app.evidence_id': f'E{len(evidence)+1}'}) as tool_span:
+                if name in {'calculate', 'date_calculate'}:
+                    try:
+                        data = _calculation(name, params, evidence, state['question'])
+                    except ValueError as exc:
+                        # Bad inputs are a tool result for the planner to fix, not a protocol failure.
+                        tracing.mark_error(tool_span, exc)
+                        results.append({'error': str(exc)})
+                        continue
+                else:
+                    data = execute_document_tool(name, params, state['docs'])
+                failed = data.get('error') or (data.get('table_result') or {}).get('error')
+                if failed:
+                    tracing.mark_error(tool_span, failed)
+                tracing.set_attributes(tool_span, **{
+                    'app.tool.matches': len(data.get('matches', [])) if 'matches' in data else None,
+                    'app.tool.blocks': len(data.get('blocks', [])) if 'blocks' in data else None,
+                    'app.tool.matched_rows': (data.get('table_result') or {}).get('matched_rows')})
             record = {'id': f'E{len(evidence)+1}', 'tool': name, 'parameters': params, 'data': data}
             seen[key] = record['id']
             evidence.append(record)
@@ -1389,6 +1550,14 @@ Cite tab names and row numbers (_source_row).'''
 INTERPRETATION_RULE = '''
 Answer the reading in "interpretation". If it lists alternatives, open with one sentence naming the reading used
 and the alternatives. If it lists none, do not mention readings or interpretation.'''
+
+
+def _prompt_version():
+    """Hash of every instruction and tool definition the models see; recorded in each audit record."""
+    from hashlib import sha256
+    parts = [SYSTEM, WRITER, INTERPRETATION_RULE, amb.ASSESS_SYSTEM,
+             json.dumps(amb.ASSESS_SPEC, sort_keys=True), json.dumps(tool_specs(['<document>']), sort_keys=True)]
+    return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 
 def node_synthesize(state: DocumentState) -> dict:
@@ -1460,12 +1629,12 @@ def route_after_synthesize(state: DocumentState) -> str:
 def build_document_graph():
     """Compile the research workflow; each invocation has its own runtime state."""
     graph = StateGraph(DocumentState)
-    graph.add_node('init', node_init)
-    graph.add_node('plan', node_plan)
-    graph.add_node('tools', node_tools)
-    graph.add_node('synthesize', node_synthesize)
+    graph.add_node('init', tracing.traced_node('init')(node_init))
+    graph.add_node('plan', tracing.traced_node('plan')(node_plan))
+    graph.add_node('tools', tracing.traced_node('tools')(node_tools))
+    graph.add_node('synthesize', tracing.traced_node('synthesize')(node_synthesize))
     graph.add_edge(START, 'init')
-    graph.add_node('assess', node_assess)
+    graph.add_node('assess', tracing.traced_node('assess')(node_assess))
     graph.add_edge('init', 'assess')
     graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
     graph.add_edge('plan', 'tools')
@@ -1476,6 +1645,7 @@ def build_document_graph():
 
 
 DOCUMENT_GRAPH = build_document_graph()
+PROMPT_VERSION = _prompt_version()
 
 
 def run_document_agent(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,
@@ -1886,7 +2056,7 @@ def numeric_display_check(answer, evidence):
     return answer
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/llm.py", "characters": 3132, "sha256": "0c397d9958c6c606d261057a0734448eb786d9ccc0eaf7a7fc014605f9ac11d2"}
+{"path": "backend/agents/llm.py", "characters": 4367, "sha256": "e94551488c216a93e3913dc77bf75851efe8f12ebcd93aba3d31e74b999b1c4d"}
 import time
 import os
 from botocore.config import Config
@@ -1894,6 +2064,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import boto3
+
+from backend.observability import tracing
 
 
 @dataclass
@@ -1938,7 +2110,22 @@ class LLM:
         if tool_config is not None:
             request['toolConfig'] = tool_config
         start = time.monotonic()
-        response = self._client.converse(**request)
+        # GenAI semantic-convention span; prompt/response text only when TRACE_CONTENT=true.
+        with tracing.span(f'chat {self.model_id}', **{
+                'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'aws.bedrock', 'gen_ai.system': 'aws.bedrock',
+                'gen_ai.request.model': self.model_id, 'app.llm.step': self.tool_name,
+                'gen_ai.request.max_tokens': (self.params or {}).get('maxTokens'),
+                'app.llm.tools_offered': len((tool_config or {}).get('tools', []))}) as current:
+            tracing.add_content(current, 'gen_ai.input', system=system, messages=messages)
+            response = self._client.converse(**request)
+            usage = response.get('usage', {})
+            message = response['output']['message']
+            tracing.set_attributes(current, **{
+                'gen_ai.usage.input_tokens': usage.get('inputTokens'),
+                'gen_ai.usage.output_tokens': usage.get('outputTokens'),
+                'gen_ai.response.finish_reasons': [response.get('stopReason')],
+                'app.llm.tool_calls': [b['toolUse']['name'] for b in message.get('content', []) if 'toolUse' in b]})
+            tracing.add_content(current, 'gen_ai.output', message=message)
         self.usage = response.get('usage', {})
         if self.call_log is not None:
             self.call_log.append(dict(timestamp=datetime.now(timezone.utc).isoformat(),
@@ -2048,6 +2235,451 @@ def get_model_config(alias="UNALIASED"):
         "maxTokens": int(os.getenv("BEDROCK_MAX_TOKENS", "4096")),
         "temperature": 0.0,
     }
+
+===== REPOSITORY FILE =====
+{"path": "backend/observability/__init__.py", "characters": 33, "sha256": "7774a4e4cbb4710f92854d13ac908c44bdd4d2eaeb5dd6edacae870d19fb0d4d"}
+"""Audit records and tracing."""
+
+===== REPOSITORY FILE =====
+{"path": "backend/observability/audit.py", "characters": 11802, "sha256": "e3b08c33364a226d455600dac196ceca095e311ba17dd32d83be7a5c49ca932b"}
+"""Application audit records: one per question and one per document event.
+
+Two tiers, written to separate locations so they can have separate access policies and retention:
+
+metadata  always written. Who asked, when, which documents, model, prompt and code versions, status, tools
+          used, evidence locations, tokens and timings. Questions and answers appear only as SHA-256 hashes.
+content   written only when AUDIT_CONTENT=true. Question, answer, evidence and the full model call log. It can
+          contain PHI; store it under a restricted prefix with its own KMS key and retention.
+
+AUDIT_STORAGE=local (default)  JSON lines under AUDIT_LOCAL_DIR (default data/audit)
+AUDIT_STORAGE=s3               one object per record under AUDIT_S3_BUCKET (default DOCUMENTS_S3_BUCKET)
+AUDIT_STORAGE=off              no records
+AUDIT_REQUIRED=true            a failed audit write fails the request instead of logging a warning
+"""
+from datetime import datetime, timezone
+from hashlib import sha256
+from io import BytesIO
+import json
+import logging
+import os
+from pathlib import Path
+import threading
+import uuid
+
+SCHEMA_VERSION = 1
+TIERS = ('metadata', 'content')
+logger = logging.getLogger(__name__)
+_code_version = None
+
+
+def _flag(name, default='false'):
+    return os.getenv(name, default).strip().lower() == 'true'
+
+
+def content_enabled():
+    return _flag('AUDIT_CONTENT')
+
+
+def audit_required():
+    return _flag('AUDIT_REQUIRED')
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+
+
+def new_id():
+    return uuid.uuid4().hex
+
+
+def digest(text):
+    return sha256((text or '').encode('utf-8')).hexdigest()
+
+
+def code_version():
+    """APP_VERSION when the deployment sets it (e.g. a git SHA); otherwise a hash of the backend source."""
+    global _code_version
+    if os.getenv('APP_VERSION'):
+        return os.getenv('APP_VERSION')
+    if _code_version is None:
+        root = Path(__file__).resolve().parents[1]
+        h = sha256()
+        for path in sorted(root.rglob('*.py')):
+            h.update(path.relative_to(root).as_posix().encode() + b'\0' + path.read_bytes())
+        _code_version = 'src-' + h.hexdigest()[:12]
+    return _code_version
+
+
+def project_path(path):
+    """Relative paths resolve from the project root, like DOCUMENTS_LOCAL_DIR, not the launch directory."""
+    path = Path(path).expanduser()
+    return path if path.is_absolute() else Path(__file__).resolve().parents[2] / path
+
+
+class LocalAuditSink:
+    """Append-only JSON lines: {directory}/{tier}/{kind}/YYYY-MM-DD.jsonl."""
+
+    def __init__(self, directory):
+        self.directory = project_path(directory)
+        self._lock = threading.Lock()
+
+    def write(self, tier, kind, record):
+        path = self.directory / tier / kind / f"{record['timestamp'][:10]}.jsonl"
+        line = json.dumps(record, ensure_ascii=False, default=str) + '\n'
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('a', encoding='utf-8') as out:
+                out.write(line)
+
+
+class S3AuditSink:
+    """One object per record: {prefix}audit/{tier}/{kind}/YYYY/MM/DD/{timestamp}-{id}.json.
+
+    Objects are never rewritten, so S3 Object Lock (compliance mode) and lifecycle rules can apply per tier."""
+
+    def __init__(self, client, bucket, prefix='document-agent/', kms_key_id=None):
+        self.client, self.bucket, self.kms_key_id = client, bucket, kms_key_id
+        self.prefix = prefix if not prefix or prefix.endswith('/') else prefix + '/'
+
+    def key(self, tier, kind, record):
+        ts = record['timestamp']
+        stamp = ts.replace(':', '').replace('-', '').replace('.', '')
+        return (f"{self.prefix}audit/{tier}/{kind}/{ts[:4]}/{ts[5:7]}/{ts[8:10]}/"
+                f"{stamp}-{record.get('request_id') or record.get('event_id')}.json")
+
+    def write(self, tier, kind, record):
+        extra = {'ContentType': 'application/json'}
+        if self.kms_key_id:
+            extra.update(ServerSideEncryption='aws:kms', SSEKMSKeyId=self.kms_key_id)
+        body = json.dumps(record, ensure_ascii=False, default=str).encode('utf-8')
+        self.client.upload_fileobj(BytesIO(body), self.bucket, self.key(tier, kind, record), ExtraArgs=extra)
+
+
+class NullAuditSink:
+    def write(self, tier, kind, record):
+        return None
+
+
+def configured_audit_sink():
+    mode = os.getenv('AUDIT_STORAGE', 'local').strip().lower()
+    if mode == 'off':
+        return NullAuditSink()
+    if mode == 'local':
+        return LocalAuditSink(os.getenv('AUDIT_LOCAL_DIR', 'data/audit'))
+    if mode != 's3':
+        raise ValueError('AUDIT_STORAGE must be off, local or s3')
+    bucket = (os.getenv('AUDIT_S3_BUCKET') or os.getenv('DOCUMENTS_S3_BUCKET') or '').strip()
+    if not bucket:
+        raise ValueError('AUDIT_S3_BUCKET or DOCUMENTS_S3_BUCKET is required in s3 audit mode')
+    import boto3
+    from botocore.config import Config
+    session = boto3.Session(profile_name=os.getenv('AWS_PROFILE') or None,
+                            region_name=os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'us-east-1')
+    client = session.client('s3', config=Config(connect_timeout=5, read_timeout=30,
+                                                retries={'mode': 'standard', 'total_max_attempts': 3}))
+    return S3AuditSink(client, bucket, os.getenv('AUDIT_S3_PREFIX', os.getenv('DOCUMENTS_S3_PREFIX', 'document-agent/')),
+                       kms_key_id=os.getenv('AUDIT_S3_KMS_KEY_ID') or os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None)
+
+
+def write(sink, records):
+    """records: [(tier, kind, record)]. A failure raises only when AUDIT_REQUIRED=true."""
+    for tier, kind, record in records:
+        try:
+            sink.write(tier, kind, record)
+        except Exception as exc:
+            if audit_required():
+                raise RuntimeError(f'Audit record could not be written: {type(exc).__name__}: {exc}') from exc
+            logger.warning('Audit %s/%s record not written: %s: %s', tier, kind, type(exc).__name__, exc)
+
+
+# ---- record builders -------------------------------------------------------------------------------------
+
+def document_summary(doc):
+    ref = getattr(doc, 'storage_ref', None) or {}
+    return {'id': doc.id, 'name': doc.name, 'kind': doc.kind, 'manifest_key': ref.get('manifest_key'),
+            'has_profile': bool(getattr(doc, 'profile', None))}
+
+
+def _locations(value, found, limit=20):
+    """Collect location labels (page, sheet/row) from evidence data without copying any text."""
+    if len(found) >= limit:
+        return found
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == 'location':
+                label = (' '.join(f'{k} {v}' for k, v in item.items() if isinstance(v, (str, int)))
+                         if isinstance(item, dict) else str(item))
+                if label and label not in found:
+                    found.append(label)
+            elif key == 'source_rows' and isinstance(item, list):
+                found.extend(f'row {r}' for r in item[:limit - len(found)])
+            else:
+                _locations(item, found, limit)
+    elif isinstance(value, list):
+        for item in value:
+            _locations(item, found, limit)
+    return found
+
+
+def evidence_summary(evidence):
+    out = []
+    for e in evidence or []:
+        params, data = e.get('parameters') or {}, e.get('data') or {}
+        table = data.get('table_result') or {}
+        out.append({'id': e.get('id'), 'tool': e.get('tool'), 'auto': bool(e.get('auto')),
+                    'document_id': params.get('document_id'),
+                    'operation': params.get('name') if e.get('tool') == 'table_tool' else None,
+                    'error': bool(data.get('error') or table.get('error')),
+                    'matched_rows': table.get('matched_rows'),
+                    'locations': _locations(data, [])})
+    return out
+
+
+def call_summary(records):
+    out = []
+    for r in records or []:
+        message = r.get('output_raw')  # the Bedrock output message
+        content = message.get('content', []) if isinstance(message, dict) else []
+        out.append({'step': r.get('tool_name'), 'model_id': r.get('model_id'), 'duration_ms': r.get('duration_ms'),
+                    'stop_reason': r.get('stop_reason'), 'input_tokens': (r.get('usage') or {}).get('inputTokens'),
+                    'output_tokens': (r.get('usage') or {}).get('outputTokens'),
+                    'tool_calls': [b['toolUse']['name'] for b in content if isinstance(b, dict) and 'toolUse' in b]})
+    return out
+
+
+def totals(records):
+    return {'llm_calls': len(records or []),
+            'input_tokens': sum((r.get('usage') or {}).get('inputTokens', 0) for r in records or []),
+            'output_tokens': sum((r.get('usage') or {}).get('outputTokens', 0) for r in records or [])}
+
+
+def question_records(*, request_id, timestamp, user, app, session_id, model, ambiguity, prompt_version,
+                     documents, question, clarification, result, call_records, duration_ms, error, trace_id):
+    """Metadata record (always) and content record (AUDIT_CONTENT=true) for one question."""
+    result = result or {}
+    metadata = {
+        'schema_version': SCHEMA_VERSION, 'record_type': 'question', 'request_id': request_id,
+        'timestamp': timestamp, 'user': user, 'session_id': session_id, 'app': app,
+        'code_version': code_version(), 'prompt_version': prompt_version, 'model': model,
+        'ambiguity_mode': ambiguity, 'clarified': bool(clarification), 'documents': documents,
+        'question_sha256': digest(question), 'question_chars': len(question or ''),
+        'status': 'error' if error else result.get('status'),
+        'answer_sha256': digest(result['answer']) if result.get('answer') else None,
+        'protocol': result.get('protocol'), 'coverage': result.get('coverage'),
+        'limitations_count': len(result.get('limitations') or []),
+        'evidence': evidence_summary(result.get('evidence')), 'llm_calls': call_summary(call_records),
+        'totals': totals(call_records), 'duration_ms': duration_ms, 'error': error, 'trace_id': trace_id,
+        'content_recorded': content_enabled()}
+    records = [('metadata', 'questions', metadata)]
+    if content_enabled():
+        records.append(('content', 'questions', {
+            'schema_version': SCHEMA_VERSION, 'record_type': 'question_content', 'request_id': request_id,
+            'timestamp': timestamp, 'user': user, 'question': question, 'clarification': clarification,
+            'answer': result.get('answer'), 'interpretation': result.get('interpretation'),
+            'clarification_request': result.get('clarification'), 'limitations': result.get('limitations'),
+            'evidence': result.get('evidence'), 'llm_calls': call_records}))
+    return records
+
+
+def document_event(event, *, user, app, document=None, filename=None, content=None, details=None, error=None,
+                   trace_id=None):
+    """Metadata record for document_uploaded, upload_failed, profile_generated or profile_reviewed."""
+    record = {'schema_version': SCHEMA_VERSION, 'record_type': 'document_event', 'event': event,
+              'event_id': new_id(), 'timestamp': now(), 'user': user, 'app': app,
+              'code_version': code_version(), 'filename': filename or (document.name if document else None),
+              'document': document_summary(document) if document else None, 'error': error,
+              'trace_id': trace_id, **(details or {})}
+    if content is not None:
+        record.update(content_sha256=sha256(content).hexdigest(), size_bytes=len(content))
+    if document is not None:
+        record['warnings_count'] = len(getattr(document, 'warnings', []) or [])
+    return [('metadata', 'documents', record)]
+
+===== REPOSITORY FILE =====
+{"path": "backend/observability/identity.py", "characters": 1522, "sha256": "5b65530ea32e19360f277d146c1d8c0ded9c9ba52af56d6810a23571b53802e7"}
+"""Who is asking, for audit records.
+
+Behind an authenticating proxy (an ALB with OIDC/Cognito, or an identity-aware proxy) the proxy sets the user in a
+request header. Those headers are trusted only when AUDIT_TRUST_HEADERS=true, because without such a proxy any
+client can send them. Otherwise AUDIT_USER, then the operating-system user, are recorded as unauthenticated.
+"""
+import getpass
+import os
+
+# Checked in order; the first present header wins.
+IDENTITY_HEADERS = ('X-Amzn-Oidc-Identity', 'X-Forwarded-User', 'X-Forwarded-Email', 'X-Auth-Request-Email',
+                    'X-Auth-Request-User', 'X-Remote-User')
+
+
+def _get(headers, name):
+    if not headers:
+        return None
+    for key in (name, name.lower()):
+        try:
+            value = headers.get(key)
+        except Exception:
+            value = None
+        if value:
+            return str(value).strip()[:256]
+    return None
+
+
+def resolve_user(headers=None):
+    if os.getenv('AUDIT_TRUST_HEADERS', 'false').strip().lower() == 'true':
+        for name in IDENTITY_HEADERS:
+            value = _get(headers, name)
+            if value:
+                return {'id': value, 'source': f'header:{name}', 'authenticated': True}
+    if os.getenv('AUDIT_USER'):
+        return {'id': os.getenv('AUDIT_USER'), 'source': 'env:AUDIT_USER', 'authenticated': False}
+    try:
+        return {'id': getpass.getuser(), 'source': 'os', 'authenticated': False}
+    except Exception:
+        return {'id': 'unknown', 'source': 'none', 'authenticated': False}
+
+===== REPOSITORY FILE =====
+{"path": "backend/observability/tracing.py", "characters": 5522, "sha256": "374b00f78e1c3719b0fb53cc2a3aff1200728b5ceaa96fdb8f0e2ba6aeef1aca"}
+"""OpenTelemetry spans for questions, graph steps, Bedrock calls and tool executions.
+
+Spans follow the OpenTelemetry GenAI conventions (gen_ai.* attributes), so CloudWatch GenAI Observability
+(AgentCore Observability) and other OTel backends can read them. Without a configured tracer provider the
+OpenTelemetry API is a no-op, so this module costs nothing until tracing is turned on.
+
+TRACING=off (default)  no provider here; an outer launcher such as ADOT's opentelemetry-instrument may add one
+TRACING=file           development: write spans as JSON lines to TRACING_FILE (default data/traces/spans.jsonl)
+TRACING=console        development: print spans
+TRACE_CONTENT=true     also attach prompt/response text to spans. Off by default: it can contain PHI.
+"""
+from contextlib import contextmanager
+import functools
+import json
+import os
+from pathlib import Path
+import threading
+
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+TRACER_NAME = 'health_insurance_document_agent'
+CONTENT_LIMIT = 4000
+_configured = False
+_lock = threading.Lock()
+
+
+def tracer():
+    return trace.get_tracer(TRACER_NAME)
+
+
+def content_capture():
+    return os.getenv('TRACE_CONTENT', 'false').strip().lower() == 'true'
+
+
+def _clean(attributes):
+    """OTel attributes must be scalars or lists of scalars; drop empties."""
+    clean = {}
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            clean[key] = [str(v) for v in value]
+        elif isinstance(value, (str, bool, int, float)):
+            clean[key] = value
+        else:
+            clean[key] = str(value)
+    return clean
+
+
+@contextmanager
+def span(name, **attributes):
+    """Start a child of the current span; exceptions are recorded and mark the span as an error."""
+    with tracer().start_as_current_span(name, attributes=_clean(attributes)) as current:
+        yield current
+
+
+def set_attributes(current, **attributes):
+    if current is not None and current.is_recording():
+        current.set_attributes(_clean(attributes))
+
+
+def mark_error(current, message):
+    if current is not None and current.is_recording():
+        current.set_status(Status(StatusCode.ERROR, str(message)[:500]))
+
+
+def add_content(current, name, **fields):
+    """Attach text only when TRACE_CONTENT=true."""
+    if content_capture() and current is not None and current.is_recording():
+        current.add_event(name, _clean({k: json.dumps(v, default=str)[:CONTENT_LIMIT] if not isinstance(v, str)
+                                        else v[:CONTENT_LIMIT] for k, v in fields.items()}))
+
+
+def trace_id_of(current):
+    """Hex trace id for correlating audit records with traces; None when tracing is off."""
+    context = current.get_span_context() if current is not None else None
+    return format(context.trace_id, '032x') if context and context.is_valid else None
+
+
+def traced_node(name):
+    """Wrap a LangGraph node so each step is its own span."""
+    def decorate(function):
+        @functools.wraps(function)
+        def wrapper(state):
+            with span(f'graph.node {name}', **{'app.graph.node': name, 'app.step': state.get('steps')}) as current:
+                update = function(state)
+                if isinstance(update, dict):
+                    set_attributes(current, **{'app.graph.finished': update.get('finished'),
+                                               'app.graph.returned_result': 'result' in update})
+                return update
+        return wrapper
+    return decorate
+
+
+class _JsonLinesExporter:
+    """Minimal span exporter for local development: one JSON object per span."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def export(self, spans):
+        from opentelemetry.sdk.trace.export import SpanExportResult
+        with _lock, self.path.open('a', encoding='utf-8') as out:
+            for item in spans:
+                out.write(item.to_json(indent=None) + '\n')
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self):
+        return None
+
+    def force_flush(self, timeout_millis=30000):
+        return True
+
+
+def configure_tracing():
+    """Install a development exporter when TRACING asks for one. Safe to call repeatedly."""
+    global _configured
+    mode = os.getenv('TRACING', 'off').strip().lower()
+    if _configured or mode == 'off':
+        return
+    if mode not in {'file', 'console'}:
+        raise ValueError('TRACING must be off, file or console')
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+    with _lock:
+        if _configured:
+            return
+        existing = trace.get_tracer_provider()
+        if isinstance(existing, TracerProvider):
+            _configured = True  # an outer launcher (e.g. ADOT) already installed a provider
+            return
+        provider = TracerProvider(resource=Resource.create({'service.name': os.getenv('OTEL_SERVICE_NAME', TRACER_NAME)}))
+        from backend.observability.audit import project_path
+        exporter = (_JsonLinesExporter(project_path(os.getenv('TRACING_FILE', 'data/traces/spans.jsonl')))
+                    if mode == 'file' else ConsoleSpanExporter())
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        _configured = True
 
 ===== REPOSITORY FILE =====
 {"path": "backend/preprocessing/__init__.py", "characters": 32, "sha256": "d293105b3a9aa33271045602eeb96af7ce078ad0271e454704f11543fae9cbf4"}
@@ -2599,6 +3231,67 @@ def search_documents(documents, query, *, limit=8):
             'retrieval_method':'lexical over text blocks and all spreadsheet rows; no semantic matching. '
                                'Use table tools for counts and totals.',
             'warnings':{doc.name:doc.warnings for doc in documents.values() if doc.warnings}}
+
+===== REPOSITORY FILE =====
+{"path": "backend/services/__init__.py", "characters": 70, "sha256": "edc6e3787a140c9d8f7470476713312d5d5f2cb8f84321ca432cef15a86250fb"}
+"""Application services: agent runs with audit records and traces."""
+
+===== REPOSITORY FILE =====
+{"path": "backend/services/questions.py", "characters": 3387, "sha256": "ffaf94af2d7a98609936a14a0c00cd79d88ff15eb7e72d99dee76c9cb2c7cf5d"}
+"""Answer a question with an audit record and a trace. Apps and the CLI call this instead of the agent."""
+import time
+
+from backend.agents import document_agent
+from backend.agents.llm import LLMCallLog
+from backend.observability import audit, tracing
+
+
+def answer_question(documents, document_ids, question, *, user, app, session_id=None, sink=None, history=None,
+                    call_log=None, model=None, ambiguity='off', clarification=None, on_step=None):
+    """Run the document agent. Returns its result plus request_id, trace_id and usage.
+
+    The audit record is written whether the question succeeds or fails; failures are then re-raised."""
+    sink = sink if sink is not None else audit.configured_audit_sink()
+    log = call_log if call_log is not None else LLMCallLog()
+    request_id, timestamp, start = audit.new_id(), audit.now(), time.monotonic()
+    docs = [audit.document_summary(documents[d]) for d in document_ids if d in documents]
+    result, error = None, None
+    with tracing.span('invoke_agent document_agent', **{
+            'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'document_agent',
+            'session.id': session_id, 'app.request_id': request_id, 'app.name': app,
+            'app.user.id': user.get('id'), 'app.ambiguity_mode': ambiguity, 'app.model': model,
+            'app.document_ids': [d['id'] for d in docs]}) as root:
+        trace_id = tracing.trace_id_of(root)
+        tracing.add_content(root, 'app.question', question=question, clarification=clarification)
+        try:
+            # Module attribute, so tests can replace the agent.
+            result = document_agent.run_document_agent(
+                documents, document_ids, question, history=history, call_log=log, on_step=on_step, model=model,
+                ambiguity=ambiguity, clarification=clarification)
+            tracing.set_attributes(root, **{'app.status': result.get('status'),
+                                            'app.evidence_count': len(result.get('evidence') or []),
+                                            'app.limitations_count': len(result.get('limitations') or [])})
+        except Exception as exc:
+            error = f'{type(exc).__name__}: {exc}'[:1000]
+            tracing.mark_error(root, error)
+            raise
+        finally:
+            records = audit.question_records(
+                request_id=request_id, timestamp=timestamp, user=user, app=app, session_id=session_id,
+                model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
+                documents=docs, question=question, clarification=clarification, result=result,
+                call_records=log.records, duration_ms=round((time.monotonic() - start) * 1000), error=error,
+                trace_id=trace_id)
+            audit.write(sink, records)
+    return {**result, 'request_id': request_id, 'trace_id': trace_id, 'usage': audit.totals(log.records)}
+
+
+def record_document_event(event, *, user, app, sink=None, **fields):
+    """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
+    sink = sink if sink is not None else audit.configured_audit_sink()
+    from opentelemetry import trace
+    audit.write(sink, audit.document_event(event, user=user, app=app,
+                                           trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))
 
 ===== REPOSITORY FILE =====
 {"path": "backend/shared/__init__.py", "characters": 25, "sha256": "3677fc3d4ff812994ea264e29f249d8fc1848e2aeb9972190f625cb5180f85bb"}
@@ -3994,7 +4687,7 @@ def execute_table_tool(
 """Cli components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/cli/run_local.py", "characters": 3367, "sha256": "9399c552967d0948c21d660b66771259385e7cbaf8641e964086636e051b0e3e"}
+{"path": "development/cli/run_local.py", "characters": 3676, "sha256": "7217d250db7bcaa6b67d59a257c923a822534319b07783b9dce24add9b590452"}
 """Run the document agent on local data using native Bedrock tool calls."""
 import argparse
 import json
@@ -4029,7 +4722,11 @@ def main():
     logging.basicConfig(level=logging.WARNING)
     from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
     from backend.agents.llm import LLMCallLog
-    from backend.agents.document_agent import run_document_agent, run_document_agent_stream
+    from backend.agents.document_agent import run_document_agent_stream
+    from backend.observability.identity import resolve_user
+    from backend.observability.tracing import configure_tracing
+    from backend.services.questions import answer_question
+    configure_tracing()
     from backend.preprocessing.documents import document_from_table_inputs
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
     if args.preprocessed and overrides:
@@ -4049,8 +4746,10 @@ def main():
             for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
                 print(json.dumps(event, default=str), flush=True)
         else:
-            result = run_document_agent(documents, [doc.id], args.question, call_log=log, model=args.model)
+            result = answer_question(documents, [doc.id], args.question, user=resolve_user(), app="cli",
+                                     call_log=log, model=args.model)
             print(result["answer"])
+            print(f"Reference: {result['request_id']}")
             for warning in result["limitations"]:
                 print(f"Limitation: {warning}")
     finally:
@@ -4997,7 +5696,7 @@ if __name__ == '__main__':
     print(create_samples('data'))
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/conftest.py", "characters": 1549, "sha256": "89cf7d0e433f4675db3aa6b6d3c31ac1c5dcea49f94e4fe241ab179cbf62a9d9"}
+{"path": "development/tests/conftest.py", "characters": 2038, "sha256": "031436b43cb77e51548767104f7a52c055eea0d42c3a5185fb0df35c2b970eec"}
 import pytest
 from development.scripts.make_samples import create_samples
 
@@ -5038,6 +5737,16 @@ def native_script(monkeypatch):
         monkeypatch.setattr(LLM,'__init__',init)
         return requests
     return install
+
+
+@pytest.fixture(autouse=True)
+def isolated_audit(monkeypatch, tmp_path):
+    """Audit records from tests go to a temporary directory; tracing and content capture stay off."""
+    monkeypatch.setenv('AUDIT_STORAGE', 'local')
+    monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
+    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED', 'AUDIT_TRUST_HEADERS', 'AUDIT_USER', 'TRACING', 'TRACE_CONTENT']:
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path / 'audit'
 
 ===== REPOSITORY FILE =====
 {"path": "development/tests/test_agent.py", "characters": 1985, "sha256": "12de429052c6aafd33a64b63da76da7b161bf020df9eda7e80270b46b008a25c"}
@@ -6545,6 +7254,236 @@ def test_tie_prefers_readable_spelling_over_code():
     assert groups[0]['suggested'] == 'Tehran'
 
 ===== REPOSITORY FILE =====
+{"path": "development/tests/test_observability.py", "characters": 11984, "sha256": "1af944a59f5d75f8aca979ce6db0774919daff66f617c44bb37cba82da9cda50"}
+import json
+from pathlib import Path
+
+import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
+from streamlit.testing.v1 import AppTest
+
+from backend.agents import document_agent
+from backend.observability import audit, tracing
+from backend.observability.identity import resolve_user
+from backend.preprocessing.documents import ingest_document
+from backend.services.questions import answer_question, record_document_event
+
+USER = {'id': 'tester', 'source': 'test', 'authenticated': False}
+QUESTION = 'What is the member rate for plan Alpha?'
+APPS = Path(__file__).resolve().parents[2] / 'apps'
+
+
+def records(directory, tier, kind):
+    files = sorted((directory / tier / kind).glob('*.jsonl'))
+    return [json.loads(line) for f in files for line in f.read_text(encoding='utf-8').splitlines()]
+
+
+@pytest.fixture
+def spans(monkeypatch):
+    """Route spans to memory without touching the global tracer provider."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(tracing, 'tracer', lambda: provider.get_tracer('test'))
+    return exporter
+
+
+@pytest.fixture
+def rates_run(native_script):
+    doc = ingest_document('rates.txt', b'Plan Alpha member rate is USD 88 per month.')
+    native_script([{'tool': 'search_documents', 'parameters': {'query': 'Alpha rate', 'document_ids': [doc.id]}},
+                   {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
+    return doc
+
+
+def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audit):
+    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test',
+                             session_id='s1')
+    [meta] = records(isolated_audit, 'metadata', 'questions')
+    text = json.dumps(meta)
+    assert 'Alpha' not in text and 'USD 88' not in text and 'member rate' not in text
+    assert meta['question_sha256'] == audit.digest(QUESTION)
+    assert meta['answer_sha256'] == audit.digest(result['answer'])
+    assert meta['request_id'] == result['request_id'] and meta['session_id'] == 's1'
+    assert meta['status'] == 'answered' and meta['error'] is None
+    assert meta['prompt_version'] == document_agent.PROMPT_VERSION
+    assert meta['documents'][0]['id'] == rates_run.id and meta['documents'][0]['name'] == 'rates.txt'
+    assert [e['tool'] for e in meta['evidence']] == ['search_documents']
+    assert meta['evidence'][0]['locations'] == ['paragraph 1']
+    assert meta['llm_calls'][0]['tool_calls'] == ['search_documents']
+    assert meta['totals'] == {'llm_calls': 3, 'input_tokens': 30, 'output_tokens': 15} == result['usage']
+    assert not (isolated_audit / 'content').exists()
+
+
+def test_content_tier_is_opt_in_and_separate(rates_run, isolated_audit, monkeypatch):
+    monkeypatch.setenv('AUDIT_CONTENT', 'true')
+    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test')
+    [meta] = records(isolated_audit, 'metadata', 'questions')
+    [content] = records(isolated_audit, 'content', 'questions')
+    assert meta['content_recorded'] and content['request_id'] == meta['request_id']
+    assert content['question'] == QUESTION and 'USD 88' in content['answer']
+    assert len(content['llm_calls']) == 3
+
+
+def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
+    doc = ingest_document('rates.txt', b'USD 88')
+    def fail(*args, **kwargs):
+        raise RuntimeError('Bedrock unavailable')
+    monkeypatch.setattr(document_agent, 'run_document_agent', fail)
+    with pytest.raises(RuntimeError, match='unavailable'):
+        answer_question({doc.id: doc}, [doc.id], QUESTION, user=USER, app='test')
+    [meta] = records(isolated_audit, 'metadata', 'questions')
+    assert meta['status'] == 'error' and 'Bedrock unavailable' in meta['error']
+
+
+class BrokenSink:
+    def write(self, tier, kind, record):
+        raise OSError('disk full')
+
+
+def test_audit_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
+    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test',
+                             sink=BrokenSink())
+    assert result['status'] == 'answered' and 'disk full' in caplog.text
+    monkeypatch.setenv('AUDIT_REQUIRED', 'true')
+    with pytest.raises(RuntimeError, match='Audit record could not be written'):
+        audit.write(BrokenSink(), [('metadata', 'questions', {'timestamp': audit.now()})])
+
+
+def test_s3_sink_writes_one_encrypted_object_per_record():
+    uploads = []
+    class Client:
+        def upload_fileobj(self, body, bucket, key, ExtraArgs):
+            uploads.append((bucket, key, ExtraArgs, json.loads(body.read())))
+    sink = audit.S3AuditSink(Client(), 'audit-bucket', 'agent', kms_key_id='key-1')
+    record = {'timestamp': '2026-03-04T05:06:07.890+00:00', 'request_id': 'abc'}
+    sink.write('metadata', 'questions', record)
+    [(bucket, key, extra, body)] = uploads
+    assert key == 'agent/audit/metadata/questions/2026/03/04/20260304T050607890+0000-abc.json'
+    assert extra == {'ContentType': 'application/json', 'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'key-1'}
+    assert body == record
+
+
+def test_relative_audit_paths_resolve_from_project_root(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    root = Path(audit.__file__).resolve().parents[2]
+    assert audit.LocalAuditSink('data/audit').directory == root / 'data' / 'audit'
+    assert audit.LocalAuditSink(tmp_path / 'x').directory == tmp_path / 'x'
+
+
+def test_audit_storage_modes(monkeypatch):
+    monkeypatch.setenv('AUDIT_STORAGE', 'off')
+    assert isinstance(audit.configured_audit_sink(), audit.NullAuditSink)
+    monkeypatch.setenv('AUDIT_STORAGE', 's3')
+    monkeypatch.delenv('AUDIT_S3_BUCKET', raising=False)
+    monkeypatch.delenv('DOCUMENTS_S3_BUCKET', raising=False)
+    with pytest.raises(ValueError, match='BUCKET'):
+        audit.configured_audit_sink()
+    monkeypatch.setenv('AUDIT_STORAGE', 'database')
+    with pytest.raises(ValueError):
+        audit.configured_audit_sink()
+
+
+def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, isolated_audit):
+    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test',
+                             session_id='s1')
+    finished = spans.get_finished_spans()
+    by_id = {s.context.span_id: s for s in finished}
+    [root] = [s for s in finished if s.name == 'invoke_agent document_agent']
+    assert {s.context.trace_id for s in finished} == {root.context.trace_id}
+    assert result['trace_id'] == format(root.context.trace_id, '032x')
+    assert records(isolated_audit, 'metadata', 'questions')[0]['trace_id'] == result['trace_id']
+    assert root.attributes['session.id'] == 's1' and root.attributes['gen_ai.operation.name'] == 'invoke_agent'
+
+    nodes = [s for s in finished if s.name.startswith('graph.node')]
+    assert {s.attributes['app.graph.node'] for s in nodes} >= {'init', 'plan', 'tools', 'synthesize'}
+    assert all(s.parent.span_id == root.context.span_id for s in nodes)
+
+    chats = [s for s in finished if s.name.startswith('chat ')]
+    assert len(chats) == 3
+    assert all(by_id[s.parent.span_id].name.startswith('graph.node') for s in chats)
+    assert chats[0].attributes['gen_ai.usage.input_tokens'] == 10
+    assert chats[0].attributes['app.llm.tool_calls'] == ('search_documents',)
+    assert chats[-1].attributes['app.llm.step'] == 'Document Answer'
+
+    [tool] = [s for s in finished if s.name == 'execute_tool search_documents']
+    assert by_id[tool.parent.span_id].attributes['app.graph.node'] == 'tools'
+    assert tool.attributes['app.document_ids'] == (rates_run.id,) and tool.attributes['app.evidence_id'] == 'E1'
+    # No prompt or answer text unless TRACE_CONTENT=true.
+    assert not any(s.events for s in finished)
+    assert 'Alpha' not in json.dumps([dict(s.attributes) for s in finished])
+
+
+def test_trace_content_is_opt_in(rates_run, spans, monkeypatch):
+    monkeypatch.setenv('TRACE_CONTENT', 'true')
+    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, user=USER, app='test')
+    chat = next(s for s in spans.get_finished_spans() if s.name.startswith('chat '))
+    assert {e.name for e in chat.events} == {'gen_ai.input', 'gen_ai.output'}
+
+
+def test_tool_errors_mark_their_span(native_script, spans):
+    doc = ingest_document('rates.txt', b'USD 88')
+    # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
+    native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
+                   {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
+    answer_question({doc.id: doc}, [doc.id], 'Rate?', user=USER, app='test')
+    tool = next(s for s in spans.get_finished_spans() if s.name == 'execute_tool calculate')
+    assert tool.status.status_code == StatusCode.ERROR
+
+
+def test_document_events_record_hashes_not_contents(isolated_audit):
+    content = b'Plan Alpha member rate is USD 88.'
+    doc = ingest_document('rates.txt', content)
+    record_document_event('document_uploaded', user=USER, app='upload', document=doc, content=content,
+                          details={'profile_generated': False})
+    [event] = records(isolated_audit, 'metadata', 'documents')
+    assert event['event'] == 'document_uploaded' and event['filename'] == 'rates.txt'
+    assert event['size_bytes'] == len(content) and len(event['content_sha256']) == 64
+    assert 'Alpha' not in json.dumps(event)
+
+
+def test_identity_headers_are_trusted_only_when_configured(monkeypatch):
+    headers = {'X-Forwarded-User': 'someone@example.com'}
+    monkeypatch.setenv('AUDIT_USER', 'local-dev')
+    assert resolve_user(headers) == {'id': 'local-dev', 'source': 'env:AUDIT_USER', 'authenticated': False}
+    monkeypatch.setenv('AUDIT_TRUST_HEADERS', 'true')
+    assert resolve_user(headers) == {'id': 'someone@example.com', 'source': 'header:X-Forwarded-User',
+                                     'authenticated': True}
+    monkeypatch.delenv('AUDIT_USER')
+    assert resolve_user({})['source'] in {'os', 'none'}
+
+
+def test_versions_are_stable_identifiers(monkeypatch):
+    assert document_agent.PROMPT_VERSION.startswith('p-') and len(document_agent.PROMPT_VERSION) == 14
+    assert audit.code_version().startswith('src-')
+    monkeypatch.setenv('APP_VERSION', 'abc123')
+    assert audit.code_version() == 'abc123'
+
+
+def test_chat_and_upload_apps_write_audit_records(monkeypatch, tmp_path, isolated_audit):
+    monkeypatch.setenv('DOCUMENTS_STORAGE', 'local')
+    monkeypatch.setenv('DOCUMENTS_LOCAL_DIR', str(tmp_path / 'library'))
+    portal = AppTest.from_file(str(APPS / 'upload' / 'app.py')).run(timeout=20)
+    next(b for b in portal.button if b.label == 'Load Bingle-Dingle examples').click().run(timeout=30)
+    assert not portal.exception
+    uploads = records(isolated_audit, 'metadata', 'documents')
+    assert len(uploads) == 8 and {e['event'] for e in uploads} == {'document_uploaded'}
+
+    monkeypatch.setattr(document_agent, 'run_document_agent',
+                        lambda *a, **kw: {'status': 'answered', 'answer': 'USD 88 [E1].', 'evidence': [],
+                                          'limitations': []})
+    chat = AppTest.from_file(str(APPS / 'chat' / 'app.py')).run(timeout=20)
+    chat.multiselect[0].set_value([chat.multiselect[0].options[0]]).run()
+    chat.chat_input[0].set_value('What is the rate?').run(timeout=20)
+    assert not chat.exception
+    [meta] = records(isolated_audit, 'metadata', 'questions')
+    assert meta['app'] == 'chat' and meta['session_id'] == chat.session_state['session_id']
+    assert any(meta['request_id'][:12] in c.value for c in chat.caption)
+
+===== REPOSITORY FILE =====
 {"path": "development/tests/test_preprocess.py", "characters": 4516, "sha256": "fa556f2edd85fd7b9ccd7f556681216b45a71bbd244d3e191aafee8cc7232a81"}
 import json
 from pathlib import Path
@@ -7200,7 +8139,7 @@ testpaths = development/tests
 pytest>=8,<10
 
 ===== REPOSITORY FILE =====
-{"path": "requirements.txt", "characters": 188, "sha256": "a394bc5d6b5fe67c85757e55e10e39b734ea6e3444151ef3487a1f8f856682df"}
+{"path": "requirements.txt", "characters": 242, "sha256": "0f1bfba14ed3964ba0829ad9e6b4c9cda4a517e7fbe1c8206a16d1c4f03edb3c"}
 boto3>=1.38,<2
 botocore[crt]>=1.38,<2
 pandas>=2.2,<4
@@ -7212,6 +8151,8 @@ pypdf>=5,<7
 python-docx>=1.1,<2
 streamlit>=1.45,<2
 jsonschema>=4.23,<5
+opentelemetry-api>=1.27,<2
+opentelemetry-sdk>=1.27,<2
 
 ===== REPOSITORY FILE =====
 {"path": "transfer/create_bundle.py", "characters": 2196, "sha256": "8ed73770a039ecd8fca7a9cb55ad0f78f6c0fc686deefe1b84bdbdd926d67db5"}

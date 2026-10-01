@@ -16,6 +16,8 @@ backend/         Reusable application backend
   storage/       Local/S3 persistence and table loading
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
+  services/      Question service: agent run with audit record and trace
+  observability/ Audit records, OpenTelemetry spans, user identity
 apps/            Replaceable Streamlit interfaces
   chat/app.py    Saved-document selection and questions (port 8501)
   upload/app.py  Upload, preprocessing and saving (port 8502)
@@ -40,7 +42,8 @@ Dependencies and local configuration stay at the root (`requirements*.txt`, `.en
 `.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
 managed dependency/cache folders, not application code.
 
-Import integrations from `backend.agents.document_agent`. Root-level Python
+Import integrations from `backend.services.questions` (`answer_question`, which audits and traces each run)
+or, without auditing, `backend.agents.document_agent`. Root-level Python
 modules have been relocated, so update imports and launch commands to the paths shown here.
 The former table-agent entry points have been removed; migrate callers as shown below.
 
@@ -485,3 +488,88 @@ planner call. These question sets do not need cross-document terminology or docu
 profiles are expected to help. Keep the option off unless your documents use undefined terms across files,
 and measure on your own questions. `--enrich` on `development.evaluation.documents` and
 `development.evaluation.tables` runs the same comparison and saves each profile next to the results.
+
+## Audit and tracing
+
+Two separate records answer different questions. The **audit record** is the system of record for who asked
+what, of which documents, with which model and prompts, and what came back. **Traces** show how a run behaved:
+each graph step, Bedrock call and tool execution with its latency, tokens and errors. Both carry the same
+`trace_id`, and the chat app shows the first 12 characters of the `request_id` under every answer.
+
+`backend/services/questions.py` `answer_question(...)` is the entry point the chat app and the command-line tool
+use. It writes the audit record whether the question succeeds or fails.
+
+### Audit records (`backend/observability/audit.py`)
+
+| Tier | Written | Contains |
+| --- | --- | --- |
+| `metadata/questions` | always | request and session IDs, user, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
+| `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with user, file SHA-256 and size |
+| `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation, evidence and every prompt and response |
+
+The content tier can contain PHI. Store it under its own prefix with a separate KMS key, tighter IAM access,
+and its own retention; the metadata tier can be kept longer and shared with reviewers. Hashes let a reviewer
+confirm that a question or answer matches the record without the metadata tier holding the text.
+
+`AUDIT_STORAGE=local` (default) appends JSON lines to `data/audit/{tier}/{kind}/YYYY-MM-DD.jsonl`.
+`AUDIT_STORAGE=s3` writes one object per record to
+`{AUDIT_S3_PREFIX}audit/{tier}/{kind}/YYYY/MM/DD/{timestamp}-{id}.json`, never rewritten, so S3 Object Lock and
+per-tier lifecycle rules apply cleanly; Athena can query either tier. A failed write logs a warning, or fails
+the request when `AUDIT_REQUIRED=true`.
+
+The user comes from an authenticating proxy header (`X-Amzn-Oidc-Identity` from an ALB with OIDC/Cognito,
+`X-Forwarded-User`, and similar) only when `AUDIT_TRUST_HEADERS=true`. Enable that only behind such a proxy,
+because any client can send those headers otherwise. Without it the record uses `AUDIT_USER` or the operating
+system user and marks the identity `authenticated: false`.
+
+`prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
+`APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
+
+### Traces (`backend/observability/tracing.py`)
+
+Spans follow the OpenTelemetry GenAI conventions:
+
+```text
+invoke_agent document_agent           session.id, app.request_id, app.user.id, document IDs, status
+  graph.node init | assess | plan | tools | synthesize
+    chat <model id>                    gen_ai.request.model, gen_ai.usage.input/output_tokens, finish reason, tool calls
+    execute_tool <tool name>           gen_ai.tool.name, app.evidence_id, document IDs, match/row counts; error status
+ingest_document                        (upload portal) file kind, size, profile requested
+```
+
+Prompt and response text is attached as span events only with `TRACE_CONTENT=true` (PHI risk; keep it off in
+shared environments). Without a tracer provider the OpenTelemetry API is a no-op.
+
+For development, `TRACING=file` writes spans to `data/traces/spans.jsonl` and `TRACING=console` prints them.
+
+### AWS: CloudWatch GenAI Observability (AgentCore Observability)
+
+The spans work with AgentCore Observability without running on AgentCore Runtime:
+
+1. Enable CloudWatch Transaction Search once per account and Region.
+2. `pip install "aws-opentelemetry-distro>=0.18.0"` in the deployment image.
+3. Set `TRACING=off` (ADOT installs the provider) and the ADOT variables, for example:
+
+   ```text
+   AGENT_OBSERVABILITY_ENABLED=true
+   OTEL_PYTHON_DISTRO=aws_distro
+   OTEL_PYTHON_CONFIGURATOR=aws_configurator
+   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+   OTEL_TRACES_EXPORTER=otlp
+   OTEL_RESOURCE_ATTRIBUTES=service.name=document-agent
+   OTEL_EXPORTER_OTLP_LOGS_HEADERS=x-aws-log-group=<log group>,x-aws-log-stream=<stream>,x-aws-metric-namespace=document-agent
+   ```
+
+4. Launch through the instrumenter:
+
+   ```text
+   opentelemetry-instrument streamlit run apps/chat/app.py --server.port 8501
+   ```
+
+ADOT also instruments botocore, so each Bedrock call gets an AWS SDK span next to the `chat` span. Traces then
+appear in the CloudWatch GenAI Observability console with token, latency and error views, and an audit
+record's `trace_id` finds its trace. Check current ADOT settings in the AWS documentation before deploying.
+
+Alongside these, turn on Bedrock model invocation logging (to an encrypted, restricted bucket; it holds full
+prompts) and CloudTrail data events for the document and audit buckets. Those record calls the application
+cannot misreport.

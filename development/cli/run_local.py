@@ -32,7 +32,11 @@ def main():
     logging.basicConfig(level=logging.WARNING)
     from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
     from backend.agents.llm import LLMCallLog
-    from backend.agents.document_agent import run_document_agent, run_document_agent_stream
+    from backend.agents.document_agent import run_document_agent_stream
+    from backend.observability.identity import resolve_user
+    from backend.observability.tracing import configure_tracing
+    from backend.services.questions import answer_question
+    configure_tracing()
     from backend.preprocessing.documents import document_from_table_inputs
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
     if args.preprocessed and overrides:
@@ -52,8 +56,10 @@ def main():
             for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
                 print(json.dumps(event, default=str), flush=True)
         else:
-            result = run_document_agent(documents, [doc.id], args.question, call_log=log, model=args.model)
+            result = answer_question(documents, [doc.id], args.question, user=resolve_user(), app="cli",
+                                     call_log=log, model=args.model)
             print(result["answer"])
+            print(f"Reference: {result['request_id']}")
             for warning in result["limitations"]:
                 print(f"Limitation: {warning}")
     finally:

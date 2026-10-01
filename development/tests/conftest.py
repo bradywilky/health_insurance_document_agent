@@ -38,3 +38,13 @@ def native_script(monkeypatch):
         monkeypatch.setattr(LLM,'__init__',init)
         return requests
     return install
+
+
+@pytest.fixture(autouse=True)
+def isolated_audit(monkeypatch, tmp_path):
+    """Audit records from tests go to a temporary directory; tracing and content capture stay off."""
+    monkeypatch.setenv('AUDIT_STORAGE', 'local')
+    monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
+    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED', 'AUDIT_TRUST_HEADERS', 'AUDIT_USER', 'TRACING', 'TRACE_CONTENT']:
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path / 'audit'

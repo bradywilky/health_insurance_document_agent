@@ -2,9 +2,12 @@
 import os
 from dotenv import load_dotenv
 load_dotenv()
+import uuid
 import streamlit as st
-from backend.agents.document_agent import run_document_agent
 from backend.agents.llm import LLMCallLog
+from backend.observability.identity import resolve_user
+from backend.observability.tracing import configure_tracing
+from backend.services.questions import answer_question
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
 
@@ -15,6 +18,8 @@ st.set_page_config(page_title='Health Insurance Document Agent', layout='wide')
 st.title('Health Insurance Document Agent')
 st.caption('Choose your sources. Ask a question. Check the evidence.')
 st.session_state.setdefault('messages', [])
+st.session_state.setdefault('session_id', uuid.uuid4().hex)
+configure_tracing()
 st.session_state.setdefault('selection_signature', ())
 try:
     store = configured_store(read_only=True)
@@ -132,15 +137,17 @@ def ask(question, clarification=None):
         log = LLMCallLog()
         try:
             # A per-call model setting is passed to the agent; never share user file caches.
-            result = run_document_agent(st.session_state.documents,selected,question,
-                history=history,call_log=log,
+            result = answer_question(st.session_state.documents,selected,question,
+                user=resolve_user(getattr(st.context, 'headers', None)), app='chat',
+                session_id=st.session_state.session_id, history=history,call_log=log,
                 on_step=lambda _:status.caption('Checking the selected sources…'),model=model,
                 ambiguity=ambiguity, clarification=clarification)
             status.empty()
             st.markdown(result['answer'])
             show_evidence(result)
             st.caption(f"{len(log.records)} model calls · "
-                       f"{sum(r['usage'].get('inputTokens',0) for r in log.records):,} input tokens")
+                       f"{sum(r['usage'].get('inputTokens',0) for r in log.records):,} input tokens · "
+                       f"reference {result['request_id'][:12]}")
             st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result,
                                               'question':question})
             if result.get('status') == 'needs_clarification':
