@@ -5,7 +5,7 @@ load_dotenv()
 import uuid
 import streamlit as st
 from backend.observability.tracing import configure_tracing
-from backend.services.questions import answer_question
+from backend.entrypoint import ask_question
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
 
@@ -88,38 +88,36 @@ else:
             st.json(doc.blocks[:3])
 
 
-def show_evidence(result):
-    if result.get('status') == 'needs_clarification':
+def show_evidence(response):
+    if response.get('status') != 'answered':
         return
-    interpretation = result.get('interpretation')
-    if interpretation and interpretation.get('alternatives'):
-        st.caption('Answered as: ' + interpretation['used'])
-    protocol = result.get('protocol')
+    if (response.get('interpretation') or {}).get('note'):
+        st.caption(response['interpretation']['note'])
+    protocol = response.get('protocol')
     if protocol:
         st.caption(f"{protocol['planner_mode']} tools · {protocol['repair_attempts']} corrective retries")
-    for warning in result.get('limitations',[]):
+    for warning in response.get('limitations',[]):
         st.warning(warning)
     with st.expander('Evidence used'):
-        for record in result.get('evidence',[]):
-            data = record['data']
-            st.markdown(f"**{record['id']}**")
-            passages = data.get('matches',data.get('blocks',[]))
-            for passage in passages:
-                location = ', '.join(f'{k} {v}' for k,v in passage.get('location',{}).items() if v != '')
-                st.caption(f"{passage.get('filename',data.get('filename',''))} — {location}")
+        for source in response.get('sources',[]):
+            st.markdown(f"**{source['id']}**")
+            for passage in source['passages']:
+                st.caption(f"{passage['filename']} — {passage['location']}")
                 st.text(passage['text'])
-            if 'table_result' in data:
-                table = data['table_result']
-                st.caption(data.get('filename',''))
+            if source['table'] is not None:
+                table = source['table']
+                st.caption(source.get('filename') or '')
                 if table.get('rows'):
                     st.dataframe(table['rows'], hide_index=True)
                 else:
                     st.json(table)
                 if table.get('diagnostics'):
                     st.json(table['diagnostics'])
-            if data.get('error'):
-                st.warning(data['error'])
-            if data.get('truncated') or data.get('next_offset') is not None:
+            if source['calculation'] is not None:
+                st.json(source['calculation'])
+            if source['error']:
+                st.warning(source['error'])
+            if source['partial']:
                 st.caption('This evidence contains only part of the available text.')
 
 
@@ -132,29 +130,27 @@ def ask(question, clarification=None):
         st.markdown(shown)
     with st.chat_message('assistant'):
         status = st.empty()
-        try:
-            # A per-call model setting is passed to the agent; never share user file caches.
-            result = answer_question(st.session_state.documents,selected,question,
-                app='chat',
-                session_id=st.session_state.session_id, history=history,
-                on_step=lambda _:status.caption('Checking the selected sources…'),model=model,
-                ambiguity=ambiguity, clarification=clarification)
-            status.empty()
-            st.markdown(result['answer'])
-            show_evidence(result)
-            st.caption(f"{result['usage']['llm_calls']} model calls · "
-                       f"{result['usage']['input_tokens']:,} input tokens · "
-                       f"reference {result['request_id'][:12]}")
-            st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result,
+        # The documents were loaded above for display; pass them so they are not loaded twice.
+        response = ask_question(question, documents=docs, history=history, session_id=st.session_state.session_id,
+                                clarification=clarification, model=model, ambiguity=ambiguity, app='chat',
+                                on_step=lambda _:status.caption('Checking the selected sources…'))
+        status.empty()
+        if response['status'] in {'answered', 'needs_clarification'}:
+            st.markdown(response['answer'])
+            show_evidence(response)
+            st.caption(f"{response['usage']['llm_calls']} model calls · "
+                       f"{response['usage']['input_tokens']:,} input tokens · "
+                       f"reference {response['request_id'][:12]}")
+            st.session_state.messages.append({'role':'assistant','content':response['answer'],'result':response,
                                               'question':question})
-            if result.get('status') == 'needs_clarification':
+            if response['status'] == 'needs_clarification':
                 st.rerun()  # redraw so the reading buttons appear
-        except Exception as exc:
-            status.empty()
-            if 'expired' in str(exc).lower() or 'LoginRefreshRequired' in type(exc).__name__:
-                st.error('AWS login has expired. Renew your configured AWS profile, then try again.')
-            else:
-                st.error(f'The question could not be completed: {type(exc).__name__}: {exc}')
+        elif response['status'] == 'no_evidence':
+            st.info(response['message'])
+            st.session_state.messages.append({'role':'assistant','content':response['message'],'result':response,
+                                              'question':question})
+        else:
+            st.error(response['message'] + f" (reference {response['request_id'][:12]})")
 
 
 def pending_clarification():

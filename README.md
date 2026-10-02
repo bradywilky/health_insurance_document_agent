@@ -9,6 +9,7 @@ package imports resolve consistently; the Streamlit entry point is `apps/chat/ap
 
 ```text
 backend/         Reusable application backend
+  entrypoint.py  ask_question: the single entry point for answering a question
   agents/        Sole LangGraph workflow, native protocol, Bedrock and evidence
   tools/         Document and deterministic table tools
   retrieval/     Search over extracted document blocks
@@ -16,9 +17,9 @@ backend/         Reusable application backend
   storage/       Local/S3 persistence and table loading
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
-  services/      Question service: agent run with audit record and trace
   observability/ Audit records and OpenTelemetry spans
 apps/            Replaceable Streamlit interfaces
+  api/           AWS Lambda handler that calls ask_question
   chat/app.py    Saved-document selection and questions (port 8501)
   upload/app.py  Upload, preprocessing and saving (port 8502)
 development/     Utilities and tests, not required by the backend
@@ -42,8 +43,8 @@ Dependencies and local configuration stay at the root (`requirements*.txt`, `.en
 `.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
 managed dependency/cache folders, not application code.
 
-Import integrations from `backend.services.questions` (`answer_question`, which audits and traces each run)
-or, without auditing, `backend.agents.document_agent`. Root-level Python
+Integrations call `backend.entrypoint.ask_question` (see "Entry point" below). The LangGraph workflow in
+`backend.agents.document_agent` is an internal detail that does not validate requests or write audit records. Root-level Python
 modules have been relocated, so update imports and launch commands to the paths shown here.
 The former table-agent entry points have been removed; migrate callers as shown below.
 
@@ -496,8 +497,7 @@ what, of which documents, with which model and prompts, and what came back. **Tr
 each graph step, Bedrock call and tool execution with its latency, tokens and errors. Both carry the same
 `trace_id`, and the chat app shows the first 12 characters of the `request_id` under every answer.
 
-`backend/services/questions.py` `answer_question(...)` is the entry point the chat app and the command-line tool
-use. It writes the audit record whether the question succeeds or fails.
+`ask_question` writes one audit record for every request, including invalid requests and failures.
 
 ### Audit records (`backend/observability/audit.py`)
 
@@ -568,3 +568,44 @@ record's `trace_id` finds its trace. Check current ADOT settings in the AWS docu
 Alongside these, turn on Bedrock model invocation logging (to an encrypted, restricted bucket; it holds full
 prompts) and CloudTrail data events for the document and audit buckets. Those record calls the application
 cannot misreport.
+
+## Entry point
+
+`backend/entrypoint.py` `ask_question(...)` is the one function every caller uses: the Lambda handler in
+`apps/api/lambda_handler.py`, the Streamlit chat app and the command-line tool. It validates the request, loads
+the documents, runs the agent, writes the audit record and trace, and returns a JSON-serializable response. It
+does not raise; the outcome is in `status`.
+
+```python
+from backend.entrypoint import ask_question
+
+response = ask_question(
+    "What is the member rate for plan Alpha?",
+    document_keys=["document-agent/documents/preprocessed/<id>/manifest.json"],  # or documents=[Document, ...]
+    history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
+    session_id="abc123",
+    model="maverick",            # optional; a key of MODELS
+    ambiguity="off",             # off | assumptions | ask
+    app="my-service",            # recorded in the audit record
+)
+```
+
+| `status` | `status_code` | Meaning |
+| --- | --- | --- |
+| `answered` | 200 | `answer` holds the answer; `sources`, `limitations` and `interpretation` support it |
+| `needs_clarification` | 200 | `answer` is a clarifying question; resend `clarification.original_question` with `clarification=` one of `clarification.options` or the user's own wording |
+| `no_evidence` | 204 | nothing relevant was retrieved; `message` explains |
+| `invalid_request` | 400 | no question, more than 10 documents, unknown model or ambiguity mode, malformed history |
+| `documents_unavailable` | 404 | a document key could not be loaded |
+| `credentials_expired` | 503 | AWS credentials are missing or expired |
+| `model_unavailable` | 503 | Bedrock throttled, timed out or was unreachable after retries |
+| `error` | 500 | anything else; `error` has the type and message, and the log has the stack trace |
+
+Other fields: `request_id` and `trace_id` (match the audit record and trace), `session_id`, `documents` (ID, name,
+kind, key, extraction warnings), `sources` (each evidence item with its passages, file and location, table
+result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
+`usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
+
+The Lambda event is `{"question", "session_id", "document_keys", "chat_history", "clarification",
+"args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
+identifiers, because questions and history can contain PHI.

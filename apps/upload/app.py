@@ -7,7 +7,7 @@ from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
 from backend.observability import tracing
-from backend.services.questions import record_document_event
+from backend.observability.audit import record_document_event
 
 tracing.configure_tracing()
 

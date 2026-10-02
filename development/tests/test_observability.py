@@ -11,7 +11,8 @@ from streamlit.testing.v1 import AppTest
 from backend.agents import document_agent
 from backend.observability import audit, tracing
 from backend.preprocessing.documents import ingest_document
-from backend.services.questions import answer_question, record_document_event
+from backend.entrypoint import ask_question
+from backend.observability.audit import record_document_event
 
 QUESTION = 'What is the member rate for plan Alpha?'
 APPS = Path(__file__).resolve().parents[2] / 'apps'
@@ -41,7 +42,7 @@ def rates_run(native_script):
 
 
 def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audit):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
+    result = ask_question(QUESTION, documents=[rates_run], app='test',
                              session_id='s1')
     [meta] = records(isolated_audit, 'metadata', 'questions')
     text = json.dumps(meta)
@@ -61,7 +62,7 @@ def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audi
 
 def test_content_tier_is_opt_in_and_separate(rates_run, isolated_audit, monkeypatch):
     monkeypatch.setenv('AUDIT_CONTENT', 'true')
-    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test')
+    ask_question(QUESTION, documents=[rates_run], app='test')
     [meta] = records(isolated_audit, 'metadata', 'questions')
     [content] = records(isolated_audit, 'content', 'questions')
     assert meta['content_recorded'] and content['request_id'] == meta['request_id']
@@ -74,10 +75,12 @@ def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
     def fail(*args, **kwargs):
         raise RuntimeError('Bedrock unavailable')
     monkeypatch.setattr(document_agent, 'run_document_agent', fail)
-    with pytest.raises(RuntimeError, match='unavailable'):
-        answer_question({doc.id: doc}, [doc.id], QUESTION, app='test')
+    response = ask_question(QUESTION, documents=[doc], app='test')
+    assert response['status'] == 'error' and response['status_code'] == 500 and response['answer'] is None
+    assert 'Bedrock unavailable' in response['message']
     [meta] = records(isolated_audit, 'metadata', 'questions')
     assert meta['status'] == 'error' and 'Bedrock unavailable' in meta['error']
+    assert meta['request_id'] == response['request_id']
 
 
 class BrokenSink:
@@ -86,7 +89,7 @@ class BrokenSink:
 
 
 def test_audit_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
+    result = ask_question(QUESTION, documents=[rates_run], app='test',
                              sink=BrokenSink())
     assert result['status'] == 'answered' and 'disk full' in caplog.text
     monkeypatch.setenv('AUDIT_REQUIRED', 'true')
@@ -129,7 +132,7 @@ def test_audit_storage_modes(monkeypatch):
 
 
 def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, isolated_audit):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
+    result = ask_question(QUESTION, documents=[rates_run], app='test',
                              session_id='s1')
     finished = spans.get_finished_spans()
     by_id = {s.context.span_id: s for s in finished}
@@ -160,7 +163,7 @@ def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, iso
 
 def test_trace_content_is_opt_in(rates_run, spans, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test')
+    ask_question(QUESTION, documents=[rates_run], app='test')
     chat = next(s for s in spans.get_finished_spans() if s.name.startswith('chat '))
     assert {e.name for e in chat.events} == {'gen_ai.input', 'gen_ai.output'}
 
@@ -170,7 +173,7 @@ def test_tool_errors_mark_their_span(native_script, spans):
     # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
     native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
                    {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
-    answer_question({doc.id: doc}, [doc.id], 'Rate?', app='test')
+    ask_question('Rate?', documents=[doc], app='test')
     tool = next(s for s in spans.get_finished_spans() if s.name == 'execute_tool calculate')
     assert tool.status.status_code == StatusCode.ERROR
 

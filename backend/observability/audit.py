@@ -219,7 +219,7 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
         'code_version': code_version(), 'prompt_version': prompt_version, 'model': model,
         'ambiguity_mode': ambiguity, 'clarified': bool(clarification), 'documents': documents,
         'question_sha256': digest(question), 'question_chars': len(question or ''),
-        'status': 'error' if error else result.get('status'),
+        'status': result.get('status') or ('error' if error else None),
         'answer_sha256': digest(result['answer']) if result.get('answer') else None,
         'protocol': result.get('protocol'), 'coverage': result.get('coverage'),
         'limitations_count': len(result.get('limitations') or []),
@@ -235,6 +235,14 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
             'clarification_request': result.get('clarification'), 'limitations': result.get('limitations'),
             'evidence': result.get('evidence'), 'llm_calls': call_records}))
     return records
+
+
+def record_document_event(event, *, app, sink=None, **fields):
+    """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
+    from opentelemetry import trace
+    from backend.observability import tracing
+    write(sink if sink is not None else configured_audit_sink(),
+          document_event(event, app=app, trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))
 
 
 def document_event(event, *, app, document=None, filename=None, content=None, details=None, error=None,

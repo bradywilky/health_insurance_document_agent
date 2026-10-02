@@ -350,7 +350,8 @@ def node_synthesize(state: DocumentState) -> dict:
     unexamined = [docs[d].name for d in _unexamined(docs, evidence)]
     if not substantive:
         return _result(state, 'I could not retrieve supporting content from the selected files. '
-                              'Try a different question or inspect extraction warnings.', limitations, stats)
+                              'Try a different question or inspect extraction warnings.', limitations, stats,
+                       status='no_evidence')
     usable = substantive + [e for e in evidence if e['tool'] in {'calculate', 'date_calculate'}]
     payload = {'question': question, 'evidence': bounded(usable, max_chars=50000),
                'limitations': limitations, 'unexamined_documents': unexamined}
@@ -387,7 +388,7 @@ def node_synthesize(state: DocumentState) -> dict:
     return _result(state, answer, limitations, stats)
 
 
-def _result(state, answer, limitations, stats):
+def _result(state, answer, limitations, stats, status='answered'):
     docs, evidence = state['docs'], state['evidence']
     unexamined = [docs[d].name for d in _unexamined(docs, evidence)]
     if unexamined:
@@ -396,7 +397,7 @@ def _result(state, answer, limitations, stats):
     coverage = {'examined': [docs[d].name for d in docs if d in examined_documents(evidence)],
                 'auto_read': [docs[e['parameters']['document_id']].name for e in evidence if e.get('auto')],
                 'unexamined': unexamined}
-    return {'result': {'status': 'answered', 'answer': answer, 'evidence': evidence, 'limitations': limitations,
+    return {'result': {'status': status, 'answer': answer, 'evidence': evidence, 'limitations': limitations,
                        'document_ids': list(docs), 'protocol': stats, 'coverage': coverage,
                        'interpretation': state.get('interpretation')}}
 

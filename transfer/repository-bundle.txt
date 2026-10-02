@@ -105,7 +105,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 43117, "sha256": "aaac2d0c72e5909ecc256441e5de2f59427890edbeace1e72100837f3f0304fd"}
+{"path": "README.md", "characters": 45674, "sha256": "2618d894dd5402ef5dabd6e2338841c8203a821e11254cbcbedd1b647c89bade"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
@@ -117,6 +117,7 @@ package imports resolve consistently; the Streamlit entry point is `apps/chat/ap
 
 ```text
 backend/         Reusable application backend
+  entrypoint.py  ask_question: the single entry point for answering a question
   agents/        Sole LangGraph workflow, native protocol, Bedrock and evidence
   tools/         Document and deterministic table tools
   retrieval/     Search over extracted document blocks
@@ -124,9 +125,9 @@ backend/         Reusable application backend
   storage/       Local/S3 persistence and table loading
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
-  services/      Question service: agent run with audit record and trace
   observability/ Audit records and OpenTelemetry spans
 apps/            Replaceable Streamlit interfaces
+  api/           AWS Lambda handler that calls ask_question
   chat/app.py    Saved-document selection and questions (port 8501)
   upload/app.py  Upload, preprocessing and saving (port 8502)
 development/     Utilities and tests, not required by the backend
@@ -150,8 +151,8 @@ Dependencies and local configuration stay at the root (`requirements*.txt`, `.en
 `.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
 managed dependency/cache folders, not application code.
 
-Import integrations from `backend.services.questions` (`answer_question`, which audits and traces each run)
-or, without auditing, `backend.agents.document_agent`. Root-level Python
+Integrations call `backend.entrypoint.ask_question` (see "Entry point" below). The LangGraph workflow in
+`backend.agents.document_agent` is an internal detail that does not validate requests or write audit records. Root-level Python
 modules have been relocated, so update imports and launch commands to the paths shown here.
 The former table-agent entry points have been removed; migrate callers as shown below.
 
@@ -604,8 +605,7 @@ what, of which documents, with which model and prompts, and what came back. **Tr
 each graph step, Bedrock call and tool execution with its latency, tokens and errors. Both carry the same
 `trace_id`, and the chat app shows the first 12 characters of the `request_id` under every answer.
 
-`backend/services/questions.py` `answer_question(...)` is the entry point the chat app and the command-line tool
-use. It writes the audit record whether the question succeeds or fails.
+`ask_question` writes one audit record for every request, including invalid requests and failures.
 
 ### Audit records (`backend/observability/audit.py`)
 
@@ -677,14 +677,97 @@ Alongside these, turn on Bedrock model invocation logging (to an encrypted, rest
 prompts) and CloudTrail data events for the document and audit buckets. Those record calls the application
 cannot misreport.
 
+## Entry point
+
+`backend/entrypoint.py` `ask_question(...)` is the one function every caller uses: the Lambda handler in
+`apps/api/lambda_handler.py`, the Streamlit chat app and the command-line tool. It validates the request, loads
+the documents, runs the agent, writes the audit record and trace, and returns a JSON-serializable response. It
+does not raise; the outcome is in `status`.
+
+```python
+from backend.entrypoint import ask_question
+
+response = ask_question(
+    "What is the member rate for plan Alpha?",
+    document_keys=["document-agent/documents/preprocessed/<id>/manifest.json"],  # or documents=[Document, ...]
+    history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
+    session_id="abc123",
+    model="maverick",            # optional; a key of MODELS
+    ambiguity="off",             # off | assumptions | ask
+    app="my-service",            # recorded in the audit record
+)
+```
+
+| `status` | `status_code` | Meaning |
+| --- | --- | --- |
+| `answered` | 200 | `answer` holds the answer; `sources`, `limitations` and `interpretation` support it |
+| `needs_clarification` | 200 | `answer` is a clarifying question; resend `clarification.original_question` with `clarification=` one of `clarification.options` or the user's own wording |
+| `no_evidence` | 204 | nothing relevant was retrieved; `message` explains |
+| `invalid_request` | 400 | no question, more than 10 documents, unknown model or ambiguity mode, malformed history |
+| `documents_unavailable` | 404 | a document key could not be loaded |
+| `credentials_expired` | 503 | AWS credentials are missing or expired |
+| `model_unavailable` | 503 | Bedrock throttled, timed out or was unreachable after retries |
+| `error` | 500 | anything else; `error` has the type and message, and the log has the stack trace |
+
+Other fields: `request_id` and `trace_id` (match the audit record and trace), `session_id`, `documents` (ID, name,
+kind, key, extraction warnings), `sources` (each evidence item with its passages, file and location, table
+result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
+`usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
+
+The Lambda event is `{"question", "session_id", "document_keys", "chat_history", "clarification",
+"args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
+identifiers, because questions and history can contain PHI.
+
 ===== REPOSITORY FILE =====
 {"path": "apps/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+
+===== REPOSITORY FILE =====
+{"path": "apps/api/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+
+===== REPOSITORY FILE =====
+{"path": "apps/api/lambda_handler.py", "characters": 1568, "sha256": "f81a1d6eef8ca76e4de28976e7b6b271523b6389a376c257a4e81875892d8668"}
+"""AWS Lambda handler: a thin adapter from the event to backend.entrypoint.ask_question.
+
+Event:
+    {"question": "...", "session_id": "...", "document_keys": ["<manifest key>", ...],
+     "chat_history": [{"role": "user" | "assistant", "content": "..."}],
+     "clarification": "<chosen reading, after a needs_clarification response>",
+     "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_name": "..."}}
+
+Returns the ask_question response (status, status_code, answer or message, sources, limitations, request_id, ...).
+Configure storage, audit and model settings with the same environment variables as the apps (.env.example).
+"""
+import logging
+
+from backend.entrypoint import ask_question
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+
+def lambda_handler(event, context):
+    event = event or {}
+    args = event.get('args') or {}
+    # Log identifiers only: questions and history can contain PHI.
+    logger.info('Request session=%s documents=%s', event.get('session_id'), len(event.get('document_keys') or []))
+    response = ask_question(
+        event.get('question'),
+        document_keys=event.get('document_keys') or [],
+        history=event.get('chat_history') or [],
+        session_id=event.get('session_id'),
+        clarification=event.get('clarification'),
+        model=args.get('model'),
+        ambiguity=args.get('ambiguity', 'off'),
+        app=args.get('app_name') or 'lambda',
+    )
+    logger.info('Response request=%s status=%s', response['request_id'], response['status'])
+    return response
 
 ===== REPOSITORY FILE =====
 {"path": "apps/chat/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/chat/app.py", "characters": 9106, "sha256": "4db9f132dc592fe6622992708c86cdc77d94fb1e5c9e5b88da1a891dbe0f322b"}
+{"path": "apps/chat/app.py", "characters": 8933, "sha256": "ed70c5354357802241573e33095a04b1b97c1ac66ce0c9167bf8c4c3058a9af6"}
 """Saved-document selection and chat. Run: streamlit run apps/chat/app.py"""
 import os
 from dotenv import load_dotenv
@@ -692,7 +775,7 @@ load_dotenv()
 import uuid
 import streamlit as st
 from backend.observability.tracing import configure_tracing
-from backend.services.questions import answer_question
+from backend.entrypoint import ask_question
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
 
@@ -775,38 +858,36 @@ else:
             st.json(doc.blocks[:3])
 
 
-def show_evidence(result):
-    if result.get('status') == 'needs_clarification':
+def show_evidence(response):
+    if response.get('status') != 'answered':
         return
-    interpretation = result.get('interpretation')
-    if interpretation and interpretation.get('alternatives'):
-        st.caption('Answered as: ' + interpretation['used'])
-    protocol = result.get('protocol')
+    if (response.get('interpretation') or {}).get('note'):
+        st.caption(response['interpretation']['note'])
+    protocol = response.get('protocol')
     if protocol:
         st.caption(f"{protocol['planner_mode']} tools · {protocol['repair_attempts']} corrective retries")
-    for warning in result.get('limitations',[]):
+    for warning in response.get('limitations',[]):
         st.warning(warning)
     with st.expander('Evidence used'):
-        for record in result.get('evidence',[]):
-            data = record['data']
-            st.markdown(f"**{record['id']}**")
-            passages = data.get('matches',data.get('blocks',[]))
-            for passage in passages:
-                location = ', '.join(f'{k} {v}' for k,v in passage.get('location',{}).items() if v != '')
-                st.caption(f"{passage.get('filename',data.get('filename',''))} — {location}")
+        for source in response.get('sources',[]):
+            st.markdown(f"**{source['id']}**")
+            for passage in source['passages']:
+                st.caption(f"{passage['filename']} — {passage['location']}")
                 st.text(passage['text'])
-            if 'table_result' in data:
-                table = data['table_result']
-                st.caption(data.get('filename',''))
+            if source['table'] is not None:
+                table = source['table']
+                st.caption(source.get('filename') or '')
                 if table.get('rows'):
                     st.dataframe(table['rows'], hide_index=True)
                 else:
                     st.json(table)
                 if table.get('diagnostics'):
                     st.json(table['diagnostics'])
-            if data.get('error'):
-                st.warning(data['error'])
-            if data.get('truncated') or data.get('next_offset') is not None:
+            if source['calculation'] is not None:
+                st.json(source['calculation'])
+            if source['error']:
+                st.warning(source['error'])
+            if source['partial']:
                 st.caption('This evidence contains only part of the available text.')
 
 
@@ -819,29 +900,27 @@ def ask(question, clarification=None):
         st.markdown(shown)
     with st.chat_message('assistant'):
         status = st.empty()
-        try:
-            # A per-call model setting is passed to the agent; never share user file caches.
-            result = answer_question(st.session_state.documents,selected,question,
-                app='chat',
-                session_id=st.session_state.session_id, history=history,
-                on_step=lambda _:status.caption('Checking the selected sources…'),model=model,
-                ambiguity=ambiguity, clarification=clarification)
-            status.empty()
-            st.markdown(result['answer'])
-            show_evidence(result)
-            st.caption(f"{result['usage']['llm_calls']} model calls · "
-                       f"{result['usage']['input_tokens']:,} input tokens · "
-                       f"reference {result['request_id'][:12]}")
-            st.session_state.messages.append({'role':'assistant','content':result['answer'],'result':result,
+        # The documents were loaded above for display; pass them so they are not loaded twice.
+        response = ask_question(question, documents=docs, history=history, session_id=st.session_state.session_id,
+                                clarification=clarification, model=model, ambiguity=ambiguity, app='chat',
+                                on_step=lambda _:status.caption('Checking the selected sources…'))
+        status.empty()
+        if response['status'] in {'answered', 'needs_clarification'}:
+            st.markdown(response['answer'])
+            show_evidence(response)
+            st.caption(f"{response['usage']['llm_calls']} model calls · "
+                       f"{response['usage']['input_tokens']:,} input tokens · "
+                       f"reference {response['request_id'][:12]}")
+            st.session_state.messages.append({'role':'assistant','content':response['answer'],'result':response,
                                               'question':question})
-            if result.get('status') == 'needs_clarification':
+            if response['status'] == 'needs_clarification':
                 st.rerun()  # redraw so the reading buttons appear
-        except Exception as exc:
-            status.empty()
-            if 'expired' in str(exc).lower() or 'LoginRefreshRequired' in type(exc).__name__:
-                st.error('AWS login has expired. Renew your configured AWS profile, then try again.')
-            else:
-                st.error(f'The question could not be completed: {type(exc).__name__}: {exc}')
+        elif response['status'] == 'no_evidence':
+            st.info(response['message'])
+            st.session_state.messages.append({'role':'assistant','content':response['message'],'result':response,
+                                              'question':question})
+        else:
+            st.error(response['message'] + f" (reference {response['request_id'][:12]})")
 
 
 def pending_clarification():
@@ -887,7 +966,7 @@ elif typed:
 {"path": "apps/upload/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/upload/app.py", "characters": 8835, "sha256": "df3cc9f0e26937fc506fcd8b755e9bcf786f9116b4bdb81c39498dc662b50a4b"}
+{"path": "apps/upload/app.py", "characters": 8836, "sha256": "3154168f218a5d6beb9af2c26c45156e47e8992bf597f27c5ce5c5ac57b075a5"}
 """Document upload portal. Run: streamlit run apps/upload/app.py --server.port 8502"""
 from pathlib import Path
 from dotenv import load_dotenv
@@ -897,7 +976,7 @@ from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
 from backend.observability import tracing
-from backend.services.questions import record_document_event
+from backend.observability.audit import record_document_event
 
 tracing.configure_tracing()
 
@@ -1202,7 +1281,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 28760, "sha256": "f0d425cf89d082abad01fd11d6f30a490294e2d174d667127a0f32e7520e65c1"}
+{"path": "backend/agents/document_agent.py", "characters": 28820, "sha256": "cf95a91294b27079424236187d3857a351e500899f79e2f525c4f4faad46783f"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1555,7 +1634,8 @@ def node_synthesize(state: DocumentState) -> dict:
     unexamined = [docs[d].name for d in _unexamined(docs, evidence)]
     if not substantive:
         return _result(state, 'I could not retrieve supporting content from the selected files. '
-                              'Try a different question or inspect extraction warnings.', limitations, stats)
+                              'Try a different question or inspect extraction warnings.', limitations, stats,
+                       status='no_evidence')
     usable = substantive + [e for e in evidence if e['tool'] in {'calculate', 'date_calculate'}]
     payload = {'question': question, 'evidence': bounded(usable, max_chars=50000),
                'limitations': limitations, 'unexamined_documents': unexamined}
@@ -1592,7 +1672,7 @@ def node_synthesize(state: DocumentState) -> dict:
     return _result(state, answer, limitations, stats)
 
 
-def _result(state, answer, limitations, stats):
+def _result(state, answer, limitations, stats, status='answered'):
     docs, evidence = state['docs'], state['evidence']
     unexamined = [docs[d].name for d in _unexamined(docs, evidence)]
     if unexamined:
@@ -1601,7 +1681,7 @@ def _result(state, answer, limitations, stats):
     coverage = {'examined': [docs[d].name for d in docs if d in examined_documents(evidence)],
                 'auto_read': [docs[e['parameters']['document_id']].name for e in evidence if e.get('auto')],
                 'unexamined': unexamined}
-    return {'result': {'status': 'answered', 'answer': answer, 'evidence': evidence, 'limitations': limitations,
+    return {'result': {'status': status, 'answer': answer, 'evidence': evidence, 'limitations': limitations,
                        'document_ids': list(docs), 'protocol': stats, 'coverage': coverage,
                        'interpretation': state.get('interpretation')}}
 
@@ -2225,11 +2305,220 @@ def get_model_config(alias="UNALIASED"):
     }
 
 ===== REPOSITORY FILE =====
+{"path": "backend/entrypoint.py", "characters": 12319, "sha256": "95a0e13ee24514d28e36952084ca11bc00d2f88af9c942c46c69bfa0d8033dfe"}
+"""Single entry point for document question answering.
+
+Every caller (a Lambda handler, the Streamlit chat app, the command-line tool) calls ask_question. It validates
+the request, loads the documents, runs the agent, writes the audit record and trace, and returns a plain,
+JSON-serializable response whose `status` tells the caller what happened:
+
+answered              `answer` is the answer; `sources` and `limitations` support it
+needs_clarification   `answer` is a clarifying question; resend the same question with `clarification` set to
+                      one of `clarification.options` or the user's own wording
+no_evidence           nothing relevant was retrieved; `message` explains
+invalid_request       bad input (no question, too many documents, unknown model, ...); `message` explains
+documents_unavailable a document key could not be loaded
+credentials_expired   AWS credentials are missing or expired
+model_unavailable     Bedrock throttled, timed out or was unreachable after retries
+error                 anything else; `error` holds the exception type and message
+
+STATUS_CODES maps each status to an HTTP-style code for API callers.
+"""
+import logging
+import time
+
+from backend.agents import ambiguity as amb
+from backend.agents import document_agent
+from backend.agents.llm import LLMCallLog
+from backend.config.settings import MODELS
+from backend.observability import audit, tracing
+
+MAX_DOCUMENTS = 10
+MAX_QUESTION_CHARS = 4000
+STATUS_CODES = {'answered': 200, 'needs_clarification': 200, 'no_evidence': 204, 'invalid_request': 400,
+                'documents_unavailable': 404, 'credentials_expired': 503, 'model_unavailable': 503, 'error': 500}
+MESSAGES = {
+    'no_evidence': 'I could not retrieve supporting content from the selected files. '
+                   'Try a different question or inspect extraction warnings.',
+    'credentials_expired': 'AWS credentials are missing or expired. Renew them, then try again.',
+    'model_unavailable': 'The model service is busy or unreachable. Try again shortly.',
+}
+_EXPIRED = {'LoginRefreshRequired', 'ExpiredToken', 'ExpiredTokenException', 'NoCredentialsError',
+            'UnauthorizedSSOTokenError', 'TokenRetrievalError', 'SSOTokenLoadError'}
+_UNAVAILABLE = {'ThrottlingException', 'ServiceUnavailableException', 'ModelNotReadyException',
+                'ModelTimeoutException', 'ReadTimeoutError', 'ConnectTimeoutError', 'EndpointConnectionError'}
+logger = logging.getLogger(__name__)
+
+
+class RequestError(ValueError):
+    """Invalid request or unavailable documents; reported to the caller rather than raised."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+def ask_question(question, *, document_keys=None, documents=None, history=None, session_id=None,
+                 clarification=None, model=None, ambiguity='off', app='api', store=None, sink=None, on_step=None,
+                 call_log=None):
+    """Answer `question` from the selected documents. Never raises; see the module docstring for statuses.
+
+    document_keys  saved-document manifest keys, loaded from `store` (default: the configured document store)
+    documents      already-loaded Document objects, instead of keys (e.g. a local file in the CLI)
+    history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
+    clarification  the reading the user chose after a needs_clarification response
+    model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
+    ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
+    app            caller name recorded in the audit record and trace
+    on_step        optional callback after each research step (progress display)
+    call_log       optional LLMCallLog to receive every prompt and response (development tools)
+    """
+    sink = sink if sink is not None else audit.configured_audit_sink()
+    log = call_log if call_log is not None else LLMCallLog()
+    request_id, timestamp, start = audit.new_id(), audit.now(), time.monotonic()
+    loaded, result, error, status = [], None, None, 'error'
+    with tracing.span('invoke_agent document_agent', **{
+            'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'document_agent',
+            'session.id': session_id, 'app.request_id': request_id, 'app.name': app,
+            'app.ambiguity_mode': ambiguity, 'app.model': model}) as root:
+        trace_id = tracing.trace_id_of(root)
+        tracing.add_content(root, 'app.question', question=question, clarification=clarification)
+        try:
+            question, history, clarification = _validate(question, history, clarification, model, ambiguity,
+                                                         document_keys, documents)
+            loaded = list(documents) if documents is not None else _load(document_keys, store)
+            tracing.set_attributes(root, **{'app.document_ids': [d.id for d in loaded]})
+            # Module attribute, so tests can replace the agent.
+            result = document_agent.run_document_agent(
+                {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, call_log=log,
+                on_step=on_step, model=model, ambiguity=ambiguity, clarification=clarification)
+            status = result.get('status') or 'answered'
+        except RequestError as exc:
+            status, error = exc.status, str(exc)
+        except Exception as exc:
+            status, error = classify(exc), f'{type(exc).__name__}: {exc}'[:1000]
+            logger.exception('Question %s failed', request_id)
+        tracing.set_attributes(root, **{'app.status': status})
+        if status not in {'answered', 'needs_clarification', 'no_evidence'}:
+            tracing.mark_error(root, error or status)
+        response = _response(status, result, error, loaded, request_id, trace_id, session_id, question, log)
+        audit.write(sink, audit.question_records(
+            request_id=request_id, timestamp=timestamp, app=app, session_id=session_id,
+            model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
+            documents=[audit.document_summary(d) for d in loaded], question=question,
+            clarification=clarification, result={**(result or {}), 'status': status}, call_records=log.records,
+            duration_ms=round((time.monotonic() - start) * 1000), error=error, trace_id=trace_id))
+    return response
+
+
+def classify(exc):
+    """Map an exception to a status. Botocore errors carry their AWS error code in exc.response."""
+    names = {type(exc).__name__, str((getattr(exc, 'response', None) or {}).get('Error', {}).get('Code', ''))}
+    if names & _EXPIRED or 'token has expired' in str(exc).lower():
+        return 'credentials_expired'
+    if names & _UNAVAILABLE:
+        return 'model_unavailable'
+    return 'error'
+
+
+def _validate(question, history, clarification, model, ambiguity, document_keys, documents):
+    if not isinstance(question, str) or not question.strip():
+        raise RequestError('invalid_request', 'A question is required.')
+    if len(question) > MAX_QUESTION_CHARS:
+        raise RequestError('invalid_request', f'Questions are limited to {MAX_QUESTION_CHARS} characters.')
+    if model is not None and model not in MODELS:
+        raise RequestError('invalid_request', f'model must be one of {list(MODELS)}.')
+    if ambiguity not in amb.MODES:
+        raise RequestError('invalid_request', f'ambiguity must be one of {list(amb.MODES)}.')
+    if (document_keys is None) == (documents is None):
+        raise RequestError('invalid_request', 'Provide either document_keys or documents.')
+    selected = document_keys if document_keys is not None else documents
+    if not isinstance(selected, (list, tuple)) or not selected:
+        raise RequestError('invalid_request', 'Select at least one document.')
+    if len(selected) > MAX_DOCUMENTS:
+        raise RequestError('invalid_request', f'Select at most {MAX_DOCUMENTS} documents.')
+    if document_keys is not None and not all(isinstance(k, str) and k for k in document_keys):
+        raise RequestError('invalid_request', 'document_keys must be nonempty strings.')
+    if clarification is not None and (not isinstance(clarification, str) or not clarification.strip()):
+        raise RequestError('invalid_request', 'clarification must be nonempty text when provided.')
+    turns = []
+    for turn in history or []:
+        if not isinstance(turn, dict) or turn.get('role') not in {'user', 'assistant'} \
+                or not isinstance(turn.get('content'), str):
+            raise RequestError('invalid_request', "history items must be {'role': 'user'|'assistant', 'content': str}.")
+        turns.append({'role': turn['role'], 'content': turn['content']})
+    return question.strip(), turns, clarification.strip() if clarification else None
+
+
+def _load(document_keys, store):
+    if store is None:
+        from backend.storage.s3 import configured_store
+        store = configured_store(read_only=True)
+    loaded = []
+    for key in dict.fromkeys(document_keys):
+        try:
+            loaded.append(store.load(key))
+        except Exception as exc:
+            if classify(exc) != 'error':
+                raise
+            raise RequestError('documents_unavailable', f'Could not open saved document {key}: {exc}') from exc
+    return loaded
+
+
+def _location(location):
+    if isinstance(location, dict):
+        return ', '.join(f'{k} {v}' for k, v in location.items() if v != '')
+    return str(location or '')
+
+
+def sources(evidence):
+    """Evidence reshaped for display: passages with file and location, table results, calculations."""
+    out = []
+    for record in evidence or []:
+        data = record.get('data') or {}
+        passages = [{'filename': p.get('filename', data.get('filename', '')), 'location': _location(p.get('location')),
+                     'text': p.get('text', '')}
+                    for p in data.get('matches', data.get('blocks', [])) if isinstance(p, dict)]
+        out.append({'id': record.get('id'), 'tool': record.get('tool'), 'auto': bool(record.get('auto')),
+                    'filename': data.get('filename'), 'passages': passages, 'table': data.get('table_result'),
+                    'calculation': data if record.get('tool') in {'calculate', 'date_calculate'} else None,
+                    'error': data.get('error'),
+                    'partial': bool(data.get('truncated') or data.get('next_offset') is not None)})
+    return out
+
+
+def _response(status, result, error, loaded, request_id, trace_id, session_id, question, log):
+    result = result or {}
+    interpretation = result.get('interpretation')
+    if interpretation and interpretation.get('alternatives'):
+        interpretation = {**interpretation, 'note': 'Answered as: ' + interpretation['used']}
+    clarification = result.get('clarification')
+    if status == 'needs_clarification' and clarification:
+        clarification = {**clarification, 'original_question': question}
+    answer = result.get('answer') if status in {'answered', 'needs_clarification'} else None
+    message = MESSAGES.get(status) or (error if status != 'answered' else None)
+    if status == 'error':
+        message = f'The question could not be completed: {error}'
+    return {
+        'status': status, 'status_code': STATUS_CODES[status], 'answer': answer, 'message': message,
+        'request_id': request_id, 'trace_id': trace_id, 'session_id': session_id,
+        'documents': [{'id': d.id, 'name': d.name, 'kind': d.kind,
+                       'key': (getattr(d, 'storage_ref', None) or {}).get('manifest_key'),
+                       'warnings': list(getattr(d, 'warnings', []) or [])} for d in loaded],
+        'sources': sources(result.get('evidence')), 'evidence': result.get('evidence', []),
+        'limitations': result.get('limitations', []), 'coverage': result.get('coverage'),
+        'interpretation': interpretation, 'clarification': clarification if status == 'needs_clarification' else None,
+        'protocol': result.get('protocol'), 'usage': audit.totals(log.records),
+        'error': {'type': error.split(':', 1)[0], 'message': error} if error and status not in {
+            'invalid_request', 'documents_unavailable'} else None,
+    }
+
+===== REPOSITORY FILE =====
 {"path": "backend/observability/__init__.py", "characters": 33, "sha256": "7774a4e4cbb4710f92854d13ac908c44bdd4d2eaeb5dd6edacae870d19fb0d4d"}
 """Audit records and tracing."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/audit.py", "characters": 11748, "sha256": "4c2680837af625adc62baa43addfc970e87400326f980a00bb1ac142e11e33de"}
+{"path": "backend/observability/audit.py", "characters": 12164, "sha256": "b1553f554c19c50fc608417e2655761384323ef2c25da8aaa025c0a2dd7e5d18"}
 """Application audit records: one per question and one per document event.
 
 Two tiers, written to separate locations so they can have separate access policies and retention:
@@ -2451,7 +2740,7 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
         'code_version': code_version(), 'prompt_version': prompt_version, 'model': model,
         'ambiguity_mode': ambiguity, 'clarified': bool(clarification), 'documents': documents,
         'question_sha256': digest(question), 'question_chars': len(question or ''),
-        'status': 'error' if error else result.get('status'),
+        'status': result.get('status') or ('error' if error else None),
         'answer_sha256': digest(result['answer']) if result.get('answer') else None,
         'protocol': result.get('protocol'), 'coverage': result.get('coverage'),
         'limitations_count': len(result.get('limitations') or []),
@@ -2467,6 +2756,14 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
             'clarification_request': result.get('clarification'), 'limitations': result.get('limitations'),
             'evidence': result.get('evidence'), 'llm_calls': call_records}))
     return records
+
+
+def record_document_event(event, *, app, sink=None, **fields):
+    """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
+    from opentelemetry import trace
+    from backend.observability import tracing
+    write(sink if sink is not None else configured_audit_sink(),
+          document_event(event, app=app, trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))
 
 
 def document_event(event, *, app, document=None, filename=None, content=None, details=None, error=None,
@@ -3177,67 +3474,6 @@ def search_documents(documents, query, *, limit=8):
             'retrieval_method':'lexical over text blocks and all spreadsheet rows; no semantic matching. '
                                'Use table tools for counts and totals.',
             'warnings':{doc.name:doc.warnings for doc in documents.values() if doc.warnings}}
-
-===== REPOSITORY FILE =====
-{"path": "backend/services/__init__.py", "characters": 70, "sha256": "edc6e3787a140c9d8f7470476713312d5d5f2cb8f84321ca432cef15a86250fb"}
-"""Application services: agent runs with audit records and traces."""
-
-===== REPOSITORY FILE =====
-{"path": "backend/services/questions.py", "characters": 3322, "sha256": "bf4d37134b3b0d738ffae92dd1d8c7e80353616537e3f1341cf5a927c55296b4"}
-"""Answer a question with an audit record and a trace. Apps and the CLI call this instead of the agent."""
-import time
-
-from backend.agents import document_agent
-from backend.agents.llm import LLMCallLog
-from backend.observability import audit, tracing
-
-
-def answer_question(documents, document_ids, question, *, app, session_id=None, sink=None, history=None,
-                    call_log=None, model=None, ambiguity='off', clarification=None, on_step=None):
-    """Run the document agent. Returns its result plus request_id, trace_id and usage.
-
-    The audit record is written whether the question succeeds or fails; failures are then re-raised."""
-    sink = sink if sink is not None else audit.configured_audit_sink()
-    log = call_log if call_log is not None else LLMCallLog()
-    request_id, timestamp, start = audit.new_id(), audit.now(), time.monotonic()
-    docs = [audit.document_summary(documents[d]) for d in document_ids if d in documents]
-    result, error = None, None
-    with tracing.span('invoke_agent document_agent', **{
-            'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'document_agent',
-            'session.id': session_id, 'app.request_id': request_id, 'app.name': app,
-            'app.ambiguity_mode': ambiguity, 'app.model': model,
-            'app.document_ids': [d['id'] for d in docs]}) as root:
-        trace_id = tracing.trace_id_of(root)
-        tracing.add_content(root, 'app.question', question=question, clarification=clarification)
-        try:
-            # Module attribute, so tests can replace the agent.
-            result = document_agent.run_document_agent(
-                documents, document_ids, question, history=history, call_log=log, on_step=on_step, model=model,
-                ambiguity=ambiguity, clarification=clarification)
-            tracing.set_attributes(root, **{'app.status': result.get('status'),
-                                            'app.evidence_count': len(result.get('evidence') or []),
-                                            'app.limitations_count': len(result.get('limitations') or [])})
-        except Exception as exc:
-            error = f'{type(exc).__name__}: {exc}'[:1000]
-            tracing.mark_error(root, error)
-            raise
-        finally:
-            records = audit.question_records(
-                request_id=request_id, timestamp=timestamp, app=app, session_id=session_id,
-                model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
-                documents=docs, question=question, clarification=clarification, result=result,
-                call_records=log.records, duration_ms=round((time.monotonic() - start) * 1000), error=error,
-                trace_id=trace_id)
-            audit.write(sink, records)
-    return {**result, 'request_id': request_id, 'trace_id': trace_id, 'usage': audit.totals(log.records)}
-
-
-def record_document_event(event, *, app, sink=None, **fields):
-    """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
-    sink = sink if sink is not None else audit.configured_audit_sink()
-    from opentelemetry import trace
-    audit.write(sink, audit.document_event(event, app=app,
-                                           trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))
 
 ===== REPOSITORY FILE =====
 {"path": "backend/shared/__init__.py", "characters": 25, "sha256": "3677fc3d4ff812994ea264e29f249d8fc1848e2aeb9972190f625cb5180f85bb"}
@@ -4633,7 +4869,7 @@ def execute_table_tool(
 """Cli components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/cli/run_local.py", "characters": 3595, "sha256": "bbe161d032045554b6cbe2d2d0a71b97a0734911fede5fb773c8fc2bdc625e71"}
+{"path": "development/cli/run_local.py", "characters": 3601, "sha256": "d7a9b71b840dd032c4adf38de7dc079483450c8464bf7e712c8784411d1db977"}
 """Run the document agent on local data using native Bedrock tool calls."""
 import argparse
 import json
@@ -4670,7 +4906,7 @@ def main():
     from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent_stream
     from backend.observability.tracing import configure_tracing
-    from backend.services.questions import answer_question
+    from backend.entrypoint import ask_question
     configure_tracing()
     from backend.preprocessing.documents import document_from_table_inputs
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
@@ -4691,12 +4927,11 @@ def main():
             for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
                 print(json.dumps(event, default=str), flush=True)
         else:
-            result = answer_question(documents, [doc.id], args.question, app="cli",
-                                     call_log=log, model=args.model)
-            print(result["answer"])
-            print(f"Reference: {result['request_id']}")
-            for warning in result["limitations"]:
+            response = ask_question(args.question, documents=[doc], app="cli", model=args.model, call_log=log)
+            print(response["answer"] or response["message"])
+            for warning in response["limitations"]:
                 print(f"Limitation: {warning}")
+            print(f"Status: {response['status']}; reference: {response['request_id']}")
     finally:
         if args.trace:
             args.trace.parent.mkdir(parents=True, exist_ok=True)
@@ -6792,6 +7027,120 @@ def test_spreadsheet_profiles_sample_data_rows_and_keep_narrative():
     assert 'SHEET INDEX' in text and f'first {SAMPLE_ROWS} rows' in text
 
 ===== REPOSITORY FILE =====
+{"path": "development/tests/test_entrypoint.py", "characters": 5861, "sha256": "546f1f00dd95120824eddb6535a17da2a4e2609a4fdbcb4542707fd930849f99"}
+import json
+
+import pytest
+from botocore.exceptions import ClientError
+
+from apps.api.lambda_handler import lambda_handler
+from backend.agents import document_agent
+from backend.entrypoint import STATUS_CODES, ask_question, classify
+from backend.preprocessing.documents import ingest_document
+from backend.storage.s3 import configured_store
+
+
+@pytest.fixture
+def store(monkeypatch, tmp_path):
+    monkeypatch.setenv('DOCUMENTS_STORAGE', 'local')
+    monkeypatch.setenv('DOCUMENTS_LOCAL_DIR', str(tmp_path / 'library'))
+    return configured_store()
+
+
+@pytest.fixture
+def saved(store):
+    doc = ingest_document('rates.txt', b'Plan Alpha member rate is USD 88 per month.', store=store)
+    return doc.storage_ref['manifest_key']
+
+
+def answered(native_script, doc_id):
+    native_script([{'tool': 'search_documents', 'parameters': {'query': 'Alpha rate', 'document_ids': [doc_id]}},
+                   {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
+
+
+def test_answer_from_saved_document_keys(native_script, store, saved):
+    answered(native_script, store.load(saved).id)
+    response = ask_question('What is the Alpha rate?', document_keys=[saved], session_id='s1', app='test')
+    assert response['status'] == 'answered' and response['status_code'] == 200
+    assert response['answer'] == 'The member rate is USD 88 [E1].' and response['message'] is None
+    assert response['documents'][0]['name'] == 'rates.txt' and response['documents'][0]['key'] == saved
+    [source] = response['sources']
+    assert source['id'] == 'E1' and source['passages'][0] == {
+        'filename': 'rates.txt', 'location': 'paragraph 1', 'text': 'Plan Alpha member rate is USD 88 per month.'}
+    assert response['usage']['llm_calls'] == 3 and response['session_id'] == 's1' and response['error'] is None
+    json.dumps(response)  # API callers serialize the response as is
+
+
+@pytest.mark.parametrize('kwargs, message', [
+    ({'question': ' '}, 'question is required'),
+    ({'document_keys': []}, 'at least one document'),
+    ({'document_keys': ['k'] * 11}, 'at most 10'),
+    ({'model': 'unknown'}, 'model must be one of'),
+    ({'ambiguity': 'sometimes'}, 'ambiguity must be one of'),
+    ({'history': [{'role': 'system', 'content': 'x'}]}, 'history items'),
+    ({'documents': []}, 'either document_keys or documents'),
+])
+def test_invalid_requests_are_reported_and_audited(kwargs, message, isolated_audit):
+    request = {'question': 'Rate?', 'document_keys': ['k'], **kwargs}
+    response = ask_question(request.pop('question'), app='test', **request)
+    assert response['status'] == 'invalid_request' and response['status_code'] == 400
+    assert message in response['message'] and response['answer'] is None
+    lines = (next((isolated_audit / 'metadata' / 'questions').glob('*.jsonl'))).read_text().splitlines()
+    assert json.loads(lines[-1])['status'] == 'invalid_request'
+
+
+def test_missing_saved_document(store):
+    response = ask_question('Rate?', document_keys=['document-agent/documents/preprocessed/nope/manifest.json'])
+    assert response['status'] == 'documents_unavailable' and response['status_code'] == 404
+
+
+def test_no_evidence_is_its_own_status(monkeypatch):
+    doc = ingest_document('rates.txt', b'USD 88')
+    monkeypatch.setattr(document_agent, 'run_document_agent', lambda *a, **kw: {
+        'status': 'no_evidence', 'answer': 'I could not retrieve supporting content.', 'evidence': [],
+        'limitations': []})
+    response = ask_question('Rate?', documents=[doc])
+    assert response['status'] == 'no_evidence' and response['status_code'] == 204
+    assert response['answer'] is None and 'could not retrieve' in response['message']
+
+
+def test_clarification_carries_the_original_question(monkeypatch):
+    doc = ingest_document('rates.txt', b'USD 88')
+    monkeypatch.setattr(document_agent, 'run_document_agent', lambda *a, **kw: {
+        'status': 'needs_clarification', 'answer': 'Which rate do you mean?',
+        'clarification': {'question': 'Which rate do you mean?', 'options': ['member', 'provider'], 'why': ''}})
+    response = ask_question('Rate?', documents=[doc], ambiguity='ask')
+    assert response['status'] == 'needs_clarification' and response['answer'] == 'Which rate do you mean?'
+    assert response['clarification']['original_question'] == 'Rate?'
+    assert response['clarification']['options'] == ['member', 'provider']
+
+
+@pytest.mark.parametrize('code, status', [('ThrottlingException', 'model_unavailable'),
+                                          ('ExpiredTokenException', 'credentials_expired'),
+                                          ('AccessDeniedException', 'error')])
+def test_aws_errors_are_classified(monkeypatch, code, status):
+    doc = ingest_document('rates.txt', b'USD 88')
+    def fail(*a, **kw):
+        raise ClientError({'Error': {'Code': code, 'Message': 'no'}}, 'Converse')
+    monkeypatch.setattr(document_agent, 'run_document_agent', fail)
+    response = ask_question('Rate?', documents=[doc])
+    assert response['status'] == status and response['status_code'] == STATUS_CODES[status]
+    assert response['error']['type'] == 'ClientError'
+
+
+def test_login_refresh_is_credentials_expired():
+    LoginRefreshRequired = type('LoginRefreshRequired', (Exception,), {})
+    assert classify(LoginRefreshRequired('renew')) == 'credentials_expired'
+
+
+def test_lambda_handler_maps_the_event(native_script, store, saved):
+    answered(native_script, store.load(saved).id)
+    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_keys': [saved],
+                               'chat_history': [], 'args': {'model': 'maverick'}}, None)
+    assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
+    assert lambda_handler({'document_keys': [saved]}, None)['status_code'] == 400
+
+===== REPOSITORY FILE =====
 {"path": "development/tests/test_evidence.py", "characters": 2106, "sha256": "fc684aa799a2730562f16d272fea845b8d832efcf0d1b7a39644b357b9c99d0a"}
 from pathlib import Path
 import json
@@ -7199,7 +7548,7 @@ def test_tie_prefers_readable_spelling_over_code():
     assert groups[0]['suggested'] == 'Tehran'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_observability.py", "characters": 11173, "sha256": "3a3f6f3a0de7adf1b98e448b73d44ccb9b0961c98db1a925eac93990f77407e6"}
+{"path": "development/tests/test_observability.py", "characters": 11231, "sha256": "deaf246e1fe15ec60df3b988aa2b946ceadb408daec0ee382ba96ff92e1b2046"}
 import json
 from pathlib import Path
 
@@ -7213,7 +7562,8 @@ from streamlit.testing.v1 import AppTest
 from backend.agents import document_agent
 from backend.observability import audit, tracing
 from backend.preprocessing.documents import ingest_document
-from backend.services.questions import answer_question, record_document_event
+from backend.entrypoint import ask_question
+from backend.observability.audit import record_document_event
 
 QUESTION = 'What is the member rate for plan Alpha?'
 APPS = Path(__file__).resolve().parents[2] / 'apps'
@@ -7243,7 +7593,7 @@ def rates_run(native_script):
 
 
 def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audit):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
+    result = ask_question(QUESTION, documents=[rates_run], app='test',
                              session_id='s1')
     [meta] = records(isolated_audit, 'metadata', 'questions')
     text = json.dumps(meta)
@@ -7263,7 +7613,7 @@ def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audi
 
 def test_content_tier_is_opt_in_and_separate(rates_run, isolated_audit, monkeypatch):
     monkeypatch.setenv('AUDIT_CONTENT', 'true')
-    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test')
+    ask_question(QUESTION, documents=[rates_run], app='test')
     [meta] = records(isolated_audit, 'metadata', 'questions')
     [content] = records(isolated_audit, 'content', 'questions')
     assert meta['content_recorded'] and content['request_id'] == meta['request_id']
@@ -7276,10 +7626,12 @@ def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
     def fail(*args, **kwargs):
         raise RuntimeError('Bedrock unavailable')
     monkeypatch.setattr(document_agent, 'run_document_agent', fail)
-    with pytest.raises(RuntimeError, match='unavailable'):
-        answer_question({doc.id: doc}, [doc.id], QUESTION, app='test')
+    response = ask_question(QUESTION, documents=[doc], app='test')
+    assert response['status'] == 'error' and response['status_code'] == 500 and response['answer'] is None
+    assert 'Bedrock unavailable' in response['message']
     [meta] = records(isolated_audit, 'metadata', 'questions')
     assert meta['status'] == 'error' and 'Bedrock unavailable' in meta['error']
+    assert meta['request_id'] == response['request_id']
 
 
 class BrokenSink:
@@ -7288,7 +7640,7 @@ class BrokenSink:
 
 
 def test_audit_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
+    result = ask_question(QUESTION, documents=[rates_run], app='test',
                              sink=BrokenSink())
     assert result['status'] == 'answered' and 'disk full' in caplog.text
     monkeypatch.setenv('AUDIT_REQUIRED', 'true')
@@ -7331,7 +7683,7 @@ def test_audit_storage_modes(monkeypatch):
 
 
 def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, isolated_audit):
-    result = answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test',
+    result = ask_question(QUESTION, documents=[rates_run], app='test',
                              session_id='s1')
     finished = spans.get_finished_spans()
     by_id = {s.context.span_id: s for s in finished}
@@ -7362,7 +7714,7 @@ def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, iso
 
 def test_trace_content_is_opt_in(rates_run, spans, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    answer_question({rates_run.id: rates_run}, [rates_run.id], QUESTION, app='test')
+    ask_question(QUESTION, documents=[rates_run], app='test')
     chat = next(s for s in spans.get_finished_spans() if s.name.startswith('chat '))
     assert {e.name for e in chat.events} == {'gen_ai.input', 'gen_ai.output'}
 
@@ -7372,7 +7724,7 @@ def test_tool_errors_mark_their_span(native_script, spans):
     # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
     native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
                    {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
-    answer_question({doc.id: doc}, [doc.id], 'Rate?', app='test')
+    ask_question('Rate?', documents=[doc], app='test')
     tool = next(s for s in spans.get_finished_spans() if s.name == 'execute_tool calculate')
     assert tool.status.status_code == StatusCode.ERROR
 
