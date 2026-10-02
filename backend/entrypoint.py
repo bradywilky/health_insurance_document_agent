@@ -1,8 +1,10 @@
 """Single entry point for document question answering.
 
-Every caller (a Lambda handler, the Streamlit chat app, the command-line tool) calls ask_question. It validates
-the request, loads the documents, runs the agent, writes the audit record and trace, and returns a plain,
-JSON-serializable response whose `status` tells the caller what happened:
+ask_question is the production entry point (the Lambda handler calls it with saved-document keys).
+ask_question_local is for development callers (the Streamlit app, the command-line tool, tests): it takes
+already-loaded documents and adds progress and trace hooks. Both validate the request, load the documents, run
+the agent, write the audit record and trace, and return the same JSON-serializable response, whose `status`
+tells the caller what happened:
 
 answered              `answer` is the answer; `sources` and `limitations` support it
 needs_clarification   `answer` is a clarifying question; resend the same question with `clarification` set to
@@ -50,21 +52,42 @@ class RequestError(ValueError):
         self.status = status
 
 
-def ask_question(question, *, document_keys=None, documents=None, history=None, session_id=None,
-                 clarification=None, model=None, ambiguity='off', app='api', store=None, sink=None, on_step=None,
-                 call_log=None):
-    """Answer `question` from the selected documents. Never raises; see the module docstring for statuses.
+def ask_question(question, *, document_keys, history=None, session_id=None, clarification=None, model=None,
+                 ambiguity='off', app='api', store=None, sink=None):
+    """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
-    document_keys  saved-document manifest keys, loaded from `store` (default: the configured document store)
-    documents      already-loaded Document objects, instead of keys (e.g. a local file in the CLI)
+    document_keys  saved-document manifest keys (1 to MAX_DOCUMENTS)
     history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
+    session_id     conversation identifier, recorded in the audit record and trace
     clarification  the reading the user chose after a needs_clarification response
     model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
     ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
     app            caller name recorded in the audit record and trace
-    on_step        optional callback after each research step (progress display)
-    call_log       optional LLMCallLog to receive every prompt and response (development tools)
+    store, sink    document store and audit sink; default from the environment. A long-lived process (a warm
+                   Lambda) can create them once and pass them to reuse their AWS clients across requests.
     """
+    return _run(question, selected=document_keys, load=lambda: _load(document_keys, store), history=history,
+                session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
+                sink=sink)
+
+
+def ask_question_local(question, *, documents, history=None, session_id=None, clarification=None, model=None,
+                       ambiguity='off', app='local', sink=None, on_step=None, call_log=None):
+    """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
+    as ask_question, but takes already-loaded Document objects and adds development hooks:
+
+    documents      Document objects (e.g. a local file that was never saved to the document store)
+    on_step        callback after each research step, for a progress display
+    call_log       LLMCallLog that receives every prompt and response, e.g. to save a trace file
+    """
+    return _run(question, selected=documents, load=lambda: list(documents), history=history,
+                session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
+                sink=sink, on_step=on_step, call_log=call_log)
+
+
+def _run(question, *, selected, load, history, session_id, clarification, model, ambiguity, app, sink,
+         on_step=None, call_log=None):
+    """Validate, load, run the agent, audit and trace. Shared by both entry points."""
     sink = sink if sink is not None else audit.configured_audit_sink()
     log = call_log if call_log is not None else LLMCallLog()
     request_id, timestamp, start = audit.new_id(), audit.now(), time.monotonic()
@@ -77,8 +100,8 @@ def ask_question(question, *, document_keys=None, documents=None, history=None, 
         tracing.add_content(root, 'app.question', question=question, clarification=clarification)
         try:
             question, history, clarification = _validate(question, history, clarification, model, ambiguity,
-                                                         document_keys, documents)
-            loaded = list(documents) if documents is not None else _load(document_keys, store)
+                                                         selected)
+            loaded = load()
             tracing.set_attributes(root, **{'app.document_ids': [d.id for d in loaded]})
             # Module attribute, so tests can replace the agent.
             result = document_agent.run_document_agent(
@@ -113,7 +136,7 @@ def classify(exc):
     return 'error'
 
 
-def _validate(question, history, clarification, model, ambiguity, document_keys, documents):
+def _validate(question, history, clarification, model, ambiguity, selected):
     if not isinstance(question, str) or not question.strip():
         raise RequestError('invalid_request', 'A question is required.')
     if len(question) > MAX_QUESTION_CHARS:
@@ -122,15 +145,10 @@ def _validate(question, history, clarification, model, ambiguity, document_keys,
         raise RequestError('invalid_request', f'model must be one of {list(MODELS)}.')
     if ambiguity not in amb.MODES:
         raise RequestError('invalid_request', f'ambiguity must be one of {list(amb.MODES)}.')
-    if (document_keys is None) == (documents is None):
-        raise RequestError('invalid_request', 'Provide either document_keys or documents.')
-    selected = document_keys if document_keys is not None else documents
     if not isinstance(selected, (list, tuple)) or not selected:
         raise RequestError('invalid_request', 'Select at least one document.')
     if len(selected) > MAX_DOCUMENTS:
         raise RequestError('invalid_request', f'Select at most {MAX_DOCUMENTS} documents.')
-    if document_keys is not None and not all(isinstance(k, str) and k for k in document_keys):
-        raise RequestError('invalid_request', 'document_keys must be nonempty strings.')
     if clarification is not None and (not isinstance(clarification, str) or not clarification.strip()):
         raise RequestError('invalid_request', 'clarification must be nonempty text when provided.')
     turns = []
@@ -143,6 +161,8 @@ def _validate(question, history, clarification, model, ambiguity, document_keys,
 
 
 def _load(document_keys, store):
+    if not all(isinstance(k, str) and k for k in document_keys):
+        raise RequestError('invalid_request', 'document_keys must be nonempty strings.')
     if store is None:
         from backend.storage.s3 import configured_store
         store = configured_store(read_only=True)

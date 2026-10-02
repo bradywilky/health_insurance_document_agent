@@ -34,7 +34,7 @@ def main():
     from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent_stream
     from backend.observability.tracing import configure_tracing
-    from backend.entrypoint import ask_question
+    from backend.entrypoint import ask_question_local
     configure_tracing()
     from backend.preprocessing.documents import document_from_table_inputs
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
@@ -55,7 +55,7 @@ def main():
             for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
                 print(json.dumps(event, default=str), flush=True)
         else:
-            response = ask_question(args.question, documents=[doc], app="cli", model=args.model, call_log=log)
+            response = ask_question_local(args.question, documents=[doc], app="cli", model=args.model, call_log=log)
             print(response["answer"] or response["message"])
             for warning in response["limitations"]:
                 print(f"Limitation: {warning}")

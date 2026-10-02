@@ -5,7 +5,9 @@ from botocore.exceptions import ClientError
 
 from apps.api.lambda_handler import lambda_handler
 from backend.agents import document_agent
-from backend.entrypoint import STATUS_CODES, ask_question, classify
+import inspect
+
+from backend.entrypoint import STATUS_CODES, ask_question, ask_question_local, classify
 from backend.preprocessing.documents import ingest_document
 from backend.storage.s3 import configured_store
 
@@ -48,7 +50,7 @@ def test_answer_from_saved_document_keys(native_script, store, saved):
     ({'model': 'unknown'}, 'model must be one of'),
     ({'ambiguity': 'sometimes'}, 'ambiguity must be one of'),
     ({'history': [{'role': 'system', 'content': 'x'}]}, 'history items'),
-    ({'documents': []}, 'either document_keys or documents'),
+    ({'document_keys': ['']}, 'nonempty strings'),
 ])
 def test_invalid_requests_are_reported_and_audited(kwargs, message, isolated_audit):
     request = {'question': 'Rate?', 'document_keys': ['k'], **kwargs}
@@ -69,7 +71,7 @@ def test_no_evidence_is_its_own_status(monkeypatch):
     monkeypatch.setattr(document_agent, 'run_document_agent', lambda *a, **kw: {
         'status': 'no_evidence', 'answer': 'I could not retrieve supporting content.', 'evidence': [],
         'limitations': []})
-    response = ask_question('Rate?', documents=[doc])
+    response = ask_question_local('Rate?', documents=[doc])
     assert response['status'] == 'no_evidence' and response['status_code'] == 204
     assert response['answer'] is None and 'could not retrieve' in response['message']
 
@@ -79,7 +81,7 @@ def test_clarification_carries_the_original_question(monkeypatch):
     monkeypatch.setattr(document_agent, 'run_document_agent', lambda *a, **kw: {
         'status': 'needs_clarification', 'answer': 'Which rate do you mean?',
         'clarification': {'question': 'Which rate do you mean?', 'options': ['member', 'provider'], 'why': ''}})
-    response = ask_question('Rate?', documents=[doc], ambiguity='ask')
+    response = ask_question_local('Rate?', documents=[doc], ambiguity='ask')
     assert response['status'] == 'needs_clarification' and response['answer'] == 'Which rate do you mean?'
     assert response['clarification']['original_question'] == 'Rate?'
     assert response['clarification']['options'] == ['member', 'provider']
@@ -93,7 +95,7 @@ def test_aws_errors_are_classified(monkeypatch, code, status):
     def fail(*a, **kw):
         raise ClientError({'Error': {'Code': code, 'Message': 'no'}}, 'Converse')
     monkeypatch.setattr(document_agent, 'run_document_agent', fail)
-    response = ask_question('Rate?', documents=[doc])
+    response = ask_question_local('Rate?', documents=[doc])
     assert response['status'] == status and response['status_code'] == STATUS_CODES[status]
     assert response['error']['type'] == 'ClientError'
 
@@ -104,8 +106,24 @@ def test_login_refresh_is_credentials_expired():
 
 
 def test_lambda_handler_maps_the_event(native_script, store, saved):
+    from apps.api import lambda_handler as module
+    module.clients.cache_clear()
     answered(native_script, store.load(saved).id)
     response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_keys': [saved],
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
     assert lambda_handler({'document_keys': [saved]}, None)['status_code'] == 400
+    assert module.clients.cache_info().misses == 1  # store and audit sink created once
+    module.clients.cache_clear()
+
+
+def test_production_signature_has_no_development_hooks():
+    production = set(inspect.signature(ask_question).parameters)
+    assert production == {'question', 'document_keys', 'history', 'session_id', 'clarification', 'model',
+                          'ambiguity', 'app', 'store', 'sink'}
+    assert {'documents', 'on_step', 'call_log'} <= set(inspect.signature(ask_question_local).parameters)
+
+
+def test_local_entry_point_validates_the_same_way():
+    response = ask_question_local('Rate?', documents=[])
+    assert response['status'] == 'invalid_request' and 'at least one document' in response['message']

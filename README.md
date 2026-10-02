@@ -43,7 +43,8 @@ Dependencies and local configuration stay at the root (`requirements*.txt`, `.en
 `.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
 managed dependency/cache folders, not application code.
 
-Integrations call `backend.entrypoint.ask_question` (see "Entry point" below). The LangGraph workflow in
+Integrations call `backend.entrypoint.ask_question`; local tools call `ask_question_local` (see "Entry point"
+below). The LangGraph workflow in
 `backend.agents.document_agent` is an internal detail that does not validate requests or write audit records. Root-level Python
 modules have been relocated, so update imports and launch commands to the paths shown here.
 The former table-agent entry points have been removed; migrate callers as shown below.
@@ -571,22 +572,30 @@ cannot misreport.
 
 ## Entry point
 
-`backend/entrypoint.py` `ask_question(...)` is the one function every caller uses: the Lambda handler in
-`apps/api/lambda_handler.py`, the Streamlit chat app and the command-line tool. It validates the request, loads
-the documents, runs the agent, writes the audit record and trace, and returns a JSON-serializable response. It
-does not raise; the outcome is in `status`.
+`backend/entrypoint.py` has two entry points that share one implementation and return the same response:
+
+- `ask_question(...)` is the production entry point, called by the Lambda handler in
+  `apps/api/lambda_handler.py`. Its signature holds only production parameters; documents are saved-document
+  keys.
+- `ask_question_local(...)` is for development callers: the Streamlit chat app, the command-line tool and
+  tests. It takes already-loaded `documents` (for example a local file that was never saved) and adds
+  `on_step` (progress display) and `call_log` (every prompt and response, for trace files).
+
+Both validate the request, load the documents, run the agent, write the audit record and trace, and return a
+JSON-serializable response. They do not raise; the outcome is in `status`.
 
 ```python
 from backend.entrypoint import ask_question
 
 response = ask_question(
     "What is the member rate for plan Alpha?",
-    document_keys=["document-agent/documents/preprocessed/<id>/manifest.json"],  # or documents=[Document, ...]
+    document_keys=["document-agent/documents/preprocessed/<id>/manifest.json"],
     history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
     session_id="abc123",
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
     app="my-service",            # recorded in the audit record
+    store=store, sink=sink,      # optional; reuse across requests in a long-lived process
 )
 ```
 
@@ -608,4 +617,5 @@ result or calculation, and whether it is partial), `evidence` (raw tool output),
 
 The Lambda event is `{"question", "session_id", "document_keys", "chat_history", "clarification",
 "args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
-identifiers, because questions and history can contain PHI.
+identifiers, because questions and history can contain PHI. It creates the document store and audit sink on the
+first request and reuses them while the Lambda stays warm.
