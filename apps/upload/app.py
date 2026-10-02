@@ -6,10 +6,8 @@ import streamlit as st
 from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
-from backend.observability import tracing
+from backend.observability import llmobs
 from backend.observability.audit import record_document_event
-
-tracing.configure_tracing()
 
 
 def audit_event(event, **fields):
@@ -37,9 +35,9 @@ profile_at_upload = st.checkbox(
 def save_files(files):
     for name, content in files:
         try:
-            with st.spinner(f'Processing {name}...'), tracing.span('ingest_document', **{
-                    'app.document.kind': Path(name).suffix.lower(), 'app.document.bytes': len(content),
-                    'app.profile_requested': profile_at_upload}):
+            with st.spinner(f'Processing {name}...'), llmobs.span('workflow', 'ingest_document') as current:
+                llmobs.annotate(current, metadata={'kind': Path(name).suffix.lower(), 'bytes': len(content),
+                                                   'profile_requested': profile_at_upload})
                 enrich = make_enricher() if profile_at_upload else None
                 doc = ingest_document(name, content, store=store, enrich=enrich)
                 profile_meta = (doc.profile or {}).get('meta', {}) if getattr(doc, 'profile', None) else {}

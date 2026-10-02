@@ -5,10 +5,10 @@ import re
 from backend.config.settings import get_model_config, MODELS
 import os
 from backend.agents.evidence import bounded, compact, numeric_display_check
-from backend.agents.llm import LLM, LLMCallLog
+from backend.agents.llm import LLM, Usage
 from backend.tools.documents import selected_documents, execute_document_tool
 from langgraph.graph import StateGraph, START, END
-from typing import Any, Callable
+from typing import Callable
 from typing_extensions import TypedDict
 
 from backend.agents.document_protocol import tool_specs, has_content, examined_documents
@@ -16,7 +16,7 @@ from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.native import NativePlanner, validate_action
 from backend.agents import ambiguity as amb
-from backend.observability import tracing
+from backend.observability import llmobs
 
 MAX_STEPS = 16
 MAX_REPAIRS = 2
@@ -80,12 +80,12 @@ footers, text boxes or tracked changes. Do not invent PDF pages or Word page cit
 '''
 
 
-def _call(system, payload, log, *, phase='Document Research', model=None):
+def _call(system, payload, usage, *, phase='Document Research', model=None):
     model_id, params = get_model_config()
     if model is not None and not os.getenv('BEDROCK_MODEL_ID'):
         model_id = MODELS[model]
-    return LLM(agent_name='health_insurance_document_agent',tool_name=phase,model_id=model_id,params=params,call_log=log).run(
-        system=system, messages=[{'role':'user','content':[{'text':compact(payload)}]}])[0]
+    return LLM(agent_name='health_insurance_document_agent',tool_name=phase,model_id=model_id,params=params,usage_meter=usage).run(
+        system=system, messages=[{'role':'user','content':[{'text':compact(payload)}]}])
 
 
 class DocumentState(TypedDict, total=False):
@@ -93,7 +93,7 @@ class DocumentState(TypedDict, total=False):
     document_ids: list[str]
     question: str
     history: list
-    call_log: Any
+    usage: Usage
     on_step: Callable | None
     model: str
     docs: dict
@@ -126,21 +126,19 @@ def node_init(state: DocumentState) -> dict:
     question = state['question']
     if not isinstance(question, str) or not question.strip():
         raise ValueError('Question cannot be empty')
-    log = state.get('call_log')
-    if log is None:
-        log = LLMCallLog()
+    usage = state.get('usage') or Usage()
     specs = tool_specs(docs)
     payload = {'question': question, 'selected_documents': [doc.summary() for doc in docs.values()],
                'history': bounded((state.get('history') or [])[-6:], max_chars=4000)}
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Native Document Research',
-              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, call_log=log)
+              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
     planner = NativePlanner(llm, SYSTEM+'\nUse native tools; do not write tool requests as text.', payload, specs)
-    return {'docs': docs, 'model': model, 'call_log': log, 'specs': specs, 'planner': planner,
+    return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'planner': planner,
             'steps': 0, 'evidence': [], 'seen': {},
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
-            'stats': {'planner_mode': 'native', 'validation_errors': 0, 'repair_attempts': 0,
+            'stats': {'validation_errors': 0, 'repair_attempts': 0,
                       'duplicate_requests': 0, 'coverage_prompts': 0, 'auto_reads': 0, 'calculation_prompts': 0,
                       'answer_revisions': 0, 'ambiguity_mode': mode, 'ambiguity_decision': 'off'},
             'ambiguity': mode, 'interpretation': None}
@@ -177,7 +175,7 @@ def node_assess(state: DocumentState) -> dict:
         _, inference = get_model_config()
         llm = LLM(agent_name='health_insurance_document_agent', tool_name='Ambiguity Assessment',
                   model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[state['model']], params=inference,
-                  call_log=state['call_log'])
+                  usage_meter=state['usage'])
         payload = {'question': state['question'],
                    'history': bounded((state.get('history') or [])[-6:], max_chars=4000),
                    'selected_documents': [amb.document_view(doc) for doc in state['docs'].values()]}
@@ -258,28 +256,29 @@ def node_tools(state: DocumentState) -> dict:
                 raise ValueError('Tool execution budget reached. Finish with available evidence.')
             if state.get('on_step'):
                 state['on_step'](f"Step {state['steps']}: {name}")
-            with tracing.span(f'execute_tool {name}', **{
-                    'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.name': name,
-                    'app.tool.operation': params.get('name') if name == 'table_tool' else None,
-                    'app.document_id': params.get('document_id'), 'app.document_ids': params.get('document_ids'),
-                    'app.evidence_id': f'E{len(evidence)+1}'}) as tool_span:
+            with llmobs.span('tool', name) as tool_span:
+                llmobs.annotate(tool_span, metadata={
+                    'operation': params.get('name') if name == 'table_tool' else None,
+                    'document_id': params.get('document_id'), 'document_ids': params.get('document_ids'),
+                    'evidence_id': f'E{len(evidence)+1}'})
+                llmobs.annotate_content(tool_span, input_data=params)
                 if name in {'calculate', 'date_calculate'}:
                     try:
                         data = _calculation(name, params, evidence, state['question'])
                     except ValueError as exc:
                         # Bad inputs are a tool result for the planner to fix, not a protocol failure.
-                        tracing.mark_error(tool_span, exc)
+                        llmobs.mark_error(tool_span, exc)
                         results.append({'error': str(exc)})
                         continue
                 else:
                     data = execute_document_tool(name, params, state['docs'])
                 failed = data.get('error') or (data.get('table_result') or {}).get('error')
                 if failed:
-                    tracing.mark_error(tool_span, failed)
-                tracing.set_attributes(tool_span, **{
-                    'app.tool.matches': len(data.get('matches', [])) if 'matches' in data else None,
-                    'app.tool.blocks': len(data.get('blocks', [])) if 'blocks' in data else None,
-                    'app.tool.matched_rows': (data.get('table_result') or {}).get('matched_rows')})
+                    llmobs.mark_error(tool_span, failed)
+                llmobs.annotate(tool_span, metadata={
+                    'matches': len(data.get('matches', [])) if 'matches' in data else None,
+                    'blocks': len(data.get('blocks', [])) if 'blocks' in data else None,
+                    'matched_rows': (data.get('table_result') or {}).get('matched_rows')})
             record = {'id': f'E{len(evidence)+1}', 'tool': name, 'parameters': params, 'data': data}
             seen[key] = record['id']
             evidence.append(record)
@@ -345,7 +344,7 @@ def _prompt_version():
 
 def node_synthesize(state: DocumentState) -> dict:
     evidence, limitations, stats = state['evidence'], list(state['limitations']), dict(state['stats'])
-    docs, question, log, model = state['docs'], state['question'], state['call_log'], state['model']
+    docs, question, usage, model = state['docs'], state['question'], state['usage'], state['model']
     substantive = [e for e in evidence if has_content(e)]
     unexamined = [docs[d].name for d in _unexamined(docs, evidence)]
     if not substantive:
@@ -358,7 +357,7 @@ def node_synthesize(state: DocumentState) -> dict:
     if state.get('interpretation'):
         payload['interpretation'] = state['interpretation']
     writer = WRITER + (INTERPRETATION_RULE if state.get('interpretation') else '')
-    answer = _call(writer, payload, log, phase='Document Answer', model=model)
+    answer = _call(writer, payload, usage, phase='Document Answer', model=model)
     if not isinstance(answer, str):
         raise ValueError('Model did not return an answer')
     amounts = unsupported_amounts(answer, usable, question)
@@ -375,7 +374,7 @@ def node_synthesize(state: DocumentState) -> dict:
         stats['answer_revisions'] += 1
         answer = _call(writer + '\nRevise draft_answer to fix every listed issue; change nothing else.',
                        {**payload, 'draft_answer': answer, 'issues': issues},
-                       log, phase='Document Answer Revision', model=model)
+                       usage, phase='Document Answer Revision', model=model)
         limitations.extend('Answer check: ' + issue for issue in answer_issues(answer, usable, question))
     numeric = [{**e, 'data': e['data'].get('table_result', e['data'])} for e in substantive]
     answer = numeric_display_check(answer, numeric)
@@ -413,12 +412,12 @@ def route_after_synthesize(state: DocumentState) -> str:
 def build_document_graph():
     """Compile the research workflow; each invocation has its own runtime state."""
     graph = StateGraph(DocumentState)
-    graph.add_node('init', tracing.traced_node('init')(node_init))
-    graph.add_node('plan', tracing.traced_node('plan')(node_plan))
-    graph.add_node('tools', tracing.traced_node('tools')(node_tools))
-    graph.add_node('synthesize', tracing.traced_node('synthesize')(node_synthesize))
+    graph.add_node('init', llmobs.traced_node('init')(node_init))
+    graph.add_node('plan', llmobs.traced_node('plan')(node_plan))
+    graph.add_node('tools', llmobs.traced_node('tools')(node_tools))
+    graph.add_node('synthesize', llmobs.traced_node('synthesize')(node_synthesize))
     graph.add_edge(START, 'init')
-    graph.add_node('assess', tracing.traced_node('assess')(node_assess))
+    graph.add_node('assess', llmobs.traced_node('assess')(node_assess))
     graph.add_edge('init', 'assess')
     graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
     graph.add_edge('plan', 'tools')
@@ -432,22 +431,22 @@ DOCUMENT_GRAPH = build_document_graph()
 PROMPT_VERSION = _prompt_version()
 
 
-def run_document_agent(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,
+def run_document_agent(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
                        ambiguity='off', clarification=None):
     """Run the LangGraph workflow while preserving the document-agent API."""
     state = DOCUMENT_GRAPH.invoke(
         {'documents': documents, 'document_ids': document_ids, 'question': question,
-         'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model,
+         'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
               'ambiguity': ambiguity, 'clarification': clarification},
         config={'recursion_limit': MAX_STEPS * 2 + 10})
     return state['result']
 
 
-def run_document_agent_stream(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,
+def run_document_agent_stream(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
                        ambiguity='off', clarification=None):
     """Stream progress from the same graph; omit runtime objects and raw evidence from updates."""
     inputs = {'documents': documents, 'document_ids': document_ids, 'question': question,
-              'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model,
+              'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
               'ambiguity': ambiguity, 'clarification': clarification}
     for event in DOCUMENT_GRAPH.stream(inputs, stream_mode='updates',
                                       config={'recursion_limit': MAX_STEPS * 2 + 10}):

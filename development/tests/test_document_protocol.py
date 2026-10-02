@@ -5,7 +5,8 @@ from backend.preprocessing.documents import ingest_document
 from backend.agents.native import NativePlanner, validate_action
 from backend.agents.document_protocol import tool_specs
 from backend.agents.document_agent import run_document_agent
-from backend.agents.llm import LLM, LLMCallLog
+from backend.agents.llm import LLM, Usage
+from development.observability import capture
 
 @pytest.mark.parametrize('action',[
     {'tool':'read_document','parameters':{'document_id':'outside'}},
@@ -77,32 +78,36 @@ def test_truncated_native_response_is_not_executed():
     assert planner.messages[-1]['content'][0]['toolResult']['toolUseId']=='a'
 
 
-def test_native_log_snapshots_are_immutable():
+def test_llm_span_records_the_call_as_sent(monkeypatch):
+    monkeypatch.setenv('TRACE_CONTENT','true')
     class Client:
         def converse(self,**kwargs):
             assert kwargs['inferenceConfig']['maxTokens']==100
             assert 'toolConfig' in kwargs
             return response([{'toolUseId':'a','name':'answer','input':{}}])
-    log=LLMCallLog()
-    llm=LLM(model_id='test',params={'maxTokens':100},call_log=log)
+    usage=Usage()
+    llm=LLM(model_id='test',params={'maxTokens':100},usage_meter=usage)
     llm._client=Client()
     messages=[{'role':'user','content':[{'text':'Question'}]}]
-    llm.converse('system',messages,{'tools':tool_specs(['selected'])})
+    with capture.recording() as events:
+        llm.converse('system',messages,{'tools':tool_specs(['selected'])})
     messages.append({'role':'assistant','content':[{'text':'later'}]})
-    assert len(log.records[0]['messages'])==1
-    assert log.records[0]['stop_reason']=='tool_use'
+    [call]=capture.summarize(events)['calls']
+    assert [m['role'] for m in call['input']]==['system','user'] and call['input'][1]['content']=='Question'
+    assert call['stop_reason']=='tool_use' and call['tool_calls']==['answer']
+    assert call['output'][0]['tool_calls'][0]['tool_id']=='a'
+    assert usage.totals()=={'llm_calls':1,'input_tokens':2,'output_tokens':1}
 
 
 @pytest.mark.parametrize('model',['maverick','claude-haiku-4.5','claude-sonnet-4.5','claude-opus-4.5'])
-def test_every_model_uses_native_even_with_obsolete_json_setting(monkeypatch,native_script,model):
+def test_every_model_uses_native_tools(monkeypatch,native_script,model):
     from backend.config.settings import MODELS
-    monkeypatch.setenv('DOCUMENTS_PLANNER_MODE','json')
     monkeypatch.delenv('BEDROCK_MODEL_ID',raising=False)
     doc=ingest_document('rates.txt',b'Rate USD 88.')
     requests=native_script([{'tool':'read_document','parameters':{'document_id':doc.id}},
                            {'tool':'answer','parameters':{}},'USD 88 [E1].'])
     result=run_document_agent({doc.id:doc},[doc.id],'Rate?',model=model)
-    assert result['protocol']['planner_mode']=='native'
+    assert result['status']=='answered'
     assert all(r['modelId']==MODELS[model] for r in requests)
     assert 'toolConfig' in requests[0] and 'toolConfig' in requests[1]
 

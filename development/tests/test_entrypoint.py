@@ -121,7 +121,7 @@ def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
     assert production == {'question', 'document_keys', 'history', 'session_id', 'clarification', 'model',
                           'ambiguity', 'app', 'store', 'sink'}
-    assert {'documents', 'on_step', 'call_log'} <= set(inspect.signature(ask_question_local).parameters)
+    assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 
 def test_local_entry_point_validates_the_same_way():

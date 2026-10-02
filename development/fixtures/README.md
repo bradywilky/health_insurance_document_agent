@@ -1,6 +1,6 @@
 # Health-insurance fixtures
 
-Bingle-Dingle Insurance documents support selected-source claim research and table-ingestion development.evaluation.
+Bingle-Dingle Insurance documents support selected-source claim research and table-ingestion evaluation.
 
 ## Selected-document research
 

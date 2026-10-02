@@ -1,10 +1,15 @@
 REPOSITORY-TEXT-BUNDLE-V1
 ===== REPOSITORY FILE =====
-{"path": ".env.example", "characters": 1757, "sha256": "28947ccfc47f8580d8376246c408d0002dc3bbd69f69540f895f7ab4245b64ef"}
+{"path": ".env.example", "characters": 2259, "sha256": "8333d20f662bad24e478b4b03c78a5e83d5614e6d60abae934824138690c2a53"}
 # Replace with your own local profile name. Never add credentials here.
 AWS_PROFILE=dev-profile
 AWS_DEFAULT_REGION=us-east-1
+# Optional; overrides AWS_DEFAULT_REGION for Bedrock, S3 documents and audit records.
+# AWS_REGION=us-east-1
+# Default answering model, a key of MODELS in backend/config/settings.py.
 TABLES_MODEL=maverick
+# Model for semantic profiles generated at upload (default maverick).
+# ENRICHMENT_MODEL=maverick
 # Optional deployment-specific inference profile ID or ARN:
 # BEDROCK_MODEL_ID=
 BEDROCK_MAX_TOKENS=4096
@@ -27,21 +32,23 @@ AUDIT_LOCAL_DIR=data/audit
 # AUDIT_S3_BUCKET=            # defaults to DOCUMENTS_S3_BUCKET
 # AUDIT_S3_PREFIX=document-agent/
 # AUDIT_S3_KMS_KEY_ID=        # defaults to DOCUMENTS_S3_KMS_KEY_ID
-# Also record question, answer, evidence and full model calls in a separate content tier. Can contain PHI.
+# Also record question, answer and evidence in a separate content tier. Can contain PHI.
 AUDIT_CONTENT=false
 # Fail a question when its audit record cannot be written.
 AUDIT_REQUIRED=false
 # APP_VERSION=                # e.g. the deployed git SHA; otherwise a hash of the backend source
 
-# OpenTelemetry spans (backend/observability/tracing.py). off, file or console. In AWS, leave off and run under
-# ADOT's opentelemetry-instrument instead (see README).
-TRACING=off
-TRACING_FILE=data/traces/spans.jsonl
-# Attach prompt and response text to spans. Can contain PHI.
+# Datadog LLM Observability (backend/observability/llmobs.py). In AWS Lambda the Datadog layers read these; see
+# README. Locally the chat app, CLI and evaluations capture the same spans in memory instead
+# (development/observability), so leave these unset unless you want local runs sent to Datadog.
+# DD_LLMOBS_ENABLED=true
+# DD_LLMOBS_ML_APP=health-insurance-document-agent
+# DD_SITE=datadoghq.com
+# Send prompt, response, question and answer text to Datadog. Can contain PHI. The local capture always records it.
 TRACE_CONTENT=false
 
 ===== REPOSITORY FILE =====
-{"path": ".gitignore", "characters": 1053, "sha256": "aa8e0f14451ced0526af967258e89e2275e982c958d9a7e0ed0b97685ae9ed30"}
+{"path": ".gitignore", "characters": 1016, "sha256": "3b66272c61b818970e5a6c7bd591931b4c2337c360686b0adb9632a937d2007f"}
 .venv/
 __pycache__/
 .pytest_cache/
@@ -58,7 +65,6 @@ credentials.*
 *.pfx
 *.log
 runs/
-/development/runs/
 data/
 # User input files belong locally. Generate synthetic samples with development/scripts/make_samples.py.
 *.csv
@@ -71,18 +77,16 @@ data/
 *.txt
 !requirements.txt
 !requirements-dev.txt
+# Reviewed, wholly synthetic test fixtures only.
 !development/fixtures/documents/bingle_dingle_agreement.txt
 !development/fixtures/documents/bingle_dingle_rates.txt
 !development/fixtures/documents/bingle_dingle_amendment.txt
 !development/fixtures/documents/bingle_dingle_processing_guide.txt
 !development/fixtures/documents/bingle_dingle_draft.txt
-uploads/
-outputs/
-node_modules/
-# Reviewed, wholly synthetic test fixtures only.
 !development/fixtures/documents/bingle_dingle_benefits.txt
 !development/fixtures/documents/bingle_dingle_authorization.txt
 !development/fixtures/documents/bingle_dingle_claim_packet.txt
+node_modules/
 
 # Reviewed source-only transfer bundle. Never include local data or configuration.
 !/transfer/repository-bundle.txt
@@ -105,10 +109,10 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 46304, "sha256": "0b11987ac9d06cfc1866041db8e80f29980a18301eb023f00a43872cf4f16774"}
+{"path": "README.md", "characters": 46479, "sha256": "6f0326ab1a1d116cd4719196d9f205614882f6bdf92e795b431e9bb0df1be1b7"}
 # Health Insurance Document Agent
 
-`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
+`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
 
 ## Project layout
 
@@ -125,7 +129,7 @@ backend/         Reusable application backend
   storage/       Local/S3 persistence and table loading
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
-  observability/ Audit records and OpenTelemetry spans
+  observability/ Audit records and Datadog LLM Observability spans
 apps/            Replaceable Streamlit interfaces
   api/           AWS Lambda handler that calls ask_question
   chat/app.py    Saved-document selection and questions (port 8501)
@@ -133,13 +137,13 @@ apps/            Replaceable Streamlit interfaces
 development/     Utilities and tests, not required by the backend
   cli/           Single-file command-line runner
   evaluation/    Live model evaluations
+  observability/ Local in-memory stand-in for Datadog LLM Observability
   scripts/       Sample-data generator
   tests/         Offline regression tests
   fixtures/      Reviewed test documents and expected answers
   runs/          Evaluation reports and traces (ignored by Git)
 transfer/        Source bundle, create_bundle.py, and standalone restore_repo.py
 data/            Local documents and shared library (ignored by Git)
-outputs/         Generated artifacts (ignored by Git)
 ```
 
 `backend/preprocessing/documents.py` creates document records; `backend/retrieval/search.py` searches them.
@@ -148,14 +152,12 @@ import the agent runtime. `backend/storage/tables.py` loads the same preprocesse
 either a real S3 client or the local adapter. This preserves the AWS object layout.
 
 Dependencies and local configuration stay at the root (`requirements*.txt`, `.env.example`,
-`.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
-managed dependency/cache folders, not application code.
+`.env`, and `.streamlit/`). `.venv/`, `__pycache__/`, and `.pytest_cache/` are managed
+dependency/cache folders, not application code.
 
 Integrations call `backend.entrypoint.ask_question`; local tools call `ask_question_local` (see "Entry point"
 below). The LangGraph workflow in
-`backend.agents.document_agent` is an internal detail that does not validate requests or write audit records. Root-level Python
-modules have been relocated, so update imports and launch commands to the paths shown here.
-The former table-agent entry points have been removed; migrate callers as shown below.
+`backend.agents.document_agent` is an internal detail that does not validate requests or write audit records.
 
 ## Multi-file chat prototype
 
@@ -177,7 +179,7 @@ The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with a
 
 `backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
 
-This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source backend.storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. Citations identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
+This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. Citations identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
 
 **Load Bingle-Dingle examples** loads eight Bingle-Dingle health-insurance documents: provider agreement, rate schedule, executed amendment, processing guide, unexecuted draft, benefit summary, authorization rules, and claim packet. Bingle-Dingle Insurance is a regional health insurer offering the Meadow product. The documents cover provider terms, benefits, authorization, and claim-specific records.
 
@@ -206,11 +208,8 @@ An early finish without supporting content is rejected. A valid tool request doe
 correct document interpretation or arithmetic.
 
 Select a model in the app, pass `model=` to `run_document_agent()`, or use `--model` on either CLI.
-The default model still uses the existing `TABLES_MODEL` environment variable. `BEDROCK_MODEL_ID`
-can select a deployment-specific native-tool-capable inference profile. The old `planner_mode`
-argument, `--planner-mode` flag, and tool-mode UI selector have been removed;
-`DOCUMENTS_PLANNER_MODE` is no longer read. Metadata, tool schemas and local result files still
-use JSON serialization; that is independent of model tool-request parsing.
+The default model comes from the `TABLES_MODEL` environment variable. `BEDROCK_MODEL_ID`
+can select a deployment-specific native-tool-capable inference profile.
 
 Run matched evaluations with local files and real Bedrock models (output paths must be new):
 
@@ -222,9 +221,9 @@ Run matched evaluations with local files and real Bedrock models (output paths m
 ```
 
 Expected answers remain outside model inputs. Reports retain actual model IDs, native protocol,
-latency, usage, evidence and answers. Full traces contain document content and are optional;
-`development/runs/` is ignored by Git. Historical JSON comparisons are retained only as local evaluation
-artifacts, not as runnable application modes. Review correctness separately from protocol success.
+latency, usage, evidence and answers. Traces (every model call with its prompt and response) contain document
+content and are optional;
+`development/runs/` is ignored by Git. Review correctness separately from protocol success.
 
 ## Quick start (PowerShell)
 
@@ -280,11 +279,11 @@ AWS references: [Maverick](https://docs.aws.amazon.com/bedrock/latest/userguide/
 
 - `backend/agents/document_agent.py`: the sole LangGraph workflow, with native tools, bounded retries, streaming, selected-source restrictions, and evidence.
 - `backend/agents/llm.py`: Bedrock Converse wrapper with normal SDK profile/role credentials, configurable region, timeouts, and retries.
-- `backend/config/settings.py`: missing configuration module, now supplied with Llama and Claude model profiles with environment-based settings.
+- `backend/config/settings.py`: Llama and Claude model IDs and environment-based inference settings.
 - `backend/storage/local.py`: in-memory `get_object` adapter and metadata generation; no AWS calls.
-- `development/cli/run_local.py`: CLI with optional full LLM traces and token totals. Trace files contain input data and are ignored by Git.
+- `development/cli/run_local.py`: CLI with optional model-call traces and token totals. Trace files contain input data and are ignored by Git.
 - `development/scripts/make_samples.py`: deterministic sample files.
-- `development/tests/test_agent.py`: offline regression tests using scripted LLM responses and the real graph/data backend.tools. They do not measure Llama's answer quality.
+- `development/tests/`: offline regression tests. Agent tests use scripted LLM responses with the real graph and tools; they do not measure answer quality.
 
 For existing AWS preprocessing outputs, load a document and call the sole agent:
 
@@ -308,13 +307,13 @@ print(result["answer"])
 local adapter or S3. It adds searchable text and table metadata without running another agent.
 For saved multi-file libraries, use `store.load(manifest_key)` and pass the selected document
 records to the same agent. `run_document_agent_stream()` streams sanitized node progress and
-a final answer from this graph. The old table-agent functions have been removed.
+a final answer from this graph.
 
 Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash. Existing preprocessing must provide `_metadata.json` plus each sheet's CSV at `{prefix}{domain}/preprocessed/{filename}/`; for CSV inputs the object basename is the original CSV filename. The new backend/preprocessing/tables.py exports that contract locally; it does not upload to S3 or validate another preprocessing pipeline.
 
 ## Limits of this development harness
 
-The CLI and chat expose the same deterministic table backend.tools. Generated Python execution and
+The CLI and chat expose the same deterministic table tools. Generated Python execution and
 sampled parallel summaries were removed with the duplicate table workflow. Search results
 can be truncated, and tool failures or step limits may yield incomplete answers. Repeated
 identical calls reuse evidence. CLI calls are independent; Python callers can pass `history`.
@@ -340,11 +339,6 @@ The [insurance fixtures](development/fixtures/README.md) cover narrative sheets,
 `backend/preprocessing/tables.py` exports each sheet to CSV plus metadata with types, counts, frequent values, source row positions, and parsing warnings. `backend/storage/local.py` uses it automatically, or `development/cli/run_local.py --preprocessed` loads a previously exported directory. `read_sheet` provides paginated access to narrative content and full table rows; search now includes metadata sheets. `development/evaluation/tables.py` runs known-answer questions through a selected model and saves results for human review under `development/runs/`.
 
 
-## Module names
-
-`backend/agents/document_agent.py` contains the sole research graph and both synchronous/streaming entry points. Shared table operations live under `backend/tools/`; the S3 preprocessing layout is unchanged.
-
-
 ## Persistent preprocessing in S3
 
 Use an existing bucket. Set these values in your ignored `.env` and restart Streamlit:
@@ -357,7 +351,7 @@ DOCUMENTS_S3_PREFIX=document-agent/
 # DOCUMENTS_S3_KMS_KEY_ID=your-key-id
 ```
 
-The app uses `AWS_PROFILE` for local development or the deployment IAM role when unset. Uploaded files and the example-loader files are saved automatically when S3 is configured. A failed save reports an error rather than silently falling back to local backend.storage. Chat history is not persisted. Clearing files/chat does not delete S3 objects.
+The app uses `AWS_PROFILE` for local development or the deployment IAM role when unset. Uploaded files and the example-loader files are saved automatically when S3 is configured. A failed save reports an error rather than silently falling back to local storage. Chat history is not persisted. Clearing files/chat does not delete S3 objects.
 
 In the chat app, click **Refresh saved files** and select sources under **Files to answer from**. The upload portal handles all ingestion; the chat app opens its store in read-only mode. In production, give the chat service a read-only storage role and the separate upload service write permissions. The picker shows up to 100 saved documents from the configured prefix; this is a prototype library, not automatic retrieval across a bucket. Everyone using this app configuration has the same storage scope; add authentication and server-side authorization before a shared deployment.
 
@@ -387,7 +381,7 @@ The configured identity needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObje
 
 Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Keep and use the returned document's `storage_ref['manifest_key']` with `store.load(...)`. Existing calls without a store remain local.
 
-For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and development.tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
+For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
 
 The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout. Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
 
@@ -399,7 +393,9 @@ The document workflow in `backend/agents/document_agent.py` is:
 
 ```mermaid
 flowchart LR
-    START --> init --> plan --> tools
+    START --> init --> assess
+    assess -->|needs clarification| END
+    assess --> plan --> tools
     tools -->|continue research, repair or coverage prompt| plan
     tools -->|finished or budget reached| synthesize
     synthesize -->|answer used uncomputed amounts, once| plan
@@ -407,7 +403,8 @@ flowchart LR
 ```
 
 `DocumentState` names the data passed between nodes. `init` validates selected sources and
-creates the per-run native conversation. `plan` requests model tool calls. `tools` validates
+creates the per-run native conversation. `assess` optionally checks the question for ambiguity (see
+"Ambiguous questions"). `plan` requests model tool calls. `tools` validates
 and executes them, records evidence, and returns matching native tool results.
 `route_after_tools` chooses another planning turn or answer synthesis; `route_after_synthesize`
 can send the planner back once to compute amounts (see below). The graph preserves the
@@ -428,8 +425,6 @@ lives in `backend/shared/serialization.py`. Uploading, preprocessing, and storag
 Python services rather than agent workflows.
 
 Run commands from the repository root. `backend/` does not import `apps/` or `development/`. The upload app’s optional example-loader reads development fixtures; ordinary uploads do not need them. Root dependency files, `.env`, and `.streamlit/` remain shared configuration. Existing local data and S3 object paths are unchanged.
-
-`node_modules/` is a local junction to Codex-provided JavaScript tooling. This Python application does not depend on it; it is ignored by Git and is not part of the deployment.
 
 ## Portable text bundle
 
@@ -592,7 +587,7 @@ in the stored profile and the portal's **Review semantic profiles** section, whe
 meanings, mark them confirmed, or generate a profile for an already saved document. Profiles are never cited
 as evidence. A failed profile never blocks an upload.
 
-Measured effect: on the 13 Bingle-Dingle and 13 Northstar questions, profiles did not change accuracy
+Measured effect: on the 13 Bingle-Dingle questions and a private 13-question Northstar set (not in this repository), profiles did not change accuracy
 (Maverick 24/26 without, 23/26 with; individual cases flipped both ways) and added input tokens to every
 planner call. These question sets do not need cross-document terminology or document triage, which is where
 profiles are expected to help. Keep the option off unless your documents use undefined terms across files,
@@ -603,7 +598,8 @@ and measure on your own questions. `--enrich` on `development.evaluation.documen
 
 Two separate records answer different questions. The **audit record** is the system of record for who asked
 what, of which documents, with which model and prompts, and what came back. **Traces** show how a run behaved:
-each graph step, Bedrock call and tool execution with its latency, tokens and errors. Both carry the same
+each graph step, Bedrock call and tool execution with its latency, tokens and errors, in Datadog LLM
+Observability. Both carry the same
 `trace_id`, and the chat app shows the first 12 characters of the `request_id` under every answer.
 
 `ask_question` writes one audit record for every request, including invalid requests and failures.
@@ -612,9 +608,9 @@ each graph step, Bedrock call and tool execution with its latency, tokens and er
 
 | Tier | Written | Contains |
 | --- | --- | --- |
-| `metadata/questions` | always | request and session IDs, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
+| `metadata/questions` | always | request and session IDs, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), totals (model calls, input and output tokens), duration, error, `trace_id` |
 | `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with file SHA-256 and size |
-| `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation, evidence and every prompt and response |
+| `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation and evidence |
 
 The content tier can contain PHI. Store it under its own prefix with a separate KMS key, tighter IAM access,
 and its own retention; the metadata tier can be kept longer and shared with reviewers. Hashes let a reviewer
@@ -629,50 +625,63 @@ the request when `AUDIT_REQUIRED=true`.
 `prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
 `APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
 
-### Traces (`backend/observability/tracing.py`)
+### Traces: Datadog LLM Observability (`backend/observability/llmobs.py`)
 
-Spans follow the OpenTelemetry GenAI conventions:
+Every question is one trace in Datadog LLM Observability:
 
 ```text
-invoke_agent document_agent           session.id, app.request_id, document IDs, status
-  graph.node init | assess | plan | tools | synthesize
-    chat <model id>                    gen_ai.request.model, gen_ai.usage.input/output_tokens, finish reason, tool calls
-    execute_tool <tool name>           gen_ai.tool.name, app.evidence_id, document IDs, match/row counts; error status
-ingest_document                        (upload portal) file kind, size, profile requested
+agent     document_agent          session, request ID, model, ambiguity mode, document IDs, status
+  workflow  init | assess | plan | tools | synthesize
+    llm       <step name>           model, input/output tokens, stop reason, tool calls requested, latency
+    tool      <tool name>           evidence ID, document IDs, match/row counts; error status
+workflow  ingest_document         (upload portal) file kind, size, profile requested
 ```
 
-Prompt and response text is attached as span events only with `TRACE_CONTENT=true` (PHI risk; keep it off in
-shared environments). Without a tracer provider the OpenTelemetry API is a no-op.
+Datadog shows each question's model calls with tokens, latency, cost estimates and errors, and an audit record's
+`trace_id` finds its trace. Prompts, responses, the question, the answer and tool parameters are sent only with
+`TRACE_CONTENT=true`. They can contain PHI: confirm the Datadog agreement covers PHI (or use Datadog's Sensitive
+Data Scanner) before turning it on in a shared environment. When LLM Observability is not enabled the helpers are
+no-ops, so the application runs unchanged without Datadog.
 
-For development, `TRACING=file` writes spans to `data/traces/spans.jsonl` and `TRACING=console` prints them.
+#### AWS Lambda
 
-### AWS: CloudWatch GenAI Observability (AgentCore Observability)
+Instrument the function the same way as other Datadog-monitored Lambdas:
 
-The spans work with AgentCore Observability without running on AgentCore Runtime:
-
-1. Enable CloudWatch Transaction Search once per account and Region.
-2. `pip install "aws-opentelemetry-distro>=0.18.0"` in the deployment image.
-3. Set `TRACING=off` (ADOT installs the provider) and the ADOT variables, for example:
-
-   ```text
-   AGENT_OBSERVABILITY_ENABLED=true
-   OTEL_PYTHON_DISTRO=aws_distro
-   OTEL_PYTHON_CONFIGURATOR=aws_configurator
-   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-   OTEL_TRACES_EXPORTER=otlp
-   OTEL_RESOURCE_ATTRIBUTES=service.name=document-agent
-   OTEL_EXPORTER_OTLP_LOGS_HEADERS=x-aws-log-group=<log group>,x-aws-log-stream=<stream>,x-aws-metric-namespace=document-agent
-   ```
-
-4. Launch through the instrumenter:
+1. Add the `Datadog-Python3xx` and `Datadog-Extension` layers. The Python layer provides `ddtrace`; do not bundle
+   `ddtrace` in the deployment package.
+2. Set the function handler to `datadog_lambda.handler.handler` (the Datadog wrapper) and set:
 
    ```text
-   opentelemetry-instrument streamlit run apps/chat/app.py --server.port 8501
+   DD_LAMBDA_HANDLER=apps.api.lambda_handler.lambda_handler
+   DD_LLMOBS_ENABLED=true
+   DD_LLMOBS_ML_APP=health-insurance-document-agent
+   DD_TRACE_ENABLED=true
+   DD_SITE=datadoghq.com
+   DD_API_KEY_SECRET_ARN=<secret ARN>
+   DD_TRACE_BOTOCORE_ENABLED=false
+   TRACE_CONTENT=false
    ```
 
-ADOT also instruments botocore, so each Bedrock call gets an AWS SDK span next to the `chat` span. Traces then
-appear in the CloudWatch GenAI Observability console with token, latency and error views, and an audit
-record's `trace_id` finds its trace. Check current ADOT settings in the AWS documentation before deploying.
+`DD_TRACE_BOTOCORE_ENABLED=false` stops Datadog's automatic Bedrock instrumentation from recording every model call
+a second time; the application's own `llm` spans carry the step names. It also removes AWS SDK spans (S3 reads) from
+APM. Check the variable names against the Datadog documentation for the layer version you deploy.
+
+#### Local development (`development/observability/`)
+
+The chat app, the command-line tool, the evaluations and the tests capture the same span events in memory
+instead of sending them to Datadog: `capture.enable()` starts LLM Observability locally and replaces its span writer.
+No Datadog account, agent or network access is needed, and prompt and response text is always captured locally.
+
+- The chat app shows a **Model calls** panel under each answer: call count, input and output tokens, the largest
+  call, time in the model, a timeline of every call (start, gap since the previous call, duration, tokens, stop
+  reason, tools requested) and tool executions, and the full prompt and response of any call you pick.
+- `run_local --trace <file>` and the evaluations' `--traces` save the same per-question summary as JSON.
+
+To send local runs to Datadog instead, set `DD_LLMOBS_ENABLED=true`, `DD_API_KEY`, `DD_SITE` and
+`DD_LLMOBS_AGENTLESS_ENABLED=true`, and launch with `ddtrace-run`; the chat app then skips the local capture.
+
+The capture relies on a ddtrace internal, so `requirements.txt` pins the ddtrace minor version and the tests fail if
+an upgrade breaks it.
 
 Alongside these, turn on Bedrock model invocation logging (to an encrypted, restricted bucket; it holds full
 prompts) and CloudTrail data events for the document and audit buckets. Those record calls the application
@@ -687,7 +696,7 @@ cannot misreport.
   keys.
 - `ask_question_local(...)` is for development callers: the Streamlit chat app, the command-line tool and
   tests. It takes already-loaded `documents` (for example a local file that was never saved) and adds
-  `on_step` (progress display) and `call_log` (every prompt and response, for trace files).
+  `on_step` (progress display).
 
 Both validate the request, load the documents, run the agent, write the audit record and trace, and return a
 JSON-serializable response. They do not raise; the outcome is in `status`.
@@ -789,17 +798,23 @@ def lambda_handler(event, context):
 {"path": "apps/chat/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/chat/app.py", "characters": 8945, "sha256": "8651438a61a7bc042bd64e91c8b210f8af8892bf90031ccf56649e05e125cfaa"}
+{"path": "apps/chat/app.py", "characters": 9692, "sha256": "6f6ce6bdb2101fa38e7e89d3cbd177e071437c8de483182a3c66b9f4ca383e2b"}
 """Saved-document selection and chat. Run: streamlit run apps/chat/app.py"""
 import os
 from dotenv import load_dotenv
 load_dotenv()
 import uuid
 import streamlit as st
-from backend.observability.tracing import configure_tracing
 from backend.entrypoint import ask_question_local
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
+from development.observability import capture
+from development.observability.streamlit_view import show_llm_calls
+
+# Capture model calls locally unless this process sends them to Datadog (DD_LLMOBS_ENABLED=true).
+LOCAL_CAPTURE = os.getenv('DD_LLMOBS_ENABLED', '').strip().lower() not in {'1', 'true'}
+if LOCAL_CAPTURE:
+    capture.enable()
 
 AMBIGUITY_MODES = {'Off: answer directly': 'off', 'State assumptions': 'assumptions',
                    'Ask when ambiguous': 'ask'}
@@ -809,7 +824,6 @@ st.title('Health Insurance Document Agent')
 st.caption('Choose your sources. Ask a question. Check the evidence.')
 st.session_state.setdefault('messages', [])
 st.session_state.setdefault('session_id', uuid.uuid4().hex)
-configure_tracing()
 st.session_state.setdefault('selection_signature', ())
 try:
     store = configured_store(read_only=True)
@@ -887,7 +901,7 @@ def show_evidence(response):
         st.caption(response['interpretation']['note'])
     protocol = response.get('protocol')
     if protocol:
-        st.caption(f"{protocol['planner_mode']} tools · {protocol['repair_attempts']} corrective retries")
+        st.caption(f"{protocol['repair_attempts']} corrective retries")
     for warning in response.get('limitations',[]):
         st.warning(warning)
     with st.expander('Evidence used'):
@@ -913,6 +927,12 @@ def show_evidence(response):
                 st.caption('This evidence contains only part of the available text.')
 
 
+def show_trace(response):
+    """Local development only: every model call behind this answer (see development/observability)."""
+    if response.get('llm_trace'):
+        show_llm_calls(response['llm_trace'], key=response['request_id'])
+
+
 def ask(question, clarification=None):
     """Run the agent. A clarification re-runs the original question with the reading the user chose."""
     shown = f'{question}\n\n*Meaning: {clarification}*' if clarification else question
@@ -927,9 +947,12 @@ def ask(question, clarification=None):
                                 clarification=clarification, model=model, ambiguity=ambiguity, app='chat',
                                 on_step=lambda _:status.caption('Checking the selected sources…'))
         status.empty()
+        if LOCAL_CAPTURE and response['trace_id']:
+            response['llm_trace'] = capture.summarize(capture.trace(response['trace_id']))
         if response['status'] in {'answered', 'needs_clarification'}:
             st.markdown(response['answer'])
             show_evidence(response)
+            show_trace(response)
             st.caption(f"{response['usage']['llm_calls']} model calls · "
                        f"{response['usage']['input_tokens']:,} input tokens · "
                        f"reference {response['request_id'][:12]}")
@@ -939,10 +962,12 @@ def ask(question, clarification=None):
                 st.rerun()  # redraw so the reading buttons appear
         elif response['status'] == 'no_evidence':
             st.info(response['message'])
+            show_trace(response)
             st.session_state.messages.append({'role':'assistant','content':response['message'],'result':response,
                                               'question':question})
         else:
             st.error(response['message'] + f" (reference {response['request_id'][:12]})")
+            show_trace(response)
 
 
 def pending_clarification():
@@ -972,6 +997,7 @@ for index, message in enumerate(st.session_state.messages):
         st.markdown(message['content'])
         if 'result' in message:
             show_evidence(message['result'])
+            show_trace(message['result'])
 
 waiting = pending_clarification()
 typed = st.chat_input('Describe what you meant' if waiting else 'Ask about the selected files',
@@ -988,7 +1014,7 @@ elif typed:
 {"path": "apps/upload/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/upload/app.py", "characters": 8836, "sha256": "3154168f218a5d6beb9af2c26c45156e47e8992bf597f27c5ce5c5ac57b075a5"}
+{"path": "apps/upload/app.py", "characters": 8856, "sha256": "544d284bf8c76d13ad21992e4f40bbd535c77c9f93cb44f0aa08899b96ea63d6"}
 """Document upload portal. Run: streamlit run apps/upload/app.py --server.port 8502"""
 from pathlib import Path
 from dotenv import load_dotenv
@@ -997,10 +1023,8 @@ import streamlit as st
 from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
-from backend.observability import tracing
+from backend.observability import llmobs
 from backend.observability.audit import record_document_event
-
-tracing.configure_tracing()
 
 
 def audit_event(event, **fields):
@@ -1028,9 +1052,9 @@ profile_at_upload = st.checkbox(
 def save_files(files):
     for name, content in files:
         try:
-            with st.spinner(f'Processing {name}...'), tracing.span('ingest_document', **{
-                    'app.document.kind': Path(name).suffix.lower(), 'app.document.bytes': len(content),
-                    'app.profile_requested': profile_at_upload}):
+            with st.spinner(f'Processing {name}...'), llmobs.span('workflow', 'ingest_document') as current:
+                llmobs.annotate(current, metadata={'kind': Path(name).suffix.lower(), 'bytes': len(content),
+                                                   'profile_requested': profile_at_upload})
                 enrich = make_enricher() if profile_at_upload else None
                 doc = ingest_document(name, content, store=store, enrich=enrich)
                 profile_meta = (doc.profile or {}).get('meta', {}) if getattr(doc, 'profile', None) else {}
@@ -1303,7 +1327,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 28820, "sha256": "cf95a91294b27079424236187d3857a351e500899f79e2f525c4f4faad46783f"}
+{"path": "backend/agents/document_agent.py", "characters": 28705, "sha256": "518617150677298eaa2f17b3a77429319756d539e588cfe8ae362c5188096a98"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1311,10 +1335,10 @@ import re
 from backend.config.settings import get_model_config, MODELS
 import os
 from backend.agents.evidence import bounded, compact, numeric_display_check
-from backend.agents.llm import LLM, LLMCallLog
+from backend.agents.llm import LLM, Usage
 from backend.tools.documents import selected_documents, execute_document_tool
 from langgraph.graph import StateGraph, START, END
-from typing import Any, Callable
+from typing import Callable
 from typing_extensions import TypedDict
 
 from backend.agents.document_protocol import tool_specs, has_content, examined_documents
@@ -1322,7 +1346,7 @@ from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.native import NativePlanner, validate_action
 from backend.agents import ambiguity as amb
-from backend.observability import tracing
+from backend.observability import llmobs
 
 MAX_STEPS = 16
 MAX_REPAIRS = 2
@@ -1386,12 +1410,12 @@ footers, text boxes or tracked changes. Do not invent PDF pages or Word page cit
 '''
 
 
-def _call(system, payload, log, *, phase='Document Research', model=None):
+def _call(system, payload, usage, *, phase='Document Research', model=None):
     model_id, params = get_model_config()
     if model is not None and not os.getenv('BEDROCK_MODEL_ID'):
         model_id = MODELS[model]
-    return LLM(agent_name='health_insurance_document_agent',tool_name=phase,model_id=model_id,params=params,call_log=log).run(
-        system=system, messages=[{'role':'user','content':[{'text':compact(payload)}]}])[0]
+    return LLM(agent_name='health_insurance_document_agent',tool_name=phase,model_id=model_id,params=params,usage_meter=usage).run(
+        system=system, messages=[{'role':'user','content':[{'text':compact(payload)}]}])
 
 
 class DocumentState(TypedDict, total=False):
@@ -1399,7 +1423,7 @@ class DocumentState(TypedDict, total=False):
     document_ids: list[str]
     question: str
     history: list
-    call_log: Any
+    usage: Usage
     on_step: Callable | None
     model: str
     docs: dict
@@ -1432,21 +1456,19 @@ def node_init(state: DocumentState) -> dict:
     question = state['question']
     if not isinstance(question, str) or not question.strip():
         raise ValueError('Question cannot be empty')
-    log = state.get('call_log')
-    if log is None:
-        log = LLMCallLog()
+    usage = state.get('usage') or Usage()
     specs = tool_specs(docs)
     payload = {'question': question, 'selected_documents': [doc.summary() for doc in docs.values()],
                'history': bounded((state.get('history') or [])[-6:], max_chars=4000)}
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Native Document Research',
-              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, call_log=log)
+              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
     planner = NativePlanner(llm, SYSTEM+'\nUse native tools; do not write tool requests as text.', payload, specs)
-    return {'docs': docs, 'model': model, 'call_log': log, 'specs': specs, 'planner': planner,
+    return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'planner': planner,
             'steps': 0, 'evidence': [], 'seen': {},
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
-            'stats': {'planner_mode': 'native', 'validation_errors': 0, 'repair_attempts': 0,
+            'stats': {'validation_errors': 0, 'repair_attempts': 0,
                       'duplicate_requests': 0, 'coverage_prompts': 0, 'auto_reads': 0, 'calculation_prompts': 0,
                       'answer_revisions': 0, 'ambiguity_mode': mode, 'ambiguity_decision': 'off'},
             'ambiguity': mode, 'interpretation': None}
@@ -1483,7 +1505,7 @@ def node_assess(state: DocumentState) -> dict:
         _, inference = get_model_config()
         llm = LLM(agent_name='health_insurance_document_agent', tool_name='Ambiguity Assessment',
                   model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[state['model']], params=inference,
-                  call_log=state['call_log'])
+                  usage_meter=state['usage'])
         payload = {'question': state['question'],
                    'history': bounded((state.get('history') or [])[-6:], max_chars=4000),
                    'selected_documents': [amb.document_view(doc) for doc in state['docs'].values()]}
@@ -1564,28 +1586,29 @@ def node_tools(state: DocumentState) -> dict:
                 raise ValueError('Tool execution budget reached. Finish with available evidence.')
             if state.get('on_step'):
                 state['on_step'](f"Step {state['steps']}: {name}")
-            with tracing.span(f'execute_tool {name}', **{
-                    'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.name': name,
-                    'app.tool.operation': params.get('name') if name == 'table_tool' else None,
-                    'app.document_id': params.get('document_id'), 'app.document_ids': params.get('document_ids'),
-                    'app.evidence_id': f'E{len(evidence)+1}'}) as tool_span:
+            with llmobs.span('tool', name) as tool_span:
+                llmobs.annotate(tool_span, metadata={
+                    'operation': params.get('name') if name == 'table_tool' else None,
+                    'document_id': params.get('document_id'), 'document_ids': params.get('document_ids'),
+                    'evidence_id': f'E{len(evidence)+1}'})
+                llmobs.annotate_content(tool_span, input_data=params)
                 if name in {'calculate', 'date_calculate'}:
                     try:
                         data = _calculation(name, params, evidence, state['question'])
                     except ValueError as exc:
                         # Bad inputs are a tool result for the planner to fix, not a protocol failure.
-                        tracing.mark_error(tool_span, exc)
+                        llmobs.mark_error(tool_span, exc)
                         results.append({'error': str(exc)})
                         continue
                 else:
                     data = execute_document_tool(name, params, state['docs'])
                 failed = data.get('error') or (data.get('table_result') or {}).get('error')
                 if failed:
-                    tracing.mark_error(tool_span, failed)
-                tracing.set_attributes(tool_span, **{
-                    'app.tool.matches': len(data.get('matches', [])) if 'matches' in data else None,
-                    'app.tool.blocks': len(data.get('blocks', [])) if 'blocks' in data else None,
-                    'app.tool.matched_rows': (data.get('table_result') or {}).get('matched_rows')})
+                    llmobs.mark_error(tool_span, failed)
+                llmobs.annotate(tool_span, metadata={
+                    'matches': len(data.get('matches', [])) if 'matches' in data else None,
+                    'blocks': len(data.get('blocks', [])) if 'blocks' in data else None,
+                    'matched_rows': (data.get('table_result') or {}).get('matched_rows')})
             record = {'id': f'E{len(evidence)+1}', 'tool': name, 'parameters': params, 'data': data}
             seen[key] = record['id']
             evidence.append(record)
@@ -1651,7 +1674,7 @@ def _prompt_version():
 
 def node_synthesize(state: DocumentState) -> dict:
     evidence, limitations, stats = state['evidence'], list(state['limitations']), dict(state['stats'])
-    docs, question, log, model = state['docs'], state['question'], state['call_log'], state['model']
+    docs, question, usage, model = state['docs'], state['question'], state['usage'], state['model']
     substantive = [e for e in evidence if has_content(e)]
     unexamined = [docs[d].name for d in _unexamined(docs, evidence)]
     if not substantive:
@@ -1664,7 +1687,7 @@ def node_synthesize(state: DocumentState) -> dict:
     if state.get('interpretation'):
         payload['interpretation'] = state['interpretation']
     writer = WRITER + (INTERPRETATION_RULE if state.get('interpretation') else '')
-    answer = _call(writer, payload, log, phase='Document Answer', model=model)
+    answer = _call(writer, payload, usage, phase='Document Answer', model=model)
     if not isinstance(answer, str):
         raise ValueError('Model did not return an answer')
     amounts = unsupported_amounts(answer, usable, question)
@@ -1681,7 +1704,7 @@ def node_synthesize(state: DocumentState) -> dict:
         stats['answer_revisions'] += 1
         answer = _call(writer + '\nRevise draft_answer to fix every listed issue; change nothing else.',
                        {**payload, 'draft_answer': answer, 'issues': issues},
-                       log, phase='Document Answer Revision', model=model)
+                       usage, phase='Document Answer Revision', model=model)
         limitations.extend('Answer check: ' + issue for issue in answer_issues(answer, usable, question))
     numeric = [{**e, 'data': e['data'].get('table_result', e['data'])} for e in substantive]
     answer = numeric_display_check(answer, numeric)
@@ -1719,12 +1742,12 @@ def route_after_synthesize(state: DocumentState) -> str:
 def build_document_graph():
     """Compile the research workflow; each invocation has its own runtime state."""
     graph = StateGraph(DocumentState)
-    graph.add_node('init', tracing.traced_node('init')(node_init))
-    graph.add_node('plan', tracing.traced_node('plan')(node_plan))
-    graph.add_node('tools', tracing.traced_node('tools')(node_tools))
-    graph.add_node('synthesize', tracing.traced_node('synthesize')(node_synthesize))
+    graph.add_node('init', llmobs.traced_node('init')(node_init))
+    graph.add_node('plan', llmobs.traced_node('plan')(node_plan))
+    graph.add_node('tools', llmobs.traced_node('tools')(node_tools))
+    graph.add_node('synthesize', llmobs.traced_node('synthesize')(node_synthesize))
     graph.add_edge(START, 'init')
-    graph.add_node('assess', tracing.traced_node('assess')(node_assess))
+    graph.add_node('assess', llmobs.traced_node('assess')(node_assess))
     graph.add_edge('init', 'assess')
     graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
     graph.add_edge('plan', 'tools')
@@ -1738,22 +1761,22 @@ DOCUMENT_GRAPH = build_document_graph()
 PROMPT_VERSION = _prompt_version()
 
 
-def run_document_agent(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,
+def run_document_agent(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
                        ambiguity='off', clarification=None):
     """Run the LangGraph workflow while preserving the document-agent API."""
     state = DOCUMENT_GRAPH.invoke(
         {'documents': documents, 'document_ids': document_ids, 'question': question,
-         'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model,
+         'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
               'ambiguity': ambiguity, 'clarification': clarification},
         config={'recursion_limit': MAX_STEPS * 2 + 10})
     return state['result']
 
 
-def run_document_agent_stream(documents, document_ids, question, *, history=None, call_log=None, on_step=None, model=None,
+def run_document_agent_stream(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
                        ambiguity='off', clarification=None):
     """Stream progress from the same graph; omit runtime objects and raw evidence from updates."""
     inputs = {'documents': documents, 'document_ids': document_ids, 'question': question,
-              'history': history, 'call_log': call_log, 'on_step': on_step, 'model': model,
+              'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
               'ambiguity': ambiguity, 'clarification': clarification}
     for event in DOCUMENT_GRAPH.stream(inputs, stream_mode='updates',
                                       config={'recursion_limit': MAX_STEPS * 2 + 10}):
@@ -1840,7 +1863,7 @@ def examined_documents(evidence):
     return examined
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/enrichment.py", "characters": 13423, "sha256": "055044679f100328f489666cdc5ba8dea1f334ca2b1f8cac3a700707b13ef79d"}
+{"path": "backend/agents/enrichment.py", "characters": 13389, "sha256": "df95cf5a7931d92fb66446fd899cbdd146a3f8c903182fcc66cd6cf7a252e119"}
 """Optional semantic profile generated once per document at upload: a document card, references to other
 documents, a glossary, column roles and status meanings.
 
@@ -2079,7 +2102,7 @@ def enrich(doc, llm):
     return profile
 
 
-def make_enricher(model=None, call_log=None):
+def make_enricher(model=None):
     """Callable for ingest_document(enrich=...). Uses ENRICHMENT_MODEL (default maverick) unless given."""
     import os
     from backend.agents.llm import LLM
@@ -2089,7 +2112,7 @@ def make_enricher(model=None, call_log=None):
         raise ValueError(f'Enrichment model must be one of {list(MODELS)}')
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Document Enrichment',
-              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[name], params=inference, call_log=call_log)
+              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[name], params=inference)
     return lambda doc: enrich(doc, llm)
 
 ===== REPOSITORY FILE =====
@@ -2146,24 +2169,32 @@ def numeric_display_check(answer, evidence):
     return answer
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/llm.py", "characters": 4367, "sha256": "e94551488c216a93e3913dc77bf75851efe8f12ebcd93aba3d31e74b999b1c4d"}
-import time
+{"path": "backend/agents/llm.py", "characters": 4029, "sha256": "4d7db3ff222a772310c74769071b4bdfb3c78fd2b26f25e9cfe05b2f416b9fff"}
 import os
 from botocore.config import Config
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 
 import boto3
 
-from backend.observability import tracing
+from backend.observability import llmobs
 
 
 @dataclass
-class LLMCallLog:
-    records: list[dict] = field(default_factory=list)
+class Usage:
+    """Model calls and tokens for one question, returned in the response and the audit record.
 
-    def append(self, record: dict) -> None:
-        self.records.append(record)
+    Per-call detail (prompts, responses, timings) goes to Datadog LLM Observability instead."""
+    llm_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def add(self, usage: dict) -> None:
+        self.llm_calls += 1
+        self.input_tokens += usage.get('inputTokens', 0)
+        self.output_tokens += usage.get('outputTokens', 0)
+
+    def totals(self) -> dict:
+        return {'llm_calls': self.llm_calls, 'input_tokens': self.input_tokens, 'output_tokens': self.output_tokens}
 
 
 class LLM:
@@ -2174,19 +2205,16 @@ class LLM:
         tool_name: str | None = None,
         model_id: str | None = None,
         params: dict | None = None,
-        call_log: LLMCallLog | None = None,
+        usage_meter: Usage | None = None,
     ):
         self.agent_name = agent_name
         self.tool_name = tool_name
         self.model_id = model_id
         self.params = params
-        self.call_log = call_log
-        self.output_raw: str | None = None
-        self.usage: dict = {}
+        self.usage_meter = usage_meter
 
     def converse(self, system, messages, tool_config=None):
         """Preserve Bedrock toolUse blocks and stop reason; reuse this instance's client."""
-        import copy
         if not hasattr(self, '_client'):
             session = boto3.Session(profile_name=os.getenv('AWS_PROFILE') or None)
             self._client = session.client('bedrock-runtime',
@@ -2199,42 +2227,34 @@ class LLM:
                        messages=messages, inferenceConfig=self.params)
         if tool_config is not None:
             request['toolConfig'] = tool_config
-        start = time.monotonic()
-        # GenAI semantic-convention span; prompt/response text only when TRACE_CONTENT=true.
-        with tracing.span(f'chat {self.model_id}', **{
-                'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'aws.bedrock', 'gen_ai.system': 'aws.bedrock',
-                'gen_ai.request.model': self.model_id, 'app.llm.step': self.tool_name,
-                'gen_ai.request.max_tokens': (self.params or {}).get('maxTokens'),
-                'app.llm.tools_offered': len((tool_config or {}).get('tools', []))}) as current:
-            tracing.add_content(current, 'gen_ai.input', system=system, messages=messages)
+        # Prompt and response text only when TRACE_CONTENT=true.
+        with llmobs.span('llm', self.tool_name or 'chat', model_name=self.model_id,
+                         model_provider=llmobs.MODEL_PROVIDER) as current:
             response = self._client.converse(**request)
             usage = response.get('usage', {})
             message = response['output']['message']
-            tracing.set_attributes(current, **{
-                'gen_ai.usage.input_tokens': usage.get('inputTokens'),
-                'gen_ai.usage.output_tokens': usage.get('outputTokens'),
-                'gen_ai.response.finish_reasons': [response.get('stopReason')],
-                'app.llm.tool_calls': [b['toolUse']['name'] for b in message.get('content', []) if 'toolUse' in b]})
-            tracing.add_content(current, 'gen_ai.output', message=message)
-        self.usage = response.get('usage', {})
-        if self.call_log is not None:
-            self.call_log.append(dict(timestamp=datetime.now(timezone.utc).isoformat(),
-                duration_ms=round((time.monotonic()-start)*1000), agent_name=self.agent_name,
-                tool_name=self.tool_name, model_id=self.model_id, system=system,
-                messages=copy.deepcopy(messages), output_raw=copy.deepcopy(response['output']['message']),
-                stop_reason=response.get('stopReason'), usage=self.usage))
+            llmobs.annotate(current, metadata={
+                'agent': self.agent_name, 'stop_reason': response.get('stopReason'),
+                'max_tokens': (self.params or {}).get('maxTokens'),
+                'tools_offered': len((tool_config or {}).get('tools', [])),
+                'tool_calls': [b['toolUse']['name'] for b in message.get('content', []) if 'toolUse' in b]},
+                metrics={'input_tokens': usage.get('inputTokens'), 'output_tokens': usage.get('outputTokens'),
+                         'total_tokens': usage.get('inputTokens', 0) + usage.get('outputTokens', 0)})
+            llmobs.annotate_content(current, input_data=llmobs.bedrock_messages(messages, system),
+                                    output_data=llmobs.bedrock_messages([message]))
+        if self.usage_meter is not None:
+            self.usage_meter.add(usage)
         return response
 
-    def run(self, system=None, messages=None) -> tuple:
+    def run(self, system=None, messages=None) -> str:
         """Return plain text for synthesis/extraction; tool planning uses converse()."""
         response = self.converse(system, messages)
         if response.get('stopReason') not in {'end_turn', 'stop_sequence'}:
             raise ValueError('Incomplete text response from Bedrock: '+str(response.get('stopReason')))
-        self.output_raw = "\n".join(block['text'] for block in response['output']['message']['content']
-                                     if 'text' in block)
-        if not self.output_raw:
+        text = "\n".join(block['text'] for block in response['output']['message']['content'] if 'text' in block)
+        if not text:
             raise ValueError('Bedrock returned no text')
-        return self.output_raw, self.usage
+        return text
 
 ===== REPOSITORY FILE =====
 {"path": "backend/agents/native.py", "characters": 3103, "sha256": "e42804c12c947715cd57579309e65f864f7e97996b90696db7392b4f345d08e6"}
@@ -2305,8 +2325,8 @@ class NativePlanner:
 """Config components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/config/settings.py", "characters": 747, "sha256": "3c0d5887e95da21aac9e7b176dd3ae04e3ee2399aeda62f09bcfa1760efe7562"}
-"""Local defaults; deployment may retain its existing config_utils implementation."""
+{"path": "backend/config/settings.py", "characters": 723, "sha256": "eff3ab340996f1f8354df6985b5d86e9169041a351e718bdf9af9e1c7f3ac025"}
+"""Bedrock model choices and inference settings, read from the environment."""
 import os
 
 MODELS = {
@@ -2317,7 +2337,7 @@ MODELS = {
 }
 
 
-def get_model_config(alias="UNALIASED"):
+def get_model_config():
     model = os.getenv("TABLES_MODEL", "maverick").lower()
     if model not in MODELS:
         raise ValueError(f"TABLES_MODEL must be one of {list(MODELS)}")
@@ -2327,12 +2347,12 @@ def get_model_config(alias="UNALIASED"):
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/entrypoint.py", "characters": 13490, "sha256": "738180386f0bca4ba27586c5fef9984b2fe981ce5caa8186679c3c327d38666e"}
+{"path": "backend/entrypoint.py", "characters": 13304, "sha256": "b4b4c94cc7f11654307bd69d678c4395a005dd1a575c080eaffafa55c25e96cd"}
 """Single entry point for document question answering.
 
 ask_question is the production entry point (the Lambda handler calls it with saved-document keys).
 ask_question_local is for development callers (the Streamlit app, the command-line tool, tests): it takes
-already-loaded documents and adds progress and trace hooks. Both validate the request, load the documents, run
+already-loaded documents and adds a progress hook. Both validate the request, load the documents, run
 the agent, write the audit record and trace, and return the same JSON-serializable response, whose `status`
 tells the caller what happened:
 
@@ -2353,9 +2373,9 @@ import time
 
 from backend.agents import ambiguity as amb
 from backend.agents import document_agent
-from backend.agents.llm import LLMCallLog
+from backend.agents.llm import Usage
 from backend.config.settings import MODELS
-from backend.observability import audit, tracing
+from backend.observability import audit, llmobs
 
 MAX_DOCUMENTS = 10
 MAX_QUESTION_CHARS = 4000
@@ -2402,40 +2422,38 @@ def ask_question(question, *, document_keys, history=None, session_id=None, clar
 
 
 def ask_question_local(question, *, documents, history=None, session_id=None, clarification=None, model=None,
-                       ambiguity='off', app='local', sink=None, on_step=None, call_log=None):
+                       ambiguity='off', app='local', sink=None, on_step=None):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
     documents      Document objects (e.g. a local file that was never saved to the document store)
     on_step        callback after each research step, for a progress display
-    call_log       LLMCallLog that receives every prompt and response, e.g. to save a trace file
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
                 session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
-                sink=sink, on_step=on_step, call_log=call_log)
+                sink=sink, on_step=on_step)
 
 
 def _run(question, *, selected, load, history, session_id, clarification, model, ambiguity, app, sink,
-         on_step=None, call_log=None):
+         on_step=None):
     """Validate, load, run the agent, audit and trace. Shared by both entry points."""
     sink = sink if sink is not None else audit.configured_audit_sink()
-    log = call_log if call_log is not None else LLMCallLog()
+    usage = Usage()
     request_id, timestamp, start = audit.new_id(), audit.now(), time.monotonic()
     loaded, result, error, status = [], None, None, 'error'
-    with tracing.span('invoke_agent document_agent', **{
-            'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'document_agent',
-            'session.id': session_id, 'app.request_id': request_id, 'app.name': app,
-            'app.ambiguity_mode': ambiguity, 'app.model': model}) as root:
-        trace_id = tracing.trace_id_of(root)
-        tracing.add_content(root, 'app.question', question=question, clarification=clarification)
+    with llmobs.span('agent', 'document_agent', session_id=session_id) as root:
+        trace_id = llmobs.trace_id_of(root)
+        llmobs.annotate(root, metadata={'request_id': request_id, 'ambiguity_mode': ambiguity, 'model': model},
+                        tags={'app': app})
+        llmobs.annotate_content(root, input_data={'question': question, 'clarification': clarification})
         try:
             question, history, clarification = _validate(question, history, clarification, model, ambiguity,
                                                          selected)
             loaded = load()
-            tracing.set_attributes(root, **{'app.document_ids': [d.id for d in loaded]})
+            llmobs.annotate(root, metadata={'document_ids': [d.id for d in loaded]})
             # Module attribute, so tests can replace the agent.
             result = document_agent.run_document_agent(
-                {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, call_log=log,
+                {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, usage=usage,
                 on_step=on_step, model=model, ambiguity=ambiguity, clarification=clarification)
             status = result.get('status') or 'answered'
         except RequestError as exc:
@@ -2443,15 +2461,16 @@ def _run(question, *, selected, load, history, session_id, clarification, model,
         except Exception as exc:
             status, error = classify(exc), f'{type(exc).__name__}: {exc}'[:1000]
             logger.exception('Question %s failed', request_id)
-        tracing.set_attributes(root, **{'app.status': status})
+        llmobs.annotate(root, metadata={'status': status}, tags={'status': status})
+        llmobs.annotate_content(root, output_data=(result or {}).get('answer'))
         if status not in {'answered', 'needs_clarification', 'no_evidence'}:
-            tracing.mark_error(root, error or status)
-        response = _response(status, result, error, loaded, request_id, trace_id, session_id, question, log)
+            llmobs.mark_error(root, error or status)
+        response = _response(status, result, error, loaded, request_id, trace_id, session_id, question, usage)
         audit.write(sink, audit.question_records(
             request_id=request_id, timestamp=timestamp, app=app, session_id=session_id,
             model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
             documents=[audit.document_summary(d) for d in loaded], question=question,
-            clarification=clarification, result={**(result or {}), 'status': status}, call_records=log.records,
+            clarification=clarification, result={**(result or {}), 'status': status}, usage=usage.totals(),
             duration_ms=round((time.monotonic() - start) * 1000), error=error, trace_id=trace_id))
     return response
 
@@ -2529,7 +2548,7 @@ def sources(evidence):
     return out
 
 
-def _response(status, result, error, loaded, request_id, trace_id, session_id, question, log):
+def _response(status, result, error, loaded, request_id, trace_id, session_id, question, usage):
     result = result or {}
     interpretation = result.get('interpretation')
     if interpretation and interpretation.get('alternatives'):
@@ -2550,25 +2569,28 @@ def _response(status, result, error, loaded, request_id, trace_id, session_id, q
         'sources': sources(result.get('evidence')), 'evidence': result.get('evidence', []),
         'limitations': result.get('limitations', []), 'coverage': result.get('coverage'),
         'interpretation': interpretation, 'clarification': clarification if status == 'needs_clarification' else None,
-        'protocol': result.get('protocol'), 'usage': audit.totals(log.records),
+        'protocol': result.get('protocol'), 'usage': usage.totals(),
         'error': {'type': error.split(':', 1)[0], 'message': error} if error and status not in {
             'invalid_request', 'documents_unavailable'} else None,
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/__init__.py", "characters": 33, "sha256": "7774a4e4cbb4710f92854d13ac908c44bdd4d2eaeb5dd6edacae870d19fb0d4d"}
-"""Audit records and tracing."""
+{"path": "backend/observability/__init__.py", "characters": 57, "sha256": "47b3c114d1e48004523a48518e17db5b470879ccd1f26da784b707fa6805efae"}
+"""Audit records and Datadog LLM Observability spans."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/audit.py", "characters": 12164, "sha256": "b1553f554c19c50fc608417e2655761384323ef2c25da8aaa025c0a2dd7e5d18"}
+{"path": "backend/observability/audit.py", "characters": 11183, "sha256": "fcc074f3e5fbf13b13acb70db57f4c2ccc3db8930f6899b6ebcc81c007bbb945"}
 """Application audit records: one per question and one per document event.
 
 Two tiers, written to separate locations so they can have separate access policies and retention:
 
 metadata  always written. Who asked, when, which documents, model, prompt and code versions, status, tools
           used, evidence locations, tokens and timings. Questions and answers appear only as SHA-256 hashes.
-content   written only when AUDIT_CONTENT=true. Question, answer, evidence and the full model call log. It can
-          contain PHI; store it under a restricted prefix with its own KMS key and retention.
+content   written only when AUDIT_CONTENT=true. Question, answer and evidence. It can contain PHI; store it
+          under a restricted prefix with its own KMS key and retention.
+
+Per-call prompts, responses, tokens and timings are in Datadog LLM Observability (backend/observability/llmobs.py);
+each record's trace_id finds its trace there.
 
 AUDIT_STORAGE=local (default)  JSON lines under AUDIT_LOCAL_DIR (default data/audit)
 AUDIT_STORAGE=s3               one object per record under AUDIT_S3_BUCKET (default DOCUMENTS_S3_BUCKET)
@@ -2585,8 +2607,7 @@ from pathlib import Path
 import threading
 import uuid
 
-SCHEMA_VERSION = 1
-TIERS = ('metadata', 'content')
+SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
 _code_version = None
 
@@ -2754,26 +2775,8 @@ def evidence_summary(evidence):
     return out
 
 
-def call_summary(records):
-    out = []
-    for r in records or []:
-        message = r.get('output_raw')  # the Bedrock output message
-        content = message.get('content', []) if isinstance(message, dict) else []
-        out.append({'step': r.get('tool_name'), 'model_id': r.get('model_id'), 'duration_ms': r.get('duration_ms'),
-                    'stop_reason': r.get('stop_reason'), 'input_tokens': (r.get('usage') or {}).get('inputTokens'),
-                    'output_tokens': (r.get('usage') or {}).get('outputTokens'),
-                    'tool_calls': [b['toolUse']['name'] for b in content if isinstance(b, dict) and 'toolUse' in b]})
-    return out
-
-
-def totals(records):
-    return {'llm_calls': len(records or []),
-            'input_tokens': sum((r.get('usage') or {}).get('inputTokens', 0) for r in records or []),
-            'output_tokens': sum((r.get('usage') or {}).get('outputTokens', 0) for r in records or [])}
-
-
 def question_records(*, request_id, timestamp, app, session_id, model, ambiguity, prompt_version,
-                     documents, question, clarification, result, call_records, duration_ms, error, trace_id):
+                     documents, question, clarification, result, usage, duration_ms, error, trace_id):
     """Metadata record (always) and content record (AUDIT_CONTENT=true) for one question."""
     result = result or {}
     metadata = {
@@ -2786,8 +2789,8 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
         'answer_sha256': digest(result['answer']) if result.get('answer') else None,
         'protocol': result.get('protocol'), 'coverage': result.get('coverage'),
         'limitations_count': len(result.get('limitations') or []),
-        'evidence': evidence_summary(result.get('evidence')), 'llm_calls': call_summary(call_records),
-        'totals': totals(call_records), 'duration_ms': duration_ms, 'error': error, 'trace_id': trace_id,
+        'evidence': evidence_summary(result.get('evidence')), 'totals': usage,
+        'duration_ms': duration_ms, 'error': error, 'trace_id': trace_id,
         'content_recorded': content_enabled()}
     records = [('metadata', 'questions', metadata)]
     if content_enabled():
@@ -2796,16 +2799,15 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
             'timestamp': timestamp, 'question': question, 'clarification': clarification,
             'answer': result.get('answer'), 'interpretation': result.get('interpretation'),
             'clarification_request': result.get('clarification'), 'limitations': result.get('limitations'),
-            'evidence': result.get('evidence'), 'llm_calls': call_records}))
+            'evidence': result.get('evidence')}))
     return records
 
 
 def record_document_event(event, *, app, sink=None, **fields):
     """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
-    from opentelemetry import trace
-    from backend.observability import tracing
+    from backend.observability import llmobs
     write(sink if sink is not None else configured_audit_sink(),
-          document_event(event, app=app, trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))
+          document_event(event, app=app, trace_id=llmobs.current_trace_id(), **fields))
 
 
 def document_event(event, *, app, document=None, filename=None, content=None, details=None, error=None,
@@ -2823,148 +2825,126 @@ def document_event(event, *, app, document=None, filename=None, content=None, de
     return [('metadata', 'documents', record)]
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/tracing.py", "characters": 5522, "sha256": "374b00f78e1c3719b0fb53cc2a3aff1200728b5ceaa96fdb8f0e2ba6aeef1aca"}
-"""OpenTelemetry spans for questions, graph steps, Bedrock calls and tool executions.
+{"path": "backend/observability/llmobs.py", "characters": 4967, "sha256": "05eafe8228abbe3951fd48c1c15f80d38f41f73fad61fac25c92b81ee0ab9f21"}
+"""Datadog LLM Observability spans for questions, graph steps, Bedrock calls and tool executions.
 
-Spans follow the OpenTelemetry GenAI conventions (gen_ai.* attributes), so CloudWatch GenAI Observability
-(AgentCore Observability) and other OTel backends can read them. Without a configured tracer provider the
-OpenTelemetry API is a no-op, so this module costs nothing until tracing is turned on.
+In AWS Lambda the Datadog layers (Datadog-Python3xx and Datadog-Extension) turn LLM Observability on with
+DD_LLMOBS_ENABLED=true and ship the spans to Datadog; see the README. When LLM Observability is not enabled every
+helper here is a no-op, so the application runs unchanged without Datadog.
 
-TRACING=off (default)  no provider here; an outer launcher such as ADOT's opentelemetry-instrument may add one
-TRACING=file           development: write spans as JSON lines to TRACING_FILE (default data/traces/spans.jsonl)
-TRACING=console        development: print spans
-TRACE_CONTENT=true     also attach prompt/response text to spans. Off by default: it can contain PHI.
+agent     document_agent                 one per question: request and session IDs, status
+workflow  init | assess | plan | tools | synthesize, and ingest_document in the upload portal
+llm       one per Bedrock call           model, step, tokens, stop reason, tool calls requested
+tool      one per tool execution         evidence ID, document IDs, match and row counts
+
+TRACE_CONTENT=true  also send prompts, responses, the question, the answer and tool parameters. Off by default:
+                    they can contain PHI.
 """
 from contextlib import contextmanager
 import functools
 import json
 import os
-from pathlib import Path
-import threading
 
-from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
+from ddtrace.llmobs import LLMObs
 
-TRACER_NAME = 'health_insurance_document_agent'
-CONTENT_LIMIT = 4000
-_configured = False
-_lock = threading.Lock()
-
-
-def tracer():
-    return trace.get_tracer(TRACER_NAME)
+MODEL_PROVIDER = 'amazon_bedrock'
 
 
 def content_capture():
     return os.getenv('TRACE_CONTENT', 'false').strip().lower() == 'true'
 
 
-def _clean(attributes):
-    """OTel attributes must be scalars or lists of scalars; drop empties."""
-    clean = {}
-    for key, value in attributes.items():
-        if value is None:
-            continue
-        if isinstance(value, (list, tuple)):
-            clean[key] = [str(v) for v in value]
-        elif isinstance(value, (str, bool, int, float)):
-            clean[key] = value
-        else:
-            clean[key] = str(value)
-    return clean
-
-
 @contextmanager
-def span(name, **attributes):
-    """Start a child of the current span; exceptions are recorded and mark the span as an error."""
-    with tracer().start_as_current_span(name, attributes=_clean(attributes)) as current:
+def span(kind, name, **options):
+    """Start an LLM Observability span of `kind` (agent, workflow, llm, tool); yields None when disabled.
+
+    Exceptions are recorded on the span and re-raised."""
+    if not LLMObs.enabled:
+        yield None
+        return
+    with getattr(LLMObs, kind)(name=name, **options) as current:
         yield current
 
 
-def set_attributes(current, **attributes):
-    if current is not None and current.is_recording():
-        current.set_attributes(_clean(attributes))
+def annotate(current, *, metadata=None, metrics=None, tags=None):
+    """Attach metadata, numeric metrics and tags; None values are dropped."""
+    if current is None:
+        return
+    fields = {'metadata': _drop_none(metadata), 'metrics': _drop_none(metrics), 'tags': _drop_none(tags)}
+    LLMObs.annotate(span=current, **{k: v for k, v in fields.items() if v})
+
+
+def annotate_content(current, *, input_data=None, output_data=None):
+    """Attach input and output text only when TRACE_CONTENT=true."""
+    if current is None or not content_capture():
+        return
+    fields = {'input_data': input_data, 'output_data': output_data}
+    LLMObs.annotate(span=current, **{k: v for k, v in fields.items() if v is not None})
 
 
 def mark_error(current, message):
-    if current is not None and current.is_recording():
-        current.set_status(Status(StatusCode.ERROR, str(message)[:500]))
-
-
-def add_content(current, name, **fields):
-    """Attach text only when TRACE_CONTENT=true."""
-    if content_capture() and current is not None and current.is_recording():
-        current.add_event(name, _clean({k: json.dumps(v, default=str)[:CONTENT_LIMIT] if not isinstance(v, str)
-                                        else v[:CONTENT_LIMIT] for k, v in fields.items()}))
+    """Mark a span as failed without raising, e.g. a tool that returned an error result."""
+    if current is not None:
+        current.error = 1
+        current.set_tag('error.message', str(message)[:500])
 
 
 def trace_id_of(current):
-    """Hex trace id for correlating audit records with traces; None when tracing is off."""
-    context = current.get_span_context() if current is not None else None
-    return format(context.trace_id, '032x') if context and context.is_valid else None
+    """LLM Observability trace ID, for correlating audit records with Datadog; None when disabled."""
+    if current is None or not LLMObs.enabled:
+        return None
+    exported = LLMObs.export_span(current)
+    return exported['trace_id'] if exported else None
+
+
+def current_trace_id():
+    """Trace ID of the active span (e.g. ingest_document in the upload portal), or None."""
+    if not LLMObs.enabled:
+        return None
+    current = LLMObs._instance._current_span()
+    return trace_id_of(current) if current is not None else None
 
 
 def traced_node(name):
-    """Wrap a LangGraph node so each step is its own span."""
+    """Wrap a LangGraph node so each step is its own workflow span."""
     def decorate(function):
         @functools.wraps(function)
         def wrapper(state):
-            with span(f'graph.node {name}', **{'app.graph.node': name, 'app.step': state.get('steps')}) as current:
+            with span('workflow', name) as current:
+                annotate(current, metadata={'step': state.get('steps')})
                 update = function(state)
                 if isinstance(update, dict):
-                    set_attributes(current, **{'app.graph.finished': update.get('finished'),
-                                               'app.graph.returned_result': 'result' in update})
+                    annotate(current, metadata={'finished': update.get('finished'),
+                                                'returned_result': 'result' in update})
                 return update
         return wrapper
     return decorate
 
 
-class _JsonLinesExporter:
-    """Minimal span exporter for local development: one JSON object per span."""
+def bedrock_messages(messages, system=None):
+    """Bedrock Converse messages in LLM Observability form: text, tool calls and tool results."""
+    out = [{'role': 'system', 'content': system}] if system else []
+    for message in messages or []:
+        blocks = message.get('content') or []
+        item = {'role': message.get('role', ''),
+                'content': '\n'.join(b['text'] for b in blocks if 'text' in b)}
+        calls = [{'name': b['toolUse']['name'], 'arguments': b['toolUse'].get('input') or {},
+                  'tool_id': b['toolUse'].get('toolUseId', ''), 'type': 'toolUse'}
+                 for b in blocks if 'toolUse' in b]
+        results = [{'result': '\n'.join(c['text'] if 'text' in c else json.dumps(c.get('json'), default=str)
+                                        for c in b['toolResult'].get('content', [])),
+                    'tool_id': b['toolResult'].get('toolUseId', ''), 'type': 'toolResult'}
+                   for b in blocks if 'toolResult' in b]
+        if calls:
+            item['tool_calls'] = calls
+        if results:
+            item['tool_results'] = results
+        out.append(item)
+    return out
 
-    def __init__(self, path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def export(self, spans):
-        from opentelemetry.sdk.trace.export import SpanExportResult
-        with _lock, self.path.open('a', encoding='utf-8') as out:
-            for item in spans:
-                out.write(item.to_json(indent=None) + '\n')
-        return SpanExportResult.SUCCESS
-
-    def shutdown(self):
-        return None
-
-    def force_flush(self, timeout_millis=30000):
-        return True
-
-
-def configure_tracing():
-    """Install a development exporter when TRACING asks for one. Safe to call repeatedly."""
-    global _configured
-    mode = os.getenv('TRACING', 'off').strip().lower()
-    if _configured or mode == 'off':
-        return
-    if mode not in {'file', 'console'}:
-        raise ValueError('TRACING must be off, file or console')
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
-    with _lock:
-        if _configured:
-            return
-        existing = trace.get_tracer_provider()
-        if isinstance(existing, TracerProvider):
-            _configured = True  # an outer launcher (e.g. ADOT) already installed a provider
-            return
-        provider = TracerProvider(resource=Resource.create({'service.name': os.getenv('OTEL_SERVICE_NAME', TRACER_NAME)}))
-        from backend.observability.audit import project_path
-        exporter = (_JsonLinesExporter(project_path(os.getenv('TRACING_FILE', 'data/traces/spans.jsonl')))
-                    if mode == 'file' else ConsoleSpanExporter())
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        trace.set_tracer_provider(provider)
-        _configured = True
+def _drop_none(values):
+    return {k: v for k, v in (values or {}).items() if v is not None}
 
 ===== REPOSITORY FILE =====
 {"path": "backend/preprocessing/__init__.py", "characters": 32, "sha256": "d293105b3a9aa33271045602eeb96af7ce078ad0271e454704f11543fae9cbf4"}
@@ -3554,8 +3534,8 @@ def sheet_index(metadata):
     return index
 
 ===== REPOSITORY FILE =====
-{"path": "backend/shared/models.py", "characters": 948, "sha256": "28d196ea5c3b2093cb4a7c8ffa51c0ba2853ecb2e3280688cfa3b9a21ace1fbd"}
-"""Document records shared by ingestion, storage and backend.agents."""
+{"path": "backend/shared/models.py", "characters": 940, "sha256": "0b622f324a92bb125601d038330798f8bee15e75f7eda33ec26dfb2ec970a8df"}
+"""Document records shared by ingestion, storage and agents."""
 from dataclasses import dataclass, field
 
 
@@ -3989,8 +3969,8 @@ def configured_store(*, read_only=False):
                            kms_key_id=os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None, read_only=read_only)
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/tables.py", "characters": 1242, "sha256": "5f01fe41dbdc925025841f6ee366643a2dac1ebe4be623a959419f2a799c4b42"}
-"""Read preprocessed table CSVs through either local or S3 backend.storage."""
+{"path": "backend/storage/tables.py", "characters": 1234, "sha256": "1cd3e2d501707a07158c9ab79b15b2e7ef26401c322eeef476ce4ae6705c4e64"}
+"""Read preprocessed table CSVs through either local or S3 storage."""
 import io
 import pandas as pd
 
@@ -4027,7 +4007,7 @@ def load_table(
 {"path": "backend/tools/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/calculations.py", "characters": 6491, "sha256": "1163bc106f6cf28a2dca314f61b2e72d5b01c847f21c2efb4aa52ee96da8bae3"}
+{"path": "backend/tools/calculations.py", "characters": 6067, "sha256": "c3c444f651ecece4d3d8b344e677752c44a0ef15d56dd5587d7c3d9bc51f17fa"}
 """Deterministic arithmetic and date calculations whose inputs are checked against cited sources."""
 import ast
 from datetime import date, timedelta
@@ -4064,18 +4044,6 @@ def extract_numbers(text):
         if word in WORDS:
             found.add(WORDS[word])
     return found
-
-
-def _decimal(value):
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        raise ValueError('Input values must be numbers')
-    try:
-        result = Decimal(str(value).replace(',', '').strip())
-    except InvalidOperation:
-        raise ValueError(f'Not a number: {value!r}') from None
-    if not result.is_finite():
-        raise ValueError('Input values must be finite')
-    return result
 
 
 def _evaluate(node, names):
@@ -4633,7 +4601,7 @@ def join_tables(left, right, params):
     return result
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/tables.py", "characters": 13259, "sha256": "ee6ad3d0e30c0e1a9770aa58117ef949456f81fa22449925294cab4cc8251ce3"}
+{"path": "backend/tools/tables.py", "characters": 13240, "sha256": "bf271056e8f762d7a2c544f2a310d8eb232d9d3641c7828cf8bf88aab8c3d08a"}
 """Deterministic table tools used by the document agent; no agent imports."""
 import logging
 from backend.shared.serialization import sanitize_result
@@ -4725,7 +4693,6 @@ def execute_table_tool(
     plan_domain: str,
     filename: str,
     metadata: dict,
-    call_log=None,
 ) -> dict:
     sheet_name = tool_input.get("sheet_name")
     sheets = metadata.get("sheets", {})
@@ -4911,7 +4878,7 @@ def execute_table_tool(
 """Cli components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/cli/run_local.py", "characters": 3613, "sha256": "2c8ae432f5d997b11b4a3f88ceac95a21c8e6d23fa61a085c95eefbe3856bdce"}
+{"path": "development/cli/run_local.py", "characters": 3646, "sha256": "1ab8931e71787749bc18bce604cc859c8bb28a0fe654efbdc6ad2c427b42edae"}
 """Run the document agent on local data using native Bedrock tool calls."""
 import argparse
 import json
@@ -4933,7 +4900,7 @@ def main():
     parser.add_argument("--region")
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--inspect", action="store_true", help="Print local metadata without AWS calls")
-    parser.add_argument("--trace", type=Path, help="Save full prompts/responses (includes file data)")
+    parser.add_argument("--trace", type=Path, help="Save every model call with its prompt and response (includes file data)")
     parser.add_argument("--encoding", default="utf-8-sig")
     parser.add_argument("--delimiter", default=",")
     parser.add_argument("--overrides", type=Path, help="JSON sheet_type/header_row overrides")
@@ -4945,11 +4912,10 @@ def main():
             os.environ[name] = value
     logging.basicConfig(level=logging.WARNING)
     from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
-    from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent_stream
-    from backend.observability.tracing import configure_tracing
     from backend.entrypoint import ask_question_local
-    configure_tracing()
+    from development.observability import capture
+    capture.enable(content=bool(args.trace))
     from backend.preprocessing.documents import document_from_table_inputs
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
     if args.preprocessed and overrides:
@@ -4963,24 +4929,25 @@ def main():
         return
     doc = document_from_table_inputs(**inputs)
     documents = {doc.id: doc}
-    log = LLMCallLog()
-    try:
-        if args.stream:
-            for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
-                print(json.dumps(event, default=str), flush=True)
-        else:
-            response = ask_question_local(args.question, documents=[doc], app="cli", model=args.model, call_log=log)
-            print(response["answer"] or response["message"])
-            for warning in response["limitations"]:
-                print(f"Limitation: {warning}")
-            print(f"Status: {response['status']}; reference: {response['request_id']}")
-    finally:
-        if args.trace:
-            args.trace.parent.mkdir(parents=True, exist_ok=True)
-            args.trace.write_text(json.dumps(log.records, indent=2, default=str), encoding="utf-8")
-        print(f"\nLLM calls: {len(log.records)}; input tokens: "
-              f"{sum(r['usage'].get('inputTokens', 0) for r in log.records)}; output tokens: "
-              f"{sum(r['usage'].get('outputTokens', 0) for r in log.records)}")
+    with capture.recording() as events:
+        try:
+            if args.stream:
+                for event in run_document_agent_stream(documents, [doc.id], args.question, model=args.model):
+                    print(json.dumps(event, default=str), flush=True)
+            else:
+                response = ask_question_local(args.question, documents=[doc], app="cli", model=args.model)
+                print(response["answer"] or response["message"])
+                for warning in response["limitations"]:
+                    print(f"Limitation: {warning}")
+                print(f"Status: {response['status']}; reference: {response['request_id']}")
+        finally:
+            summary = capture.summarize(events)
+            if args.trace:
+                args.trace.parent.mkdir(parents=True, exist_ok=True)
+                args.trace.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+            totals = summary["totals"]
+            print(f"\nLLM calls: {totals['llm_calls']}; input tokens: {totals['input_tokens']}; "
+                  f"output tokens: {totals['output_tokens']}")
 
 
 if __name__ == "__main__":
@@ -4991,7 +4958,7 @@ if __name__ == "__main__":
 """Evaluation components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/evaluation/ambiguity.py", "characters": 3364, "sha256": "960a1be09722c08d9c856c880e0684d5cd96d03c95e8dfbbcc43badaedcfea11"}
+{"path": "development/evaluation/ambiguity.py", "characters": 3465, "sha256": "80cef2856104145ea4d8ce11093fd803c097874d3f6b857f4b5abcccc71b484f"}
 """Measure the ambiguity step: how often it asks on ambiguous versus clear questions, and what it offers.
 
 Questions: [{"id", "files": [paths relative to --root], "question", "ambiguous": bool, "note"}].
@@ -5006,9 +4973,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from backend.agents.document_agent import run_document_agent
-from backend.agents.llm import LLMCallLog
 from backend.config.settings import MODELS
 from backend.preprocessing.documents import ingest_document
+from development.observability import capture
 
 
 def main():
@@ -5023,6 +4990,7 @@ def main():
     parser.add_argument('--case', action='append')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    capture.enable(content=False)
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
     root = (args.root or args.questions.parent).resolve()
@@ -5038,19 +5006,20 @@ def main():
                     path = (root / name).resolve()
                     loaded[name] = ingest_document(path.name, path.read_bytes())
             docs = {loaded[n].id: loaded[n] for n in case['files']}
-            log, start = LLMCallLog(), time.monotonic()
+            start = time.monotonic()
             record = {'id': case['id'], 'model': args.model, 'mode': args.mode, 'question': case['question'],
                       'labeled_ambiguous': case['ambiguous'], 'note': case.get('note', '')}
             try:
-                result = run_document_agent(docs, list(docs), case['question'], call_log=log, model=args.model,
-                                            ambiguity=args.mode)
+                with capture.recording() as events:
+                    result = run_document_agent(docs, list(docs), case['question'], model=args.model,
+                                                ambiguity=args.mode)
                 record.update(decision=result['protocol'].get('ambiguity_decision'), status=result['status'],
                               assessment=result['protocol'].get('ambiguity_assessment'),
                               clarification=result.get('clarification'), interpretation=result.get('interpretation'),
                               answer=result['answer'])
             except Exception as exc:
                 record.update(status='error', error=f'{type(exc).__name__}: {exc}')
-            record.update(seconds=round(time.monotonic() - start, 2), calls=len(log.records))
+            record.update(seconds=round(time.monotonic() - start, 2), calls=len([e for e in events if capture.kind(e) == 'llm']))
             out.write(json.dumps(record, default=str) + '\n')
             out.flush()
             print(f"{case['id']}: {record.get('decision', record['status'])}", flush=True)
@@ -5060,7 +5029,7 @@ if __name__ == '__main__':
     main()
 
 ===== REPOSITORY FILE =====
-{"path": "development/evaluation/documents.py", "characters": 4483, "sha256": "e7869f118fd94baadc0f85d7127608148688bf3de0dee0a58da8c91ff70159e5"}
+{"path": "development/evaluation/documents.py", "characters": 4479, "sha256": "e5652c936e4d5fdf60a60c53eec70aed465985b1ac2cbeb0b58100ecb4f537e2"}
 """Run the synthetic selected-document evaluation with real Bedrock inference."""
 import argparse
 from backend.agents.enrichment import make_enricher
@@ -5072,17 +5041,16 @@ import time
 from dotenv import load_dotenv
 from backend.preprocessing.documents import ingest_document
 from backend.agents.document_agent import run_document_agent
-from backend.agents.llm import LLMCallLog
 from backend.config.settings import MODELS
+from development.observability import capture
 
 
 def save_profiles(docs, output):
     """Write generated profiles next to the results for human review."""
-    import json as _json
     folder = output.with_name(output.stem + '-profiles')
     folder.mkdir(parents=True, exist_ok=True)
     for doc in docs:
-        (folder / (doc.name + '.json')).write_text(_json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
+        (folder / (doc.name + '.json')).write_text(json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
 
 
 def main():
@@ -5097,6 +5065,7 @@ def main():
     parser.add_argument('--fixtures', type=Path,
                         help='Generated fixture directory containing questions.json and upload files')
     args=parser.parse_args()
+    capture.enable(content=bool(args.traces))
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
     root=args.fixtures or Path(__file__).resolve().parents[1]/'fixtures'/'documents'
@@ -5124,28 +5093,29 @@ def main():
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with args.output.open('x',encoding='utf-8') as out:
         for case in cases:
-            log=LLMCallLog()
             start=time.monotonic()
-            record={**case,'model':args.model,'planner_mode':'native'}
-            try:
-                result=run_document_agent(documents,[by_name[n] for n in case['files']],
-                    case['question'],call_log=log,model=args.model)
-                record.update(result=result,status='needs_human_review')
-            except Exception as exc:
-                record.update(status='error',error=f'{type(exc).__name__}: {exc}')
-            record.update(calls=len(log.records),duration_seconds=round(time.monotonic()-start,2),
-                input_tokens=sum(r['usage'].get('inputTokens',0) for r in log.records),
-                output_tokens=sum(r['usage'].get('outputTokens',0) for r in log.records))
-            record['invoked_model_ids'] = sorted({r['model_id'] for r in log.records})
+            record={**case,'model':args.model}
+            with capture.recording() as events:
+                try:
+                    result=run_document_agent(documents,[by_name[n] for n in case['files']],
+                        case['question'],model=args.model)
+                    record.update(result=result,status='needs_human_review')
+                except Exception as exc:
+                    record.update(status='error',error=f'{type(exc).__name__}: {exc}')
+            summary=capture.summarize(events)
+            totals=summary['totals']
+            record.update(calls=totals['llm_calls'],duration_seconds=round(time.monotonic()-start,2),
+                input_tokens=totals['input_tokens'],output_tokens=totals['output_tokens'])
+            record['invoked_model_ids'] = totals['models']
             if args.traces:
                 trace_name = case['id']
                 if Path(trace_name).name != trace_name or '/' in trace_name or '\\' in trace_name:
                     raise ValueError('Case ID must be a basename')
                 with (args.traces / (trace_name + '.json')).open('x', encoding='utf-8') as trace:
-                    json.dump(log.records, trace, default=str, indent=2)
+                    json.dump(summary, trace, default=str, indent=2)
             out.write(json.dumps(record,default=str)+'\n')
             out.flush()
-            print(f"{case['id']}: {record['status']} ({len(log.records)} calls)",flush=True)
+            print(f"{case['id']}: {record['status']} ({record['calls']} calls)",flush=True)
             if record['status']=='error':
                 raise RuntimeError(f'Evaluation stopped; see {args.output}')
 
@@ -5154,7 +5124,7 @@ if __name__=='__main__':
     main()
 
 ===== REPOSITORY FILE =====
-{"path": "development/evaluation/tables.py", "characters": 4458, "sha256": "d5220c7aaf1de0e0b82002ed0d404938eae64feeb6d8d8260d8736ba611c1f13"}
+{"path": "development/evaluation/tables.py", "characters": 4170, "sha256": "996d2ef0499a57fc3c6a3eaff871ecacecc8335f60800ce92ace530e6f95edca"}
 """Run synthetic questions through the real agent; save answers for human review."""
 import argparse
 import json
@@ -5164,15 +5134,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from backend.config.settings import MODELS
-
-
-def save_profiles(docs, output):
-    """Write generated profiles next to the results for human review."""
-    import json as _json
-    folder = output.with_name(output.stem + '-profiles')
-    folder.mkdir(parents=True, exist_ok=True)
-    for doc in docs:
-        (folder / (doc.name + '.json')).write_text(_json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
 
 
 def main():
@@ -5191,9 +5152,10 @@ def main():
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
     from backend.storage.local import prepare_local_file
-    from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent
     from backend.preprocessing.documents import document_from_table_inputs
+    from development.observability import capture
+    capture.enable(content=bool(args.traces))
     questions = json.loads(args.questions.read_text(encoding='utf-8'))
     if args.case:
         unknown = set(args.case) - {q['id'] for q in questions}
@@ -5203,32 +5165,34 @@ def main():
     doc = document_from_table_inputs(**prepare_local_file(args.file))
     if args.enrich:
         from backend.agents.enrichment import make_enricher
+        from development.evaluation.documents import save_profiles
         doc.profile = make_enricher()(doc)
         save_profiles([doc], args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation protects earlier evaluation evidence.
     with args.output.open('x', encoding='utf-8') as output:
         for q in questions:
-            log = LLMCallLog()
             start = time.monotonic()
-            record = {'case': q['id'], 'model': args.model, 'planner_mode':'native', 'question': q['question'],
+            record = {'case': q['id'], 'model': args.model, 'question': q['question'],
                       'expected': q['expected'], 'expected_sheets': q['sheets']}
-            try:
-                # Expected answers are deliberately never sent to the agent.
-                result = run_document_agent({doc.id: doc}, [doc.id], q['question'], call_log=log, model=args.model)
-                record.update(answer=result['answer'], evidence=result['evidence'],
-                              limitations=result['limitations'], protocol=result['protocol'])
-                record['status'] = 'needs_human_review'
-            except Exception as exc:
-                record.update(status='error', error=f'{type(exc).__name__}: {exc}')
-            record.update(duration_seconds=round(time.monotonic()-start, 2), calls=len(log.records),
-                          input_tokens=sum(r['usage'].get('inputTokens', 0) for r in log.records),
-                          output_tokens=sum(r['usage'].get('outputTokens', 0) for r in log.records))
-            record['invoked_model_ids'] = sorted({r['model_id'] for r in log.records})
+            with capture.recording() as events:
+                try:
+                    # Expected answers are deliberately never sent to the agent.
+                    result = run_document_agent({doc.id: doc}, [doc.id], q['question'], model=args.model)
+                    record.update(answer=result['answer'], evidence=result['evidence'],
+                                  limitations=result['limitations'], protocol=result['protocol'])
+                    record['status'] = 'needs_human_review'
+                except Exception as exc:
+                    record.update(status='error', error=f'{type(exc).__name__}: {exc}')
+            summary = capture.summarize(events)
+            totals = summary['totals']
+            record.update(duration_seconds=round(time.monotonic()-start, 2), calls=totals['llm_calls'],
+                          input_tokens=totals['input_tokens'], output_tokens=totals['output_tokens'])
+            record['invoked_model_ids'] = totals['models']
             if args.traces:
                 args.traces.mkdir(parents=True, exist_ok=True)
                 with (args.traces / f"{q['id']}.json").open('x', encoding='utf-8') as trace:
-                    json.dump(log.records, trace, default=str, indent=2)
+                    json.dump(summary, trace, default=str, indent=2)
             output.write(json.dumps(record, default=str) + '\n')
             output.flush()
             print(f"{q['id']}: {record['status']} ({record['calls']} calls)", flush=True)
@@ -5240,10 +5204,10 @@ if __name__ == '__main__':
     main()
 
 ===== REPOSITORY FILE =====
-{"path": "development/fixtures/README.md", "characters": 2952, "sha256": "5384e50296a5e3e759de761b3b60a4f7df3a13d54e8ea29bab0b2750de43e6ef"}
+{"path": "development/fixtures/README.md", "characters": 2940, "sha256": "a01d8ddc1930f091349415bee60bb692e119bd5dfa294365d6c58df09a10c3e2"}
 # Health-insurance fixtures
 
-Bingle-Dingle Insurance documents support selected-source claim research and table-ingestion development.evaluation.
+Bingle-Dingle Insurance documents support selected-source claim research and table-ingestion evaluation.
 
 ## Selected-document research
 
@@ -5685,6 +5649,194 @@ DEMO-IMAGING is not listed. No rate for it can be inferred from this schedule. N
 ]
 
 ===== REPOSITORY FILE =====
+{"path": "development/observability/__init__.py", "characters": 61, "sha256": "7419b4265c1b01bb8df41c16e2128bc3f0d148689c497653ba40f73da0e380f0"}
+"""Local stand-ins for production observability services."""
+
+===== REPOSITORY FILE =====
+{"path": "development/observability/capture.py", "characters": 5914, "sha256": "d0e883ce5e835e110229a1834ab34330e527667a288c777d0c543d3ce6ed21e9"}
+"""Local stand-in for Datadog LLM Observability: keeps the span events Datadog would receive, in memory.
+
+Production code only talks to Datadog (backend/observability/llmobs.py). For the Streamlit chat app, the
+command-line tool, evaluations and tests, enable() starts ddtrace's LLM Observability locally and replaces its span
+writer with an in-memory one, so the same events are captured with no Datadog account, agent or network calls.
+
+    capture.enable()
+    response = ask_question_local(...)
+    summary = capture.summarize(capture.trace(response['trace_id']))
+
+    with capture.recording() as events:      # code that has no trace_id, e.g. run_document_agent
+        run_document_agent(...)
+
+This replaces a private ddtrace attribute (the span writer). requirements.txt pins the ddtrace minor version, and
+development/tests/test_observability.py fails if a ddtrace upgrade breaks the swap.
+"""
+from collections import OrderedDict
+from contextlib import contextmanager
+import os
+import threading
+
+ML_APP = 'health-insurance-document-agent-local'
+MAX_TRACES = 200
+_traces = OrderedDict()
+_recorders = []
+_lock = threading.Lock()
+
+
+class _Writer:
+    """Takes the place of ddtrace's LLMObsSpanWriter: keeps events instead of sending them."""
+
+    def enqueue(self, event):
+        with _lock:
+            _traces.setdefault(event['trace_id'], []).append(event)
+            _traces.move_to_end(event['trace_id'])
+            while len(_traces) > MAX_TRACES:
+                _traces.popitem(last=False)
+            for events in _recorders:
+                events.append(event)
+
+    def recreate(self):
+        return self
+
+    def __getattr__(self, name):
+        # start, stop, periodic, flush_queue and the rest of the writer interface have nothing to do here.
+        return lambda *args, **kwargs: None
+
+
+def enable(content=True):
+    """Capture LLM Observability events locally. content=True also captures prompts and responses
+    (TRACE_CONTENT=true). Safe to call repeatedly."""
+    from ddtrace.llmobs import LLMObs
+    from ddtrace.trace import tracer
+    if content:
+        os.environ['TRACE_CONTENT'] = 'true'
+    if not LLMObs.enabled:
+        tracer.enabled = False  # nothing is sent to a Datadog agent locally
+        LLMObs.enable(agent_service=ML_APP, agentless_enabled=False, integrations_enabled=False)
+    if not LLMObs.enabled:
+        raise RuntimeError('LLM Observability could not be enabled (is DD_LLMOBS_ENABLED=false?)')
+    writer = _Writer()
+    LLMObs._instance._llmobs_span_writer = writer
+    LLMObs._instance.tracer._span_aggregator.llmobs_processor._llmobs_span_writer = writer
+
+
+def trace(trace_id):
+    """Every captured span event of one trace (one question), oldest first."""
+    with _lock:
+        return sorted(_traces.get(trace_id, []), key=lambda e: e['start_ns'])
+
+
+@contextmanager
+def recording():
+    """Collect the events captured while the block runs. Assumes nothing else runs questions meanwhile."""
+    events = []
+    with _lock:
+        _recorders.append(events)
+    try:
+        yield events
+    finally:
+        with _lock:
+            _recorders.remove(events)
+
+
+def kind(event):
+    return event['meta']['span']['kind']
+
+
+def summarize(events):
+    """Per-question view of the captured events: totals, then each model call and tool execution in order.
+
+    Times are milliseconds from the first span; gap_ms is the time since the previous model call ended."""
+    if not events:
+        return {'totals': {'llm_calls': 0, 'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0,
+                           'largest_call': None, 'duration_ms': 0, 'model_ms': 0, 'models': []},
+                'calls': [], 'tools': []}
+    events = sorted(events, key=lambda e: e['start_ns'])
+    first = min(e['start_ns'] for e in events)
+    end = max(e['start_ns'] + e['duration'] for e in events)
+    calls, previous_end = [], None
+    for number, e in enumerate((e for e in events if kind(e) == 'llm'), 1):
+        meta, metrics = e['meta'], e.get('metrics') or {}
+        metadata = meta.get('metadata') or {}
+        calls.append({
+            'call': number, 'step': e['name'], 'model': meta.get('model_name'),
+            'start_ms': _ms(e['start_ns'] - first), 'duration_ms': _ms(e['duration']),
+            'gap_ms': _ms(e['start_ns'] - previous_end) if previous_end is not None else None,
+            'input_tokens': metrics.get('input_tokens', 0), 'output_tokens': metrics.get('output_tokens', 0),
+            'total_tokens': metrics.get('total_tokens', 0), 'stop_reason': metadata.get('stop_reason'),
+            'tool_calls': metadata.get('tool_calls') or [], 'status': e['status'],
+            'input': (meta.get('input') or {}).get('messages') or [],
+            'output': (meta.get('output') or {}).get('messages') or []})
+        previous_end = e['start_ns'] + e['duration']
+    tools = [{'tool': e['name'], 'start_ms': _ms(e['start_ns'] - first), 'duration_ms': _ms(e['duration']),
+              'status': e['status'], **{k: v for k, v in (e['meta'].get('metadata') or {}).items()
+                                        if k in {'evidence_id', 'operation', 'matches', 'blocks', 'matched_rows'}}}
+             for e in events if kind(e) == 'tool']
+    largest = max(calls, key=lambda c: c['total_tokens'], default=None)
+    return {'totals': {
+                'llm_calls': len(calls), 'input_tokens': sum(c['input_tokens'] for c in calls),
+                'output_tokens': sum(c['output_tokens'] for c in calls),
+                'total_tokens': sum(c['total_tokens'] for c in calls),
+                'largest_call': largest['call'] if largest else None,
+                'duration_ms': _ms(end - first), 'model_ms': round(sum(c['duration_ms'] for c in calls), 1),
+                'models': sorted({c['model'] for c in calls if c['model']})},
+            'calls': calls, 'tools': tools}
+
+
+def _ms(nanoseconds):
+    return round(nanoseconds / 1e6, 1)
+
+===== REPOSITORY FILE =====
+{"path": "development/observability/streamlit_view.py", "characters": 2605, "sha256": "60e7ea4326c3d480c2ae1b7070992eb2f954af679802592ed3193e6d6ddbb174"}
+"""Streamlit panel for one question's captured model calls (see capture.py)."""
+import json
+
+import streamlit as st
+
+
+def show_llm_calls(summary, key):
+    """Totals, a call-by-call timeline, and the full prompt and response of a chosen call."""
+    calls, totals = summary['calls'], summary['totals']
+    if not calls:
+        return
+    with st.expander(f"Model calls ({totals['llm_calls']} · {totals['total_tokens']:,} tokens)"):
+        columns = st.columns(5)
+        columns[0].metric('Model calls', totals['llm_calls'])
+        columns[1].metric('Input tokens', f"{totals['input_tokens']:,}")
+        columns[2].metric('Output tokens', f"{totals['output_tokens']:,}")
+        columns[3].metric('Largest call', f"#{totals['largest_call']}",
+                          f"{calls[totals['largest_call'] - 1]['total_tokens']:,} tokens", delta_color='off')
+        columns[4].metric('Time in model', f"{totals['model_ms'] / 1000:.1f} s",
+                          f"of {totals['duration_ms'] / 1000:.1f} s total", delta_color='off')
+        st.dataframe([{k: c[k] for k in ('call', 'step', 'start_ms', 'gap_ms', 'duration_ms', 'input_tokens',
+                                          'output_tokens', 'total_tokens', 'stop_reason')}
+                      | {'tool_calls': ', '.join(c['tool_calls'])} for c in calls], hide_index=True)
+        if summary['tools']:
+            st.caption('Tool executions')
+            st.dataframe(summary['tools'], hide_index=True)
+        number = st.selectbox('Inspect call', [c['call'] for c in calls], key=f'{key}-call',
+                              format_func=lambda n: f"#{n} {calls[n - 1]['step']} "
+                                                    f"({calls[n - 1]['total_tokens']:,} tokens)")
+        call = calls[number - 1]
+        if not call['input']:
+            st.caption('Prompt text was not captured (TRACE_CONTENT is off).')
+        for label, messages in (('Prompt', call['input']), ('Response', call['output'])):
+            if messages:
+                st.markdown(f'**{label}**')
+                for message in messages:
+                    _show_message(message)
+
+
+def _show_message(message):
+    st.caption(message.get('role', ''))
+    if message.get('content'):
+        st.code(message['content'], language=None, wrap_lines=True)
+    for call in message.get('tool_calls') or []:
+        st.code(f"{call['name']}({json.dumps(call.get('arguments'), indent=2)})", language='json',
+                wrap_lines=True)
+    for result in message.get('tool_results') or []:
+        st.code(result.get('result', ''), language='json', wrap_lines=True)
+
+===== REPOSITORY FILE =====
 {"path": "development/scripts/__init__.py", "characters": 26, "sha256": "e239fbb8d2c3eb6e6a08a6460457534776279594b70f3fcf08ea171659a839b5"}
 """Scripts components."""
 
@@ -5918,7 +6070,7 @@ if __name__ == '__main__':
     print(create_samples('data'))
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/conftest.py", "characters": 2001, "sha256": "c58edf07da2e24c6b11b8c95f30a61d6dab1a67a31feb42b2435e063a94022b8"}
+{"path": "development/tests/conftest.py", "characters": 2391, "sha256": "55585330baaa3581128312d9ab2bae4da98a78130e197a5081192205d9ea38ce"}
 import pytest
 from development.scripts.make_samples import create_samples
 
@@ -5961,13 +6113,23 @@ def native_script(monkeypatch):
     return install
 
 
+@pytest.fixture(scope='session', autouse=True)
+def llm_capture():
+    """Datadog LLM Observability spans go to the local in-memory capture, as in the development apps."""
+    from development.observability import capture
+    capture.enable(content=False)
+    return capture
+
+
 @pytest.fixture(autouse=True)
 def isolated_audit(monkeypatch, tmp_path):
-    """Audit records from tests go to a temporary directory; tracing and content capture stay off."""
+    """Audit records from tests go to a temporary directory; prompt and response capture stays off."""
     monkeypatch.setenv('AUDIT_STORAGE', 'local')
     monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
-    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED', 'TRACING', 'TRACE_CONTENT']:
+    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED']:
         monkeypatch.delenv(name, raising=False)
+    # setenv, not delenv, so the value is restored even after an app under test changes it.
+    monkeypatch.setenv('TRACE_CONTENT', 'false')
     return tmp_path / 'audit'
 
 ===== REPOSITORY FILE =====
@@ -6375,7 +6537,7 @@ def test_numbers_inside_dates_do_not_verify_calculations():
                      {'E1': sources['E1'] + ' allowed 176'})['result'] == '126.00'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_app.py", "characters": 4463, "sha256": "35dc3745bef900f53eec5661f9d2ee72a271a7c688fd50eaf03677c3c5e9b538"}
+{"path": "development/tests/test_app.py", "characters": 5539, "sha256": "5f9d58c840c686844619fdefbbed142d41fa9f10596d7948c467c8ca6eced7a2"}
 from pathlib import Path
 import pytest
 
@@ -6426,6 +6588,25 @@ def test_chat_receives_selected_files_and_selection_change_clears_history(monkey
     assert app.session_state['messages'] == []
 
 
+def test_chat_shows_each_model_call_from_the_local_capture(native_script):
+    doc = saved('rates.txt', b'Plan Alpha member rate is USD 88 per month.')
+    native_script([{'tool': 'search_documents', 'parameters': {'query': 'Alpha rate', 'document_ids': [doc.id]}},
+                   {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
+    app = AppTest.from_file(str(APP)).run(timeout=20)
+    app.multiselect[0].set_value([key(doc)]).run()
+    app.chat_input[0].set_value('What is the member rate for plan Alpha?').run(timeout=20)
+    assert not app.exception
+    panel = next(e for e in app.expander if e.label.startswith('Model calls'))
+    assert panel.label == 'Model calls (3 · 45 tokens)'
+    assert [m.value for m in panel.metric][:3] == ['3', '30', '15']
+    picker = panel.selectbox[0]
+    assert picker.options == ['#1 Native Document Research (15 tokens)', '#2 Native Document Research (15 tokens)',
+                              '#3 Document Answer (15 tokens)']
+    picker.set_value(3).run()
+    panel = next(e for e in app.expander if e.label.startswith('Model calls'))
+    assert any('member rate is USD 88' in c.value for c in panel.code)  # the chosen call's response
+
+
 def test_clear_removes_session_documents():
     doc = saved('first.txt',b'Rate is USD 100.')
     app = AppTest.from_file(str(APP)).run(timeout=20)
@@ -6465,7 +6646,7 @@ def test_replacement_clears_old_conversation():
     assert list(app.session_state['documents']) == [replacement.id]
 
 
-def test_model_switch_clears_history_and_no_protocol_selector(monkeypatch):
+def test_model_switch_clears_history(monkeypatch):
     calls=[]
     def fake_run(docs,ids,question,**kwargs):
         calls.append(kwargs)
@@ -6479,8 +6660,6 @@ def test_model_switch_clears_history_and_no_protocol_selector(monkeypatch):
     next(s for s in app.selectbox if s.label=='Model').set_value('claude-sonnet-4.5').run()
     app.chat_input[0].set_value('Rate?').run(timeout=20)
     assert calls[-1]['model']=='claude-sonnet-4.5'
-    assert 'planner_mode' not in calls[-1]
-    assert not any(s.label=='Tool calling' for s in app.selectbox)
     next(s for s in app.selectbox if s.label=='Model').set_value('claude-haiku-4.5').run()
     assert app.session_state['messages']==[]
     assert not app.exception
@@ -6613,7 +6792,7 @@ def test_shared_tools_do_not_import_agents():
                 assert not any(alias.name.startswith('backend.agents') for alias in node.names)
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_document_protocol.py", "characters": 5925, "sha256": "d2a1240ce6ed974d917ae3ae7843547eda5aed23f6b9d99b60a57287144fcac6"}
+{"path": "development/tests/test_document_protocol.py", "characters": 6245, "sha256": "ad3b2dee2455835336f27c50847de7a6bdca5a28568997d1bd7e32224ba6ee47"}
 import copy
 import json
 import pytest
@@ -6621,7 +6800,8 @@ from backend.preprocessing.documents import ingest_document
 from backend.agents.native import NativePlanner, validate_action
 from backend.agents.document_protocol import tool_specs
 from backend.agents.document_agent import run_document_agent
-from backend.agents.llm import LLM, LLMCallLog
+from backend.agents.llm import LLM, Usage
+from development.observability import capture
 
 @pytest.mark.parametrize('action',[
     {'tool':'read_document','parameters':{'document_id':'outside'}},
@@ -6693,32 +6873,36 @@ def test_truncated_native_response_is_not_executed():
     assert planner.messages[-1]['content'][0]['toolResult']['toolUseId']=='a'
 
 
-def test_native_log_snapshots_are_immutable():
+def test_llm_span_records_the_call_as_sent(monkeypatch):
+    monkeypatch.setenv('TRACE_CONTENT','true')
     class Client:
         def converse(self,**kwargs):
             assert kwargs['inferenceConfig']['maxTokens']==100
             assert 'toolConfig' in kwargs
             return response([{'toolUseId':'a','name':'answer','input':{}}])
-    log=LLMCallLog()
-    llm=LLM(model_id='test',params={'maxTokens':100},call_log=log)
+    usage=Usage()
+    llm=LLM(model_id='test',params={'maxTokens':100},usage_meter=usage)
     llm._client=Client()
     messages=[{'role':'user','content':[{'text':'Question'}]}]
-    llm.converse('system',messages,{'tools':tool_specs(['selected'])})
+    with capture.recording() as events:
+        llm.converse('system',messages,{'tools':tool_specs(['selected'])})
     messages.append({'role':'assistant','content':[{'text':'later'}]})
-    assert len(log.records[0]['messages'])==1
-    assert log.records[0]['stop_reason']=='tool_use'
+    [call]=capture.summarize(events)['calls']
+    assert [m['role'] for m in call['input']]==['system','user'] and call['input'][1]['content']=='Question'
+    assert call['stop_reason']=='tool_use' and call['tool_calls']==['answer']
+    assert call['output'][0]['tool_calls'][0]['tool_id']=='a'
+    assert usage.totals()=={'llm_calls':1,'input_tokens':2,'output_tokens':1}
 
 
 @pytest.mark.parametrize('model',['maverick','claude-haiku-4.5','claude-sonnet-4.5','claude-opus-4.5'])
-def test_every_model_uses_native_even_with_obsolete_json_setting(monkeypatch,native_script,model):
+def test_every_model_uses_native_tools(monkeypatch,native_script,model):
     from backend.config.settings import MODELS
-    monkeypatch.setenv('DOCUMENTS_PLANNER_MODE','json')
     monkeypatch.delenv('BEDROCK_MODEL_ID',raising=False)
     doc=ingest_document('rates.txt',b'Rate USD 88.')
     requests=native_script([{'tool':'read_document','parameters':{'document_id':doc.id}},
                            {'tool':'answer','parameters':{}},'USD 88 [E1].'])
     result=run_document_agent({doc.id:doc},[doc.id],'Rate?',model=model)
-    assert result['protocol']['planner_mode']=='native'
+    assert result['status']=='answered'
     assert all(r['modelId']==MODELS[model] for r in requests)
     assert 'toolConfig' in requests[0] and 'toolConfig' in requests[1]
 
@@ -7069,7 +7253,7 @@ def test_spreadsheet_profiles_sample_data_rows_and_keep_narrative():
     assert 'SHEET INDEX' in text and f'first {SAMPLE_ROWS} rows' in text
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_entrypoint.py", "characters": 6721, "sha256": "5ccdfd2d63db151b4bd6f18dce210aa978ca0cf01533d696ccc58611cc953fcf"}
+{"path": "development/tests/test_entrypoint.py", "characters": 6709, "sha256": "5cf98885b0a50ed542acb0904935914e756abc11d37067219b364220795e115c"}
 import json
 
 import pytest
@@ -7193,7 +7377,7 @@ def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
     assert production == {'question', 'document_keys', 'history', 'session_id', 'clarification', 'model',
                           'ambiguity', 'app', 'store', 'sink'}
-    assert {'documents', 'on_step', 'call_log'} <= set(inspect.signature(ask_question_local).parameters)
+    assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 
 def test_local_entry_point_validates_the_same_way():
@@ -7246,7 +7430,7 @@ def test_duplicate_request_reuses_evidence(monkeypatch,insurance_workbook,native
     assert 'already_retrieved' in requests[2]['messages'][-1]['content'][0]['toolResult']['content'][0]['text']
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_filesystem_documents.py", "characters": 2399, "sha256": "d4459f58ba3e85e97879345ec1b364b631a14a68fa6f72ba066ec75bf09278a5"}
+{"path": "development/tests/test_filesystem_documents.py", "characters": 2391, "sha256": "bca41a67e67dfcd2056d994f1eba480bef1f38d851b177b3fec036b379ca042e"}
 import pytest
 from backend.storage.filesystem import LocalDocumentStore
 from backend.preprocessing.documents import ingest_document
@@ -7271,7 +7455,7 @@ def test_persistent_table_roundtrip(tmp_path):
     reader = LocalDocumentStore(tmp_path, read_only=True)
     loaded = reader.load(doc.storage_ref['manifest_key'])
     from backend.storage.tables import load_table
-    # Read the persisted CSV via the same object interface consumed by table backend.tools.
+    # Read the persisted CSV via the same object interface consumed by table tools.
     inputs = loaded.table_inputs
     sheet = next(iter(loaded.table_metadata['sheets'].values()))
     key = 'documents/preprocessed/claims.csv/' + sheet['csv_file']
@@ -7608,22 +7792,20 @@ def test_tie_prefers_readable_spelling_over_code():
     assert groups[0]['suggested'] == 'Tehran'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_observability.py", "characters": 11279, "sha256": "fa7c5284b6a297d34ef1d554e53e0de2e0d32894aa957e3857b71c780491cd4e"}
+{"path": "development/tests/test_observability.py", "characters": 12409, "sha256": "a29ea3d5247e15f47cdf564cde8b6859e75c84a346e774c4cb1e412aee230db2"}
 import json
 from pathlib import Path
 
 import pytest
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import StatusCode
+from ddtrace.llmobs import LLMObs
 from streamlit.testing.v1 import AppTest
 
 from backend.agents import document_agent
-from backend.observability import audit, tracing
+from backend.observability import audit, llmobs
 from backend.preprocessing.documents import ingest_document
 from backend.entrypoint import ask_question_local
 from backend.observability.audit import record_document_event
+from development.observability import capture
 
 QUESTION = 'What is the member rate for plan Alpha?'
 APPS = Path(__file__).resolve().parents[2] / 'apps'
@@ -7632,16 +7814,6 @@ APPS = Path(__file__).resolve().parents[2] / 'apps'
 def records(directory, tier, kind):
     files = sorted((directory / tier / kind).glob('*.jsonl'))
     return [json.loads(line) for f in files for line in f.read_text(encoding='utf-8').splitlines()]
-
-
-@pytest.fixture
-def spans(monkeypatch):
-    """Route spans to memory without touching the global tracer provider."""
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(tracing, 'tracer', lambda: provider.get_tracer('test'))
-    return exporter
 
 
 @pytest.fixture
@@ -7666,7 +7838,6 @@ def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audi
     assert meta['documents'][0]['id'] == rates_run.id and meta['documents'][0]['name'] == 'rates.txt'
     assert [e['tool'] for e in meta['evidence']] == ['search_documents']
     assert meta['evidence'][0]['locations'] == ['paragraph 1']
-    assert meta['llm_calls'][0]['tool_calls'] == ['search_documents']
     assert meta['totals'] == {'llm_calls': 3, 'input_tokens': 30, 'output_tokens': 15} == result['usage']
     assert not (isolated_audit / 'content').exists()
 
@@ -7678,7 +7849,7 @@ def test_content_tier_is_opt_in_and_separate(rates_run, isolated_audit, monkeypa
     [content] = records(isolated_audit, 'content', 'questions')
     assert meta['content_recorded'] and content['request_id'] == meta['request_id']
     assert content['question'] == QUESTION and 'USD 88' in content['answer']
-    assert len(content['llm_calls']) == 3
+    assert 'llm_calls' not in content  # per-call prompts are in Datadog LLM Observability
 
 
 def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
@@ -7742,59 +7913,88 @@ def test_audit_storage_modes(monkeypatch):
         audit.configured_audit_sink()
 
 
-def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, isolated_audit):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test',
-                             session_id='s1')
-    finished = spans.get_finished_spans()
-    by_id = {s.context.span_id: s for s in finished}
-    [root] = [s for s in finished if s.name == 'invoke_agent document_agent']
-    assert {s.context.trace_id for s in finished} == {root.context.trace_id}
-    assert result['trace_id'] == format(root.context.trace_id, '032x')
+def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, isolated_audit):
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    events = capture.trace(result['trace_id'])
+    by_id = {e['span_id']: e for e in events}
+    [root] = [e for e in events if capture.kind(e) == 'agent']
+    assert root['name'] == 'document_agent' and root['parent_id'] == 'undefined'
     assert records(isolated_audit, 'metadata', 'questions')[0]['trace_id'] == result['trace_id']
-    assert root.attributes['session.id'] == 's1' and root.attributes['gen_ai.operation.name'] == 'invoke_agent'
+    assert root['session_id'] == 's1' and 'app:test' in root['tags'] and root['status'] == 'ok'
+    assert root['meta']['metadata']['request_id'] == result['request_id']
+    assert root['meta']['metadata']['status'] == 'answered'
 
-    nodes = [s for s in finished if s.name.startswith('graph.node')]
-    assert {s.attributes['app.graph.node'] for s in nodes} >= {'init', 'plan', 'tools', 'synthesize'}
-    assert all(s.parent.span_id == root.context.span_id for s in nodes)
+    nodes = [e for e in events if capture.kind(e) == 'workflow']
+    assert {e['name'] for e in nodes} >= {'init', 'plan', 'tools', 'synthesize'}
+    assert all(e['parent_id'] == root['span_id'] for e in nodes)
 
-    chats = [s for s in finished if s.name.startswith('chat ')]
-    assert len(chats) == 3
-    assert all(by_id[s.parent.span_id].name.startswith('graph.node') for s in chats)
-    assert chats[0].attributes['gen_ai.usage.input_tokens'] == 10
-    assert chats[0].attributes['app.llm.tool_calls'] == ('search_documents',)
-    assert chats[-1].attributes['app.llm.step'] == 'Document Answer'
+    calls = [e for e in events if capture.kind(e) == 'llm']
+    assert len(calls) == 3
+    assert all(capture.kind(by_id[e['parent_id']]) == 'workflow' for e in calls)
+    assert calls[0]['metrics'] == {'input_tokens': 10, 'output_tokens': 5, 'total_tokens': 15}
+    assert calls[0]['meta']['metadata']['tool_calls'] == ['search_documents']
+    assert calls[0]['meta']['model_provider'] == 'amazon_bedrock'
+    assert calls[-1]['name'] == 'Document Answer'
 
-    [tool] = [s for s in finished if s.name == 'execute_tool search_documents']
-    assert by_id[tool.parent.span_id].attributes['app.graph.node'] == 'tools'
-    assert tool.attributes['app.document_ids'] == (rates_run.id,) and tool.attributes['app.evidence_id'] == 'E1'
-    # No prompt or answer text unless TRACE_CONTENT=true.
-    assert not any(s.events for s in finished)
-    assert 'Alpha' not in json.dumps([dict(s.attributes) for s in finished])
+    [tool] = [e for e in events if capture.kind(e) == 'tool']
+    assert tool['name'] == 'search_documents' and by_id[tool['parent_id']]['name'] == 'tools'
+    assert tool['meta']['metadata']['document_ids'] == [rates_run.id]
+    assert tool['meta']['metadata']['evidence_id'] == 'E1'
+    # No prompt, question, answer or tool parameter text unless TRACE_CONTENT=true.
+    assert not any(e['meta'].get('input') or e['meta'].get('output') for e in events)
+    assert 'Alpha' not in json.dumps(events)
 
 
-def test_trace_content_is_opt_in(rates_run, spans, monkeypatch):
+def test_trace_content_is_opt_in(rates_run, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    ask_question_local(QUESTION, documents=[rates_run], app='test')
-    chat = next(s for s in spans.get_finished_spans() if s.name.startswith('chat '))
-    assert {e.name for e in chat.events} == {'gen_ai.input', 'gen_ai.output'}
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    events = capture.trace(result['trace_id'])
+    root = next(e for e in events if capture.kind(e) == 'agent')
+    assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
+    call = capture.summarize(events)['calls'][0]
+    assert [m['role'] for m in call['input']] == ['system', 'user'] and 'Alpha' in call['input'][1]['content']
+    assert call['output'][0]['tool_calls'][0]['name'] == 'search_documents'
 
 
-def test_tool_errors_mark_their_span(native_script, spans):
+def test_summary_reports_totals_largest_call_and_gaps(rates_run):
+    summary = capture.summarize(capture.trace(ask_question_local(QUESTION, documents=[rates_run])['trace_id']))
+    totals, calls = summary['totals'], summary['calls']
+    assert {k: totals[k] for k in ('llm_calls', 'input_tokens', 'output_tokens', 'total_tokens')} == {
+        'llm_calls': 3, 'input_tokens': 30, 'output_tokens': 15, 'total_tokens': 45}
+    assert totals['largest_call'] == 1 and totals['models']
+    assert [c['call'] for c in calls] == [1, 2, 3] and calls[0]['gap_ms'] is None
+    assert all(c['gap_ms'] >= 0 for c in calls[1:])
+    assert [c['start_ms'] for c in calls] == sorted(c['start_ms'] for c in calls)
+    assert [t['tool'] for t in summary['tools']] == ['search_documents']
+
+
+def test_runs_unchanged_without_datadog(rates_run, monkeypatch):
+    monkeypatch.setattr(LLMObs, 'enabled', False)
+    with capture.recording() as events:
+        result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    assert result['status'] == 'answered' and result['trace_id'] is None and result['usage']['llm_calls'] == 3
+    assert events == []
+
+
+def test_tool_errors_mark_their_span(native_script):
     doc = ingest_document('rates.txt', b'USD 88')
     # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
     native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
                    {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
-    ask_question_local('Rate?', documents=[doc], app='test')
-    tool = next(s for s in spans.get_finished_spans() if s.name == 'execute_tool calculate')
-    assert tool.status.status_code == StatusCode.ERROR
+    result = ask_question_local('Rate?', documents=[doc], app='test')
+    tool = next(e for e in capture.trace(result['trace_id']) if e['name'] == 'calculate')
+    assert tool['status'] == 'error'
 
 
 def test_document_events_record_hashes_not_contents(isolated_audit):
     content = b'Plan Alpha member rate is USD 88.'
     doc = ingest_document('rates.txt', content)
-    record_document_event('document_uploaded', app='upload', document=doc, content=content,
-                          details={'profile_generated': False})
+    with llmobs.span('workflow', 'ingest_document') as current:
+        record_document_event('document_uploaded', app='upload', document=doc, content=content,
+                              details={'profile_generated': False})
+        trace_id = llmobs.trace_id_of(current)
     [event] = records(isolated_audit, 'metadata', 'documents')
+    assert event['trace_id'] == trace_id is not None
     assert event['event'] == 'document_uploaded' and event['filename'] == 'rates.txt'
     assert event['size_bytes'] == len(content) and len(event['content_sha256']) == 64
     assert 'Alpha' not in json.dumps(event)
@@ -8483,7 +8683,7 @@ testpaths = development/tests
 pytest>=8,<10
 
 ===== REPOSITORY FILE =====
-{"path": "requirements.txt", "characters": 242, "sha256": "0f1bfba14ed3964ba0829ad9e6b4c9cda4a517e7fbe1c8206a16d1c4f03edb3c"}
+{"path": "requirements.txt", "characters": 403, "sha256": "e9e6d7814286c7142a399c32c5ae652db293a3da16146741a944739488dff95a"}
 boto3>=1.38,<2
 botocore[crt]>=1.38,<2
 pandas>=2.2,<4
@@ -8495,8 +8695,9 @@ pypdf>=5,<7
 python-docx>=1.1,<2
 streamlit>=1.45,<2
 jsonschema>=4.23,<5
-opentelemetry-api>=1.27,<2
-opentelemetry-sdk>=1.27,<2
+# Datadog LLM Observability. In AWS Lambda the Datadog-Python layer provides ddtrace; do not bundle it.
+# Pinned to a minor version: development/observability/capture.py uses a ddtrace internal.
+ddtrace>=4.15,<4.16
 
 ===== REPOSITORY FILE =====
 {"path": "transfer/create_bundle.py", "characters": 2196, "sha256": "8ed73770a039ecd8fca7a9cb55ad0f78f6c0fc686deefe1b84bdbdd926d67db5"}

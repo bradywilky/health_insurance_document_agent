@@ -9,15 +9,6 @@ from dotenv import load_dotenv
 from backend.config.settings import MODELS
 
 
-def save_profiles(docs, output):
-    """Write generated profiles next to the results for human review."""
-    import json as _json
-    folder = output.with_name(output.stem + '-profiles')
-    folder.mkdir(parents=True, exist_ok=True)
-    for doc in docs:
-        (folder / (doc.name + '.json')).write_text(_json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
-
-
 def main():
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -34,9 +25,10 @@ def main():
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
     from backend.storage.local import prepare_local_file
-    from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent
     from backend.preprocessing.documents import document_from_table_inputs
+    from development.observability import capture
+    capture.enable(content=bool(args.traces))
     questions = json.loads(args.questions.read_text(encoding='utf-8'))
     if args.case:
         unknown = set(args.case) - {q['id'] for q in questions}
@@ -46,32 +38,34 @@ def main():
     doc = document_from_table_inputs(**prepare_local_file(args.file))
     if args.enrich:
         from backend.agents.enrichment import make_enricher
+        from development.evaluation.documents import save_profiles
         doc.profile = make_enricher()(doc)
         save_profiles([doc], args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation protects earlier evaluation evidence.
     with args.output.open('x', encoding='utf-8') as output:
         for q in questions:
-            log = LLMCallLog()
             start = time.monotonic()
-            record = {'case': q['id'], 'model': args.model, 'planner_mode':'native', 'question': q['question'],
+            record = {'case': q['id'], 'model': args.model, 'question': q['question'],
                       'expected': q['expected'], 'expected_sheets': q['sheets']}
-            try:
-                # Expected answers are deliberately never sent to the agent.
-                result = run_document_agent({doc.id: doc}, [doc.id], q['question'], call_log=log, model=args.model)
-                record.update(answer=result['answer'], evidence=result['evidence'],
-                              limitations=result['limitations'], protocol=result['protocol'])
-                record['status'] = 'needs_human_review'
-            except Exception as exc:
-                record.update(status='error', error=f'{type(exc).__name__}: {exc}')
-            record.update(duration_seconds=round(time.monotonic()-start, 2), calls=len(log.records),
-                          input_tokens=sum(r['usage'].get('inputTokens', 0) for r in log.records),
-                          output_tokens=sum(r['usage'].get('outputTokens', 0) for r in log.records))
-            record['invoked_model_ids'] = sorted({r['model_id'] for r in log.records})
+            with capture.recording() as events:
+                try:
+                    # Expected answers are deliberately never sent to the agent.
+                    result = run_document_agent({doc.id: doc}, [doc.id], q['question'], model=args.model)
+                    record.update(answer=result['answer'], evidence=result['evidence'],
+                                  limitations=result['limitations'], protocol=result['protocol'])
+                    record['status'] = 'needs_human_review'
+                except Exception as exc:
+                    record.update(status='error', error=f'{type(exc).__name__}: {exc}')
+            summary = capture.summarize(events)
+            totals = summary['totals']
+            record.update(duration_seconds=round(time.monotonic()-start, 2), calls=totals['llm_calls'],
+                          input_tokens=totals['input_tokens'], output_tokens=totals['output_tokens'])
+            record['invoked_model_ids'] = totals['models']
             if args.traces:
                 args.traces.mkdir(parents=True, exist_ok=True)
                 with (args.traces / f"{q['id']}.json").open('x', encoding='utf-8') as trace:
-                    json.dump(log.records, trace, default=str, indent=2)
+                    json.dump(summary, trace, default=str, indent=2)
             output.write(json.dumps(record, default=str) + '\n')
             output.flush()
             print(f"{q['id']}: {record['status']} ({record['calls']} calls)", flush=True)

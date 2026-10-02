@@ -1,4 +1,4 @@
-"""Read preprocessed table CSVs through either local or S3 backend.storage."""
+"""Read preprocessed table CSVs through either local or S3 storage."""
 import io
 import pandas as pd
 

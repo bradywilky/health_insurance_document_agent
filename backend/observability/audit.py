@@ -4,8 +4,11 @@ Two tiers, written to separate locations so they can have separate access polici
 
 metadata  always written. Who asked, when, which documents, model, prompt and code versions, status, tools
           used, evidence locations, tokens and timings. Questions and answers appear only as SHA-256 hashes.
-content   written only when AUDIT_CONTENT=true. Question, answer, evidence and the full model call log. It can
-          contain PHI; store it under a restricted prefix with its own KMS key and retention.
+content   written only when AUDIT_CONTENT=true. Question, answer and evidence. It can contain PHI; store it
+          under a restricted prefix with its own KMS key and retention.
+
+Per-call prompts, responses, tokens and timings are in Datadog LLM Observability (backend/observability/llmobs.py);
+each record's trace_id finds its trace there.
 
 AUDIT_STORAGE=local (default)  JSON lines under AUDIT_LOCAL_DIR (default data/audit)
 AUDIT_STORAGE=s3               one object per record under AUDIT_S3_BUCKET (default DOCUMENTS_S3_BUCKET)
@@ -22,8 +25,7 @@ from pathlib import Path
 import threading
 import uuid
 
-SCHEMA_VERSION = 1
-TIERS = ('metadata', 'content')
+SCHEMA_VERSION = 2
 logger = logging.getLogger(__name__)
 _code_version = None
 
@@ -191,26 +193,8 @@ def evidence_summary(evidence):
     return out
 
 
-def call_summary(records):
-    out = []
-    for r in records or []:
-        message = r.get('output_raw')  # the Bedrock output message
-        content = message.get('content', []) if isinstance(message, dict) else []
-        out.append({'step': r.get('tool_name'), 'model_id': r.get('model_id'), 'duration_ms': r.get('duration_ms'),
-                    'stop_reason': r.get('stop_reason'), 'input_tokens': (r.get('usage') or {}).get('inputTokens'),
-                    'output_tokens': (r.get('usage') or {}).get('outputTokens'),
-                    'tool_calls': [b['toolUse']['name'] for b in content if isinstance(b, dict) and 'toolUse' in b]})
-    return out
-
-
-def totals(records):
-    return {'llm_calls': len(records or []),
-            'input_tokens': sum((r.get('usage') or {}).get('inputTokens', 0) for r in records or []),
-            'output_tokens': sum((r.get('usage') or {}).get('outputTokens', 0) for r in records or [])}
-
-
 def question_records(*, request_id, timestamp, app, session_id, model, ambiguity, prompt_version,
-                     documents, question, clarification, result, call_records, duration_ms, error, trace_id):
+                     documents, question, clarification, result, usage, duration_ms, error, trace_id):
     """Metadata record (always) and content record (AUDIT_CONTENT=true) for one question."""
     result = result or {}
     metadata = {
@@ -223,8 +207,8 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
         'answer_sha256': digest(result['answer']) if result.get('answer') else None,
         'protocol': result.get('protocol'), 'coverage': result.get('coverage'),
         'limitations_count': len(result.get('limitations') or []),
-        'evidence': evidence_summary(result.get('evidence')), 'llm_calls': call_summary(call_records),
-        'totals': totals(call_records), 'duration_ms': duration_ms, 'error': error, 'trace_id': trace_id,
+        'evidence': evidence_summary(result.get('evidence')), 'totals': usage,
+        'duration_ms': duration_ms, 'error': error, 'trace_id': trace_id,
         'content_recorded': content_enabled()}
     records = [('metadata', 'questions', metadata)]
     if content_enabled():
@@ -233,16 +217,15 @@ def question_records(*, request_id, timestamp, app, session_id, model, ambiguity
             'timestamp': timestamp, 'question': question, 'clarification': clarification,
             'answer': result.get('answer'), 'interpretation': result.get('interpretation'),
             'clarification_request': result.get('clarification'), 'limitations': result.get('limitations'),
-            'evidence': result.get('evidence'), 'llm_calls': call_records}))
+            'evidence': result.get('evidence')}))
     return records
 
 
 def record_document_event(event, *, app, sink=None, **fields):
     """Audit an upload or profile change. Never raises unless AUDIT_REQUIRED=true."""
-    from opentelemetry import trace
-    from backend.observability import tracing
+    from backend.observability import llmobs
     write(sink if sink is not None else configured_audit_sink(),
-          document_event(event, app=app, trace_id=tracing.trace_id_of(trace.get_current_span()), **fields))
+          document_event(event, app=app, trace_id=llmobs.current_trace_id(), **fields))
 
 
 def document_event(event, *, app, document=None, filename=None, content=None, details=None, error=None,

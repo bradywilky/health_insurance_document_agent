@@ -12,9 +12,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from backend.agents.document_agent import run_document_agent
-from backend.agents.llm import LLMCallLog
 from backend.config.settings import MODELS
 from backend.preprocessing.documents import ingest_document
+from development.observability import capture
 
 
 def main():
@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--case', action='append')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    capture.enable(content=False)
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
     root = (args.root or args.questions.parent).resolve()
@@ -44,19 +45,20 @@ def main():
                     path = (root / name).resolve()
                     loaded[name] = ingest_document(path.name, path.read_bytes())
             docs = {loaded[n].id: loaded[n] for n in case['files']}
-            log, start = LLMCallLog(), time.monotonic()
+            start = time.monotonic()
             record = {'id': case['id'], 'model': args.model, 'mode': args.mode, 'question': case['question'],
                       'labeled_ambiguous': case['ambiguous'], 'note': case.get('note', '')}
             try:
-                result = run_document_agent(docs, list(docs), case['question'], call_log=log, model=args.model,
-                                            ambiguity=args.mode)
+                with capture.recording() as events:
+                    result = run_document_agent(docs, list(docs), case['question'], model=args.model,
+                                                ambiguity=args.mode)
                 record.update(decision=result['protocol'].get('ambiguity_decision'), status=result['status'],
                               assessment=result['protocol'].get('ambiguity_assessment'),
                               clarification=result.get('clarification'), interpretation=result.get('interpretation'),
                               answer=result['answer'])
             except Exception as exc:
                 record.update(status='error', error=f'{type(exc).__name__}: {exc}')
-            record.update(seconds=round(time.monotonic() - start, 2), calls=len(log.records))
+            record.update(seconds=round(time.monotonic() - start, 2), calls=len([e for e in events if capture.kind(e) == 'llm']))
             out.write(json.dumps(record, default=str) + '\n')
             out.flush()
             print(f"{case['id']}: {record.get('decision', record['status'])}", flush=True)

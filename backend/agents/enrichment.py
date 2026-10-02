@@ -236,7 +236,7 @@ def enrich(doc, llm):
     return profile
 
 
-def make_enricher(model=None, call_log=None):
+def make_enricher(model=None):
     """Callable for ingest_document(enrich=...). Uses ENRICHMENT_MODEL (default maverick) unless given."""
     import os
     from backend.agents.llm import LLM
@@ -246,5 +246,5 @@ def make_enricher(model=None, call_log=None):
         raise ValueError(f'Enrichment model must be one of {list(MODELS)}')
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Document Enrichment',
-              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[name], params=inference, call_log=call_log)
+              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[name], params=inference)
     return lambda doc: enrich(doc, llm)

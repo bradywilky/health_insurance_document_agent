@@ -9,5 +9,6 @@ pypdf>=5,<7
 python-docx>=1.1,<2
 streamlit>=1.45,<2
 jsonschema>=4.23,<5
-opentelemetry-api>=1.27,<2
-opentelemetry-sdk>=1.27,<2
+# Datadog LLM Observability. In AWS Lambda the Datadog-Python layer provides ddtrace; do not bundle it.
+# Pinned to a minor version: development/observability/capture.py uses a ddtrace internal.
+ddtrace>=4.15,<4.16

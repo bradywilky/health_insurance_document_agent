@@ -1,4 +1,4 @@
-"""Local defaults; deployment may retain its existing config_utils implementation."""
+"""Bedrock model choices and inference settings, read from the environment."""
 import os
 
 MODELS = {
@@ -9,7 +9,7 @@ MODELS = {
 }
 
 
-def get_model_config(alias="UNALIASED"):
+def get_model_config():
     model = os.getenv("TABLES_MODEL", "maverick").lower()
     if model not in MODELS:
         raise ValueError(f"TABLES_MODEL must be one of {list(MODELS)}")

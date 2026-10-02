@@ -1,1 +1,1 @@
-"""Audit records and tracing."""
+"""Audit records and Datadog LLM Observability spans."""

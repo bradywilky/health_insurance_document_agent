@@ -1,4 +1,4 @@
-"""Document records shared by ingestion, storage and backend.agents."""
+"""Document records shared by ingestion, storage and agents."""
 from dataclasses import dataclass, field
 
 

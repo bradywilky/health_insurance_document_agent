@@ -4,10 +4,16 @@ from dotenv import load_dotenv
 load_dotenv()
 import uuid
 import streamlit as st
-from backend.observability.tracing import configure_tracing
 from backend.entrypoint import ask_question_local
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
+from development.observability import capture
+from development.observability.streamlit_view import show_llm_calls
+
+# Capture model calls locally unless this process sends them to Datadog (DD_LLMOBS_ENABLED=true).
+LOCAL_CAPTURE = os.getenv('DD_LLMOBS_ENABLED', '').strip().lower() not in {'1', 'true'}
+if LOCAL_CAPTURE:
+    capture.enable()
 
 AMBIGUITY_MODES = {'Off: answer directly': 'off', 'State assumptions': 'assumptions',
                    'Ask when ambiguous': 'ask'}
@@ -17,7 +23,6 @@ st.title('Health Insurance Document Agent')
 st.caption('Choose your sources. Ask a question. Check the evidence.')
 st.session_state.setdefault('messages', [])
 st.session_state.setdefault('session_id', uuid.uuid4().hex)
-configure_tracing()
 st.session_state.setdefault('selection_signature', ())
 try:
     store = configured_store(read_only=True)
@@ -95,7 +100,7 @@ def show_evidence(response):
         st.caption(response['interpretation']['note'])
     protocol = response.get('protocol')
     if protocol:
-        st.caption(f"{protocol['planner_mode']} tools · {protocol['repair_attempts']} corrective retries")
+        st.caption(f"{protocol['repair_attempts']} corrective retries")
     for warning in response.get('limitations',[]):
         st.warning(warning)
     with st.expander('Evidence used'):
@@ -121,6 +126,12 @@ def show_evidence(response):
                 st.caption('This evidence contains only part of the available text.')
 
 
+def show_trace(response):
+    """Local development only: every model call behind this answer (see development/observability)."""
+    if response.get('llm_trace'):
+        show_llm_calls(response['llm_trace'], key=response['request_id'])
+
+
 def ask(question, clarification=None):
     """Run the agent. A clarification re-runs the original question with the reading the user chose."""
     shown = f'{question}\n\n*Meaning: {clarification}*' if clarification else question
@@ -135,9 +146,12 @@ def ask(question, clarification=None):
                                 clarification=clarification, model=model, ambiguity=ambiguity, app='chat',
                                 on_step=lambda _:status.caption('Checking the selected sources…'))
         status.empty()
+        if LOCAL_CAPTURE and response['trace_id']:
+            response['llm_trace'] = capture.summarize(capture.trace(response['trace_id']))
         if response['status'] in {'answered', 'needs_clarification'}:
             st.markdown(response['answer'])
             show_evidence(response)
+            show_trace(response)
             st.caption(f"{response['usage']['llm_calls']} model calls · "
                        f"{response['usage']['input_tokens']:,} input tokens · "
                        f"reference {response['request_id'][:12]}")
@@ -147,10 +161,12 @@ def ask(question, clarification=None):
                 st.rerun()  # redraw so the reading buttons appear
         elif response['status'] == 'no_evidence':
             st.info(response['message'])
+            show_trace(response)
             st.session_state.messages.append({'role':'assistant','content':response['message'],'result':response,
                                               'question':question})
         else:
             st.error(response['message'] + f" (reference {response['request_id'][:12]})")
+            show_trace(response)
 
 
 def pending_clarification():
@@ -180,6 +196,7 @@ for index, message in enumerate(st.session_state.messages):
         st.markdown(message['content'])
         if 'result' in message:
             show_evidence(message['result'])
+            show_trace(message['result'])
 
 waiting = pending_clarification()
 typed = st.chat_input('Describe what you meant' if waiting else 'Ask about the selected files',

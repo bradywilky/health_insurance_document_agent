@@ -89,7 +89,6 @@ def execute_table_tool(
     plan_domain: str,
     filename: str,
     metadata: dict,
-    call_log=None,
 ) -> dict:
     sheet_name = tool_input.get("sheet_name")
     sheets = metadata.get("sheets", {})

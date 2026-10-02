@@ -40,11 +40,21 @@ def native_script(monkeypatch):
     return install
 
 
+@pytest.fixture(scope='session', autouse=True)
+def llm_capture():
+    """Datadog LLM Observability spans go to the local in-memory capture, as in the development apps."""
+    from development.observability import capture
+    capture.enable(content=False)
+    return capture
+
+
 @pytest.fixture(autouse=True)
 def isolated_audit(monkeypatch, tmp_path):
-    """Audit records from tests go to a temporary directory; tracing and content capture stay off."""
+    """Audit records from tests go to a temporary directory; prompt and response capture stays off."""
     monkeypatch.setenv('AUDIT_STORAGE', 'local')
     monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
-    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED', 'TRACING', 'TRACE_CONTENT']:
+    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED']:
         monkeypatch.delenv(name, raising=False)
+    # setenv, not delenv, so the value is restored even after an app under test changes it.
+    monkeypatch.setenv('TRACE_CONTENT', 'false')
     return tmp_path / 'audit'

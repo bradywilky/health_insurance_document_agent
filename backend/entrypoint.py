@@ -2,7 +2,7 @@
 
 ask_question is the production entry point (the Lambda handler calls it with saved-document keys).
 ask_question_local is for development callers (the Streamlit app, the command-line tool, tests): it takes
-already-loaded documents and adds progress and trace hooks. Both validate the request, load the documents, run
+already-loaded documents and adds a progress hook. Both validate the request, load the documents, run
 the agent, write the audit record and trace, and return the same JSON-serializable response, whose `status`
 tells the caller what happened:
 
@@ -23,9 +23,9 @@ import time
 
 from backend.agents import ambiguity as amb
 from backend.agents import document_agent
-from backend.agents.llm import LLMCallLog
+from backend.agents.llm import Usage
 from backend.config.settings import MODELS
-from backend.observability import audit, tracing
+from backend.observability import audit, llmobs
 
 MAX_DOCUMENTS = 10
 MAX_QUESTION_CHARS = 4000
@@ -72,40 +72,38 @@ def ask_question(question, *, document_keys, history=None, session_id=None, clar
 
 
 def ask_question_local(question, *, documents, history=None, session_id=None, clarification=None, model=None,
-                       ambiguity='off', app='local', sink=None, on_step=None, call_log=None):
+                       ambiguity='off', app='local', sink=None, on_step=None):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
     documents      Document objects (e.g. a local file that was never saved to the document store)
     on_step        callback after each research step, for a progress display
-    call_log       LLMCallLog that receives every prompt and response, e.g. to save a trace file
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
                 session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
-                sink=sink, on_step=on_step, call_log=call_log)
+                sink=sink, on_step=on_step)
 
 
 def _run(question, *, selected, load, history, session_id, clarification, model, ambiguity, app, sink,
-         on_step=None, call_log=None):
+         on_step=None):
     """Validate, load, run the agent, audit and trace. Shared by both entry points."""
     sink = sink if sink is not None else audit.configured_audit_sink()
-    log = call_log if call_log is not None else LLMCallLog()
+    usage = Usage()
     request_id, timestamp, start = audit.new_id(), audit.now(), time.monotonic()
     loaded, result, error, status = [], None, None, 'error'
-    with tracing.span('invoke_agent document_agent', **{
-            'gen_ai.operation.name': 'invoke_agent', 'gen_ai.agent.name': 'document_agent',
-            'session.id': session_id, 'app.request_id': request_id, 'app.name': app,
-            'app.ambiguity_mode': ambiguity, 'app.model': model}) as root:
-        trace_id = tracing.trace_id_of(root)
-        tracing.add_content(root, 'app.question', question=question, clarification=clarification)
+    with llmobs.span('agent', 'document_agent', session_id=session_id) as root:
+        trace_id = llmobs.trace_id_of(root)
+        llmobs.annotate(root, metadata={'request_id': request_id, 'ambiguity_mode': ambiguity, 'model': model},
+                        tags={'app': app})
+        llmobs.annotate_content(root, input_data={'question': question, 'clarification': clarification})
         try:
             question, history, clarification = _validate(question, history, clarification, model, ambiguity,
                                                          selected)
             loaded = load()
-            tracing.set_attributes(root, **{'app.document_ids': [d.id for d in loaded]})
+            llmobs.annotate(root, metadata={'document_ids': [d.id for d in loaded]})
             # Module attribute, so tests can replace the agent.
             result = document_agent.run_document_agent(
-                {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, call_log=log,
+                {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, usage=usage,
                 on_step=on_step, model=model, ambiguity=ambiguity, clarification=clarification)
             status = result.get('status') or 'answered'
         except RequestError as exc:
@@ -113,15 +111,16 @@ def _run(question, *, selected, load, history, session_id, clarification, model,
         except Exception as exc:
             status, error = classify(exc), f'{type(exc).__name__}: {exc}'[:1000]
             logger.exception('Question %s failed', request_id)
-        tracing.set_attributes(root, **{'app.status': status})
+        llmobs.annotate(root, metadata={'status': status}, tags={'status': status})
+        llmobs.annotate_content(root, output_data=(result or {}).get('answer'))
         if status not in {'answered', 'needs_clarification', 'no_evidence'}:
-            tracing.mark_error(root, error or status)
-        response = _response(status, result, error, loaded, request_id, trace_id, session_id, question, log)
+            llmobs.mark_error(root, error or status)
+        response = _response(status, result, error, loaded, request_id, trace_id, session_id, question, usage)
         audit.write(sink, audit.question_records(
             request_id=request_id, timestamp=timestamp, app=app, session_id=session_id,
             model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
             documents=[audit.document_summary(d) for d in loaded], question=question,
-            clarification=clarification, result={**(result or {}), 'status': status}, call_records=log.records,
+            clarification=clarification, result={**(result or {}), 'status': status}, usage=usage.totals(),
             duration_ms=round((time.monotonic() - start) * 1000), error=error, trace_id=trace_id))
     return response
 
@@ -199,7 +198,7 @@ def sources(evidence):
     return out
 
 
-def _response(status, result, error, loaded, request_id, trace_id, session_id, question, log):
+def _response(status, result, error, loaded, request_id, trace_id, session_id, question, usage):
     result = result or {}
     interpretation = result.get('interpretation')
     if interpretation and interpretation.get('alternatives'):
@@ -220,7 +219,7 @@ def _response(status, result, error, loaded, request_id, trace_id, session_id, q
         'sources': sources(result.get('evidence')), 'evidence': result.get('evidence', []),
         'limitations': result.get('limitations', []), 'coverage': result.get('coverage'),
         'interpretation': interpretation, 'clarification': clarification if status == 'needs_clarification' else None,
-        'protocol': result.get('protocol'), 'usage': audit.totals(log.records),
+        'protocol': result.get('protocol'), 'usage': usage.totals(),
         'error': {'type': error.split(':', 1)[0], 'message': error} if error and status not in {
             'invalid_request', 'documents_unavailable'} else None,
     }

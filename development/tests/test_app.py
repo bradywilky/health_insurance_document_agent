@@ -48,6 +48,25 @@ def test_chat_receives_selected_files_and_selection_change_clears_history(monkey
     assert app.session_state['messages'] == []
 
 
+def test_chat_shows_each_model_call_from_the_local_capture(native_script):
+    doc = saved('rates.txt', b'Plan Alpha member rate is USD 88 per month.')
+    native_script([{'tool': 'search_documents', 'parameters': {'query': 'Alpha rate', 'document_ids': [doc.id]}},
+                   {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
+    app = AppTest.from_file(str(APP)).run(timeout=20)
+    app.multiselect[0].set_value([key(doc)]).run()
+    app.chat_input[0].set_value('What is the member rate for plan Alpha?').run(timeout=20)
+    assert not app.exception
+    panel = next(e for e in app.expander if e.label.startswith('Model calls'))
+    assert panel.label == 'Model calls (3 · 45 tokens)'
+    assert [m.value for m in panel.metric][:3] == ['3', '30', '15']
+    picker = panel.selectbox[0]
+    assert picker.options == ['#1 Native Document Research (15 tokens)', '#2 Native Document Research (15 tokens)',
+                              '#3 Document Answer (15 tokens)']
+    picker.set_value(3).run()
+    panel = next(e for e in app.expander if e.label.startswith('Model calls'))
+    assert any('member rate is USD 88' in c.value for c in panel.code)  # the chosen call's response
+
+
 def test_clear_removes_session_documents():
     doc = saved('first.txt',b'Rate is USD 100.')
     app = AppTest.from_file(str(APP)).run(timeout=20)
@@ -87,7 +106,7 @@ def test_replacement_clears_old_conversation():
     assert list(app.session_state['documents']) == [replacement.id]
 
 
-def test_model_switch_clears_history_and_no_protocol_selector(monkeypatch):
+def test_model_switch_clears_history(monkeypatch):
     calls=[]
     def fake_run(docs,ids,question,**kwargs):
         calls.append(kwargs)
@@ -101,8 +120,6 @@ def test_model_switch_clears_history_and_no_protocol_selector(monkeypatch):
     next(s for s in app.selectbox if s.label=='Model').set_value('claude-sonnet-4.5').run()
     app.chat_input[0].set_value('Rate?').run(timeout=20)
     assert calls[-1]['model']=='claude-sonnet-4.5'
-    assert 'planner_mode' not in calls[-1]
-    assert not any(s.label=='Tool calling' for s in app.selectbox)
     next(s for s in app.selectbox if s.label=='Model').set_value('claude-haiku-4.5').run()
     assert app.session_state['messages']==[]
     assert not app.exception

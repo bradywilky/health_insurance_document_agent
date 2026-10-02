@@ -1,6 +1,6 @@
 # Health Insurance Document Agent
 
-`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table backend.tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
+`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
 
 ## Project layout
 
@@ -17,7 +17,7 @@ backend/         Reusable application backend
   storage/       Local/S3 persistence and table loading
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
-  observability/ Audit records and OpenTelemetry spans
+  observability/ Audit records and Datadog LLM Observability spans
 apps/            Replaceable Streamlit interfaces
   api/           AWS Lambda handler that calls ask_question
   chat/app.py    Saved-document selection and questions (port 8501)
@@ -25,13 +25,13 @@ apps/            Replaceable Streamlit interfaces
 development/     Utilities and tests, not required by the backend
   cli/           Single-file command-line runner
   evaluation/    Live model evaluations
+  observability/ Local in-memory stand-in for Datadog LLM Observability
   scripts/       Sample-data generator
   tests/         Offline regression tests
   fixtures/      Reviewed test documents and expected answers
   runs/          Evaluation reports and traces (ignored by Git)
 transfer/        Source bundle, create_bundle.py, and standalone restore_repo.py
 data/            Local documents and shared library (ignored by Git)
-outputs/         Generated artifacts (ignored by Git)
 ```
 
 `backend/preprocessing/documents.py` creates document records; `backend/retrieval/search.py` searches them.
@@ -40,14 +40,12 @@ import the agent runtime. `backend/storage/tables.py` loads the same preprocesse
 either a real S3 client or the local adapter. This preserves the AWS object layout.
 
 Dependencies and local configuration stay at the root (`requirements*.txt`, `.env.example`,
-`.env`, and `.streamlit/`). `.venv/`, `node_modules/`, `__pycache__/`, and `.pytest_cache/` are
-managed dependency/cache folders, not application code.
+`.env`, and `.streamlit/`). `.venv/`, `__pycache__/`, and `.pytest_cache/` are managed
+dependency/cache folders, not application code.
 
 Integrations call `backend.entrypoint.ask_question`; local tools call `ask_question_local` (see "Entry point"
 below). The LangGraph workflow in
-`backend.agents.document_agent` is an internal detail that does not validate requests or write audit records. Root-level Python
-modules have been relocated, so update imports and launch commands to the paths shown here.
-The former table-agent entry points have been removed; migrate callers as shown below.
+`backend.agents.document_agent` is an internal detail that does not validate requests or write audit records.
 
 ## Multi-file chat prototype
 
@@ -69,7 +67,7 @@ The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with a
 
 `backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
 
-This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source backend.storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. Citations identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
+This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. Citations identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
 
 **Load Bingle-Dingle examples** loads eight Bingle-Dingle health-insurance documents: provider agreement, rate schedule, executed amendment, processing guide, unexecuted draft, benefit summary, authorization rules, and claim packet. Bingle-Dingle Insurance is a regional health insurer offering the Meadow product. The documents cover provider terms, benefits, authorization, and claim-specific records.
 
@@ -98,11 +96,8 @@ An early finish without supporting content is rejected. A valid tool request doe
 correct document interpretation or arithmetic.
 
 Select a model in the app, pass `model=` to `run_document_agent()`, or use `--model` on either CLI.
-The default model still uses the existing `TABLES_MODEL` environment variable. `BEDROCK_MODEL_ID`
-can select a deployment-specific native-tool-capable inference profile. The old `planner_mode`
-argument, `--planner-mode` flag, and tool-mode UI selector have been removed;
-`DOCUMENTS_PLANNER_MODE` is no longer read. Metadata, tool schemas and local result files still
-use JSON serialization; that is independent of model tool-request parsing.
+The default model comes from the `TABLES_MODEL` environment variable. `BEDROCK_MODEL_ID`
+can select a deployment-specific native-tool-capable inference profile.
 
 Run matched evaluations with local files and real Bedrock models (output paths must be new):
 
@@ -114,9 +109,9 @@ Run matched evaluations with local files and real Bedrock models (output paths m
 ```
 
 Expected answers remain outside model inputs. Reports retain actual model IDs, native protocol,
-latency, usage, evidence and answers. Full traces contain document content and are optional;
-`development/runs/` is ignored by Git. Historical JSON comparisons are retained only as local evaluation
-artifacts, not as runnable application modes. Review correctness separately from protocol success.
+latency, usage, evidence and answers. Traces (every model call with its prompt and response) contain document
+content and are optional;
+`development/runs/` is ignored by Git. Review correctness separately from protocol success.
 
 ## Quick start (PowerShell)
 
@@ -172,11 +167,11 @@ AWS references: [Maverick](https://docs.aws.amazon.com/bedrock/latest/userguide/
 
 - `backend/agents/document_agent.py`: the sole LangGraph workflow, with native tools, bounded retries, streaming, selected-source restrictions, and evidence.
 - `backend/agents/llm.py`: Bedrock Converse wrapper with normal SDK profile/role credentials, configurable region, timeouts, and retries.
-- `backend/config/settings.py`: missing configuration module, now supplied with Llama and Claude model profiles with environment-based settings.
+- `backend/config/settings.py`: Llama and Claude model IDs and environment-based inference settings.
 - `backend/storage/local.py`: in-memory `get_object` adapter and metadata generation; no AWS calls.
-- `development/cli/run_local.py`: CLI with optional full LLM traces and token totals. Trace files contain input data and are ignored by Git.
+- `development/cli/run_local.py`: CLI with optional model-call traces and token totals. Trace files contain input data and are ignored by Git.
 - `development/scripts/make_samples.py`: deterministic sample files.
-- `development/tests/test_agent.py`: offline regression tests using scripted LLM responses and the real graph/data backend.tools. They do not measure Llama's answer quality.
+- `development/tests/`: offline regression tests. Agent tests use scripted LLM responses with the real graph and tools; they do not measure answer quality.
 
 For existing AWS preprocessing outputs, load a document and call the sole agent:
 
@@ -200,13 +195,13 @@ print(result["answer"])
 local adapter or S3. It adds searchable text and table metadata without running another agent.
 For saved multi-file libraries, use `store.load(manifest_key)` and pass the selected document
 records to the same agent. `run_document_agent_stream()` streams sanitized node progress and
-a final answer from this graph. The old table-agent functions have been removed.
+a final answer from this graph.
 
 Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash. Existing preprocessing must provide `_metadata.json` plus each sheet's CSV at `{prefix}{domain}/preprocessed/{filename}/`; for CSV inputs the object basename is the original CSV filename. The new backend/preprocessing/tables.py exports that contract locally; it does not upload to S3 or validate another preprocessing pipeline.
 
 ## Limits of this development harness
 
-The CLI and chat expose the same deterministic table backend.tools. Generated Python execution and
+The CLI and chat expose the same deterministic table tools. Generated Python execution and
 sampled parallel summaries were removed with the duplicate table workflow. Search results
 can be truncated, and tool failures or step limits may yield incomplete answers. Repeated
 identical calls reuse evidence. CLI calls are independent; Python callers can pass `history`.
@@ -232,11 +227,6 @@ The [insurance fixtures](development/fixtures/README.md) cover narrative sheets,
 `backend/preprocessing/tables.py` exports each sheet to CSV plus metadata with types, counts, frequent values, source row positions, and parsing warnings. `backend/storage/local.py` uses it automatically, or `development/cli/run_local.py --preprocessed` loads a previously exported directory. `read_sheet` provides paginated access to narrative content and full table rows; search now includes metadata sheets. `development/evaluation/tables.py` runs known-answer questions through a selected model and saves results for human review under `development/runs/`.
 
 
-## Module names
-
-`backend/agents/document_agent.py` contains the sole research graph and both synchronous/streaming entry points. Shared table operations live under `backend/tools/`; the S3 preprocessing layout is unchanged.
-
-
 ## Persistent preprocessing in S3
 
 Use an existing bucket. Set these values in your ignored `.env` and restart Streamlit:
@@ -249,7 +239,7 @@ DOCUMENTS_S3_PREFIX=document-agent/
 # DOCUMENTS_S3_KMS_KEY_ID=your-key-id
 ```
 
-The app uses `AWS_PROFILE` for local development or the deployment IAM role when unset. Uploaded files and the example-loader files are saved automatically when S3 is configured. A failed save reports an error rather than silently falling back to local backend.storage. Chat history is not persisted. Clearing files/chat does not delete S3 objects.
+The app uses `AWS_PROFILE` for local development or the deployment IAM role when unset. Uploaded files and the example-loader files are saved automatically when S3 is configured. A failed save reports an error rather than silently falling back to local storage. Chat history is not persisted. Clearing files/chat does not delete S3 objects.
 
 In the chat app, click **Refresh saved files** and select sources under **Files to answer from**. The upload portal handles all ingestion; the chat app opens its store in read-only mode. In production, give the chat service a read-only storage role and the separate upload service write permissions. The picker shows up to 100 saved documents from the configured prefix; this is a prototype library, not automatic retrieval across a bucket. Everyone using this app configuration has the same storage scope; add authentication and server-side authorization before a shared deployment.
 
@@ -279,7 +269,7 @@ The configured identity needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObje
 
 Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Keep and use the returned document's `storage_ref['manifest_key']` with `store.load(...)`. Existing calls without a store remain local.
 
-For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and development.tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
+For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
 
 The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout. Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
 
@@ -291,7 +281,9 @@ The document workflow in `backend/agents/document_agent.py` is:
 
 ```mermaid
 flowchart LR
-    START --> init --> plan --> tools
+    START --> init --> assess
+    assess -->|needs clarification| END
+    assess --> plan --> tools
     tools -->|continue research, repair or coverage prompt| plan
     tools -->|finished or budget reached| synthesize
     synthesize -->|answer used uncomputed amounts, once| plan
@@ -299,7 +291,8 @@ flowchart LR
 ```
 
 `DocumentState` names the data passed between nodes. `init` validates selected sources and
-creates the per-run native conversation. `plan` requests model tool calls. `tools` validates
+creates the per-run native conversation. `assess` optionally checks the question for ambiguity (see
+"Ambiguous questions"). `plan` requests model tool calls. `tools` validates
 and executes them, records evidence, and returns matching native tool results.
 `route_after_tools` chooses another planning turn or answer synthesis; `route_after_synthesize`
 can send the planner back once to compute amounts (see below). The graph preserves the
@@ -320,8 +313,6 @@ lives in `backend/shared/serialization.py`. Uploading, preprocessing, and storag
 Python services rather than agent workflows.
 
 Run commands from the repository root. `backend/` does not import `apps/` or `development/`. The upload app’s optional example-loader reads development fixtures; ordinary uploads do not need them. Root dependency files, `.env`, and `.streamlit/` remain shared configuration. Existing local data and S3 object paths are unchanged.
-
-`node_modules/` is a local junction to Codex-provided JavaScript tooling. This Python application does not depend on it; it is ignored by Git and is not part of the deployment.
 
 ## Portable text bundle
 
@@ -484,7 +475,7 @@ in the stored profile and the portal's **Review semantic profiles** section, whe
 meanings, mark them confirmed, or generate a profile for an already saved document. Profiles are never cited
 as evidence. A failed profile never blocks an upload.
 
-Measured effect: on the 13 Bingle-Dingle and 13 Northstar questions, profiles did not change accuracy
+Measured effect: on the 13 Bingle-Dingle questions and a private 13-question Northstar set (not in this repository), profiles did not change accuracy
 (Maverick 24/26 without, 23/26 with; individual cases flipped both ways) and added input tokens to every
 planner call. These question sets do not need cross-document terminology or document triage, which is where
 profiles are expected to help. Keep the option off unless your documents use undefined terms across files,
@@ -495,7 +486,8 @@ and measure on your own questions. `--enrich` on `development.evaluation.documen
 
 Two separate records answer different questions. The **audit record** is the system of record for who asked
 what, of which documents, with which model and prompts, and what came back. **Traces** show how a run behaved:
-each graph step, Bedrock call and tool execution with its latency, tokens and errors. Both carry the same
+each graph step, Bedrock call and tool execution with its latency, tokens and errors, in Datadog LLM
+Observability. Both carry the same
 `trace_id`, and the chat app shows the first 12 characters of the `request_id` under every answer.
 
 `ask_question` writes one audit record for every request, including invalid requests and failures.
@@ -504,9 +496,9 @@ each graph step, Bedrock call and tool execution with its latency, tokens and er
 
 | Tier | Written | Contains |
 | --- | --- | --- |
-| `metadata/questions` | always | request and session IDs, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), per-call model, tokens, latency and tool names, totals, error, `trace_id` |
+| `metadata/questions` | always | request and session IDs, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), totals (model calls, input and output tokens), duration, error, `trace_id` |
 | `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with file SHA-256 and size |
-| `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation, evidence and every prompt and response |
+| `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation and evidence |
 
 The content tier can contain PHI. Store it under its own prefix with a separate KMS key, tighter IAM access,
 and its own retention; the metadata tier can be kept longer and shared with reviewers. Hashes let a reviewer
@@ -521,50 +513,63 @@ the request when `AUDIT_REQUIRED=true`.
 `prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
 `APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
 
-### Traces (`backend/observability/tracing.py`)
+### Traces: Datadog LLM Observability (`backend/observability/llmobs.py`)
 
-Spans follow the OpenTelemetry GenAI conventions:
+Every question is one trace in Datadog LLM Observability:
 
 ```text
-invoke_agent document_agent           session.id, app.request_id, document IDs, status
-  graph.node init | assess | plan | tools | synthesize
-    chat <model id>                    gen_ai.request.model, gen_ai.usage.input/output_tokens, finish reason, tool calls
-    execute_tool <tool name>           gen_ai.tool.name, app.evidence_id, document IDs, match/row counts; error status
-ingest_document                        (upload portal) file kind, size, profile requested
+agent     document_agent          session, request ID, model, ambiguity mode, document IDs, status
+  workflow  init | assess | plan | tools | synthesize
+    llm       <step name>           model, input/output tokens, stop reason, tool calls requested, latency
+    tool      <tool name>           evidence ID, document IDs, match/row counts; error status
+workflow  ingest_document         (upload portal) file kind, size, profile requested
 ```
 
-Prompt and response text is attached as span events only with `TRACE_CONTENT=true` (PHI risk; keep it off in
-shared environments). Without a tracer provider the OpenTelemetry API is a no-op.
+Datadog shows each question's model calls with tokens, latency, cost estimates and errors, and an audit record's
+`trace_id` finds its trace. Prompts, responses, the question, the answer and tool parameters are sent only with
+`TRACE_CONTENT=true`. They can contain PHI: confirm the Datadog agreement covers PHI (or use Datadog's Sensitive
+Data Scanner) before turning it on in a shared environment. When LLM Observability is not enabled the helpers are
+no-ops, so the application runs unchanged without Datadog.
 
-For development, `TRACING=file` writes spans to `data/traces/spans.jsonl` and `TRACING=console` prints them.
+#### AWS Lambda
 
-### AWS: CloudWatch GenAI Observability (AgentCore Observability)
+Instrument the function the same way as other Datadog-monitored Lambdas:
 
-The spans work with AgentCore Observability without running on AgentCore Runtime:
-
-1. Enable CloudWatch Transaction Search once per account and Region.
-2. `pip install "aws-opentelemetry-distro>=0.18.0"` in the deployment image.
-3. Set `TRACING=off` (ADOT installs the provider) and the ADOT variables, for example:
-
-   ```text
-   AGENT_OBSERVABILITY_ENABLED=true
-   OTEL_PYTHON_DISTRO=aws_distro
-   OTEL_PYTHON_CONFIGURATOR=aws_configurator
-   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-   OTEL_TRACES_EXPORTER=otlp
-   OTEL_RESOURCE_ATTRIBUTES=service.name=document-agent
-   OTEL_EXPORTER_OTLP_LOGS_HEADERS=x-aws-log-group=<log group>,x-aws-log-stream=<stream>,x-aws-metric-namespace=document-agent
-   ```
-
-4. Launch through the instrumenter:
+1. Add the `Datadog-Python3xx` and `Datadog-Extension` layers. The Python layer provides `ddtrace`; do not bundle
+   `ddtrace` in the deployment package.
+2. Set the function handler to `datadog_lambda.handler.handler` (the Datadog wrapper) and set:
 
    ```text
-   opentelemetry-instrument streamlit run apps/chat/app.py --server.port 8501
+   DD_LAMBDA_HANDLER=apps.api.lambda_handler.lambda_handler
+   DD_LLMOBS_ENABLED=true
+   DD_LLMOBS_ML_APP=health-insurance-document-agent
+   DD_TRACE_ENABLED=true
+   DD_SITE=datadoghq.com
+   DD_API_KEY_SECRET_ARN=<secret ARN>
+   DD_TRACE_BOTOCORE_ENABLED=false
+   TRACE_CONTENT=false
    ```
 
-ADOT also instruments botocore, so each Bedrock call gets an AWS SDK span next to the `chat` span. Traces then
-appear in the CloudWatch GenAI Observability console with token, latency and error views, and an audit
-record's `trace_id` finds its trace. Check current ADOT settings in the AWS documentation before deploying.
+`DD_TRACE_BOTOCORE_ENABLED=false` stops Datadog's automatic Bedrock instrumentation from recording every model call
+a second time; the application's own `llm` spans carry the step names. It also removes AWS SDK spans (S3 reads) from
+APM. Check the variable names against the Datadog documentation for the layer version you deploy.
+
+#### Local development (`development/observability/`)
+
+The chat app, the command-line tool, the evaluations and the tests capture the same span events in memory
+instead of sending them to Datadog: `capture.enable()` starts LLM Observability locally and replaces its span writer.
+No Datadog account, agent or network access is needed, and prompt and response text is always captured locally.
+
+- The chat app shows a **Model calls** panel under each answer: call count, input and output tokens, the largest
+  call, time in the model, a timeline of every call (start, gap since the previous call, duration, tokens, stop
+  reason, tools requested) and tool executions, and the full prompt and response of any call you pick.
+- `run_local --trace <file>` and the evaluations' `--traces` save the same per-question summary as JSON.
+
+To send local runs to Datadog instead, set `DD_LLMOBS_ENABLED=true`, `DD_API_KEY`, `DD_SITE` and
+`DD_LLMOBS_AGENTLESS_ENABLED=true`, and launch with `ddtrace-run`; the chat app then skips the local capture.
+
+The capture relies on a ddtrace internal, so `requirements.txt` pins the ddtrace minor version and the tests fail if
+an upgrade breaks it.
 
 Alongside these, turn on Bedrock model invocation logging (to an encrypted, restricted bucket; it holds full
 prompts) and CloudTrail data events for the document and audit buckets. Those record calls the application
@@ -579,7 +584,7 @@ cannot misreport.
   keys.
 - `ask_question_local(...)` is for development callers: the Streamlit chat app, the command-line tool and
   tests. It takes already-loaded `documents` (for example a local file that was never saved) and adds
-  `on_step` (progress display) and `call_log` (every prompt and response, for trace files).
+  `on_step` (progress display).
 
 Both validate the request, load the documents, run the agent, write the audit record and trace, and return a
 JSON-serializable response. They do not raise; the outcome is in `status`.

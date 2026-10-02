@@ -36,18 +36,6 @@ def extract_numbers(text):
     return found
 
 
-def _decimal(value):
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        raise ValueError('Input values must be numbers')
-    try:
-        result = Decimal(str(value).replace(',', '').strip())
-    except InvalidOperation:
-        raise ValueError(f'Not a number: {value!r}') from None
-    if not result.is_finite():
-        raise ValueError('Input values must be finite')
-    return result
-
-
 def _evaluate(node, names):
     if isinstance(node, ast.Expression):
         return _evaluate(node.body, names)

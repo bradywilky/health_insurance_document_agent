@@ -2,17 +2,15 @@ import json
 from pathlib import Path
 
 import pytest
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import StatusCode
+from ddtrace.llmobs import LLMObs
 from streamlit.testing.v1 import AppTest
 
 from backend.agents import document_agent
-from backend.observability import audit, tracing
+from backend.observability import audit, llmobs
 from backend.preprocessing.documents import ingest_document
 from backend.entrypoint import ask_question_local
 from backend.observability.audit import record_document_event
+from development.observability import capture
 
 QUESTION = 'What is the member rate for plan Alpha?'
 APPS = Path(__file__).resolve().parents[2] / 'apps'
@@ -21,16 +19,6 @@ APPS = Path(__file__).resolve().parents[2] / 'apps'
 def records(directory, tier, kind):
     files = sorted((directory / tier / kind).glob('*.jsonl'))
     return [json.loads(line) for f in files for line in f.read_text(encoding='utf-8').splitlines()]
-
-
-@pytest.fixture
-def spans(monkeypatch):
-    """Route spans to memory without touching the global tracer provider."""
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(tracing, 'tracer', lambda: provider.get_tracer('test'))
-    return exporter
 
 
 @pytest.fixture
@@ -55,7 +43,6 @@ def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audi
     assert meta['documents'][0]['id'] == rates_run.id and meta['documents'][0]['name'] == 'rates.txt'
     assert [e['tool'] for e in meta['evidence']] == ['search_documents']
     assert meta['evidence'][0]['locations'] == ['paragraph 1']
-    assert meta['llm_calls'][0]['tool_calls'] == ['search_documents']
     assert meta['totals'] == {'llm_calls': 3, 'input_tokens': 30, 'output_tokens': 15} == result['usage']
     assert not (isolated_audit / 'content').exists()
 
@@ -67,7 +54,7 @@ def test_content_tier_is_opt_in_and_separate(rates_run, isolated_audit, monkeypa
     [content] = records(isolated_audit, 'content', 'questions')
     assert meta['content_recorded'] and content['request_id'] == meta['request_id']
     assert content['question'] == QUESTION and 'USD 88' in content['answer']
-    assert len(content['llm_calls']) == 3
+    assert 'llm_calls' not in content  # per-call prompts are in Datadog LLM Observability
 
 
 def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
@@ -131,59 +118,88 @@ def test_audit_storage_modes(monkeypatch):
         audit.configured_audit_sink()
 
 
-def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, spans, isolated_audit):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test',
-                             session_id='s1')
-    finished = spans.get_finished_spans()
-    by_id = {s.context.span_id: s for s in finished}
-    [root] = [s for s in finished if s.name == 'invoke_agent document_agent']
-    assert {s.context.trace_id for s in finished} == {root.context.trace_id}
-    assert result['trace_id'] == format(root.context.trace_id, '032x')
+def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, isolated_audit):
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    events = capture.trace(result['trace_id'])
+    by_id = {e['span_id']: e for e in events}
+    [root] = [e for e in events if capture.kind(e) == 'agent']
+    assert root['name'] == 'document_agent' and root['parent_id'] == 'undefined'
     assert records(isolated_audit, 'metadata', 'questions')[0]['trace_id'] == result['trace_id']
-    assert root.attributes['session.id'] == 's1' and root.attributes['gen_ai.operation.name'] == 'invoke_agent'
+    assert root['session_id'] == 's1' and 'app:test' in root['tags'] and root['status'] == 'ok'
+    assert root['meta']['metadata']['request_id'] == result['request_id']
+    assert root['meta']['metadata']['status'] == 'answered'
 
-    nodes = [s for s in finished if s.name.startswith('graph.node')]
-    assert {s.attributes['app.graph.node'] for s in nodes} >= {'init', 'plan', 'tools', 'synthesize'}
-    assert all(s.parent.span_id == root.context.span_id for s in nodes)
+    nodes = [e for e in events if capture.kind(e) == 'workflow']
+    assert {e['name'] for e in nodes} >= {'init', 'plan', 'tools', 'synthesize'}
+    assert all(e['parent_id'] == root['span_id'] for e in nodes)
 
-    chats = [s for s in finished if s.name.startswith('chat ')]
-    assert len(chats) == 3
-    assert all(by_id[s.parent.span_id].name.startswith('graph.node') for s in chats)
-    assert chats[0].attributes['gen_ai.usage.input_tokens'] == 10
-    assert chats[0].attributes['app.llm.tool_calls'] == ('search_documents',)
-    assert chats[-1].attributes['app.llm.step'] == 'Document Answer'
+    calls = [e for e in events if capture.kind(e) == 'llm']
+    assert len(calls) == 3
+    assert all(capture.kind(by_id[e['parent_id']]) == 'workflow' for e in calls)
+    assert calls[0]['metrics'] == {'input_tokens': 10, 'output_tokens': 5, 'total_tokens': 15}
+    assert calls[0]['meta']['metadata']['tool_calls'] == ['search_documents']
+    assert calls[0]['meta']['model_provider'] == 'amazon_bedrock'
+    assert calls[-1]['name'] == 'Document Answer'
 
-    [tool] = [s for s in finished if s.name == 'execute_tool search_documents']
-    assert by_id[tool.parent.span_id].attributes['app.graph.node'] == 'tools'
-    assert tool.attributes['app.document_ids'] == (rates_run.id,) and tool.attributes['app.evidence_id'] == 'E1'
-    # No prompt or answer text unless TRACE_CONTENT=true.
-    assert not any(s.events for s in finished)
-    assert 'Alpha' not in json.dumps([dict(s.attributes) for s in finished])
+    [tool] = [e for e in events if capture.kind(e) == 'tool']
+    assert tool['name'] == 'search_documents' and by_id[tool['parent_id']]['name'] == 'tools'
+    assert tool['meta']['metadata']['document_ids'] == [rates_run.id]
+    assert tool['meta']['metadata']['evidence_id'] == 'E1'
+    # No prompt, question, answer or tool parameter text unless TRACE_CONTENT=true.
+    assert not any(e['meta'].get('input') or e['meta'].get('output') for e in events)
+    assert 'Alpha' not in json.dumps(events)
 
 
-def test_trace_content_is_opt_in(rates_run, spans, monkeypatch):
+def test_trace_content_is_opt_in(rates_run, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    ask_question_local(QUESTION, documents=[rates_run], app='test')
-    chat = next(s for s in spans.get_finished_spans() if s.name.startswith('chat '))
-    assert {e.name for e in chat.events} == {'gen_ai.input', 'gen_ai.output'}
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    events = capture.trace(result['trace_id'])
+    root = next(e for e in events if capture.kind(e) == 'agent')
+    assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
+    call = capture.summarize(events)['calls'][0]
+    assert [m['role'] for m in call['input']] == ['system', 'user'] and 'Alpha' in call['input'][1]['content']
+    assert call['output'][0]['tool_calls'][0]['name'] == 'search_documents'
 
 
-def test_tool_errors_mark_their_span(native_script, spans):
+def test_summary_reports_totals_largest_call_and_gaps(rates_run):
+    summary = capture.summarize(capture.trace(ask_question_local(QUESTION, documents=[rates_run])['trace_id']))
+    totals, calls = summary['totals'], summary['calls']
+    assert {k: totals[k] for k in ('llm_calls', 'input_tokens', 'output_tokens', 'total_tokens')} == {
+        'llm_calls': 3, 'input_tokens': 30, 'output_tokens': 15, 'total_tokens': 45}
+    assert totals['largest_call'] == 1 and totals['models']
+    assert [c['call'] for c in calls] == [1, 2, 3] and calls[0]['gap_ms'] is None
+    assert all(c['gap_ms'] >= 0 for c in calls[1:])
+    assert [c['start_ms'] for c in calls] == sorted(c['start_ms'] for c in calls)
+    assert [t['tool'] for t in summary['tools']] == ['search_documents']
+
+
+def test_runs_unchanged_without_datadog(rates_run, monkeypatch):
+    monkeypatch.setattr(LLMObs, 'enabled', False)
+    with capture.recording() as events:
+        result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    assert result['status'] == 'answered' and result['trace_id'] is None and result['usage']['llm_calls'] == 3
+    assert events == []
+
+
+def test_tool_errors_mark_their_span(native_script):
     doc = ingest_document('rates.txt', b'USD 88')
     # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
     native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
                    {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
-    ask_question_local('Rate?', documents=[doc], app='test')
-    tool = next(s for s in spans.get_finished_spans() if s.name == 'execute_tool calculate')
-    assert tool.status.status_code == StatusCode.ERROR
+    result = ask_question_local('Rate?', documents=[doc], app='test')
+    tool = next(e for e in capture.trace(result['trace_id']) if e['name'] == 'calculate')
+    assert tool['status'] == 'error'
 
 
 def test_document_events_record_hashes_not_contents(isolated_audit):
     content = b'Plan Alpha member rate is USD 88.'
     doc = ingest_document('rates.txt', content)
-    record_document_event('document_uploaded', app='upload', document=doc, content=content,
-                          details={'profile_generated': False})
+    with llmobs.span('workflow', 'ingest_document') as current:
+        record_document_event('document_uploaded', app='upload', document=doc, content=content,
+                              details={'profile_generated': False})
+        trace_id = llmobs.trace_id_of(current)
     [event] = records(isolated_audit, 'metadata', 'documents')
+    assert event['trace_id'] == trace_id is not None
     assert event['event'] == 'document_uploaded' and event['filename'] == 'rates.txt'
     assert event['size_bytes'] == len(content) and len(event['content_sha256']) == 64
     assert 'Alpha' not in json.dumps(event)

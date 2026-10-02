@@ -9,17 +9,16 @@ import time
 from dotenv import load_dotenv
 from backend.preprocessing.documents import ingest_document
 from backend.agents.document_agent import run_document_agent
-from backend.agents.llm import LLMCallLog
 from backend.config.settings import MODELS
+from development.observability import capture
 
 
 def save_profiles(docs, output):
     """Write generated profiles next to the results for human review."""
-    import json as _json
     folder = output.with_name(output.stem + '-profiles')
     folder.mkdir(parents=True, exist_ok=True)
     for doc in docs:
-        (folder / (doc.name + '.json')).write_text(_json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
+        (folder / (doc.name + '.json')).write_text(json.dumps(doc.profile, indent=2, default=str), encoding='utf-8')
 
 
 def main():
@@ -34,6 +33,7 @@ def main():
     parser.add_argument('--fixtures', type=Path,
                         help='Generated fixture directory containing questions.json and upload files')
     args=parser.parse_args()
+    capture.enable(content=bool(args.traces))
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
     root=args.fixtures or Path(__file__).resolve().parents[1]/'fixtures'/'documents'
@@ -61,28 +61,29 @@ def main():
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with args.output.open('x',encoding='utf-8') as out:
         for case in cases:
-            log=LLMCallLog()
             start=time.monotonic()
-            record={**case,'model':args.model,'planner_mode':'native'}
-            try:
-                result=run_document_agent(documents,[by_name[n] for n in case['files']],
-                    case['question'],call_log=log,model=args.model)
-                record.update(result=result,status='needs_human_review')
-            except Exception as exc:
-                record.update(status='error',error=f'{type(exc).__name__}: {exc}')
-            record.update(calls=len(log.records),duration_seconds=round(time.monotonic()-start,2),
-                input_tokens=sum(r['usage'].get('inputTokens',0) for r in log.records),
-                output_tokens=sum(r['usage'].get('outputTokens',0) for r in log.records))
-            record['invoked_model_ids'] = sorted({r['model_id'] for r in log.records})
+            record={**case,'model':args.model}
+            with capture.recording() as events:
+                try:
+                    result=run_document_agent(documents,[by_name[n] for n in case['files']],
+                        case['question'],model=args.model)
+                    record.update(result=result,status='needs_human_review')
+                except Exception as exc:
+                    record.update(status='error',error=f'{type(exc).__name__}: {exc}')
+            summary=capture.summarize(events)
+            totals=summary['totals']
+            record.update(calls=totals['llm_calls'],duration_seconds=round(time.monotonic()-start,2),
+                input_tokens=totals['input_tokens'],output_tokens=totals['output_tokens'])
+            record['invoked_model_ids'] = totals['models']
             if args.traces:
                 trace_name = case['id']
                 if Path(trace_name).name != trace_name or '/' in trace_name or '\\' in trace_name:
                     raise ValueError('Case ID must be a basename')
                 with (args.traces / (trace_name + '.json')).open('x', encoding='utf-8') as trace:
-                    json.dump(log.records, trace, default=str, indent=2)
+                    json.dump(summary, trace, default=str, indent=2)
             out.write(json.dumps(record,default=str)+'\n')
             out.flush()
-            print(f"{case['id']}: {record['status']} ({len(log.records)} calls)",flush=True)
+            print(f"{case['id']}: {record['status']} ({record['calls']} calls)",flush=True)
             if record['status']=='error':
                 raise RuntimeError(f'Evaluation stopped; see {args.output}')
 

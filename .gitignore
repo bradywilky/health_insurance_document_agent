@@ -14,7 +14,6 @@ credentials.*
 *.pfx
 *.log
 runs/
-/development/runs/
 data/
 # User input files belong locally. Generate synthetic samples with development/scripts/make_samples.py.
 *.csv
@@ -27,18 +26,16 @@ data/
 *.txt
 !requirements.txt
 !requirements-dev.txt
+# Reviewed, wholly synthetic test fixtures only.
 !development/fixtures/documents/bingle_dingle_agreement.txt
 !development/fixtures/documents/bingle_dingle_rates.txt
 !development/fixtures/documents/bingle_dingle_amendment.txt
 !development/fixtures/documents/bingle_dingle_processing_guide.txt
 !development/fixtures/documents/bingle_dingle_draft.txt
-uploads/
-outputs/
-node_modules/
-# Reviewed, wholly synthetic test fixtures only.
 !development/fixtures/documents/bingle_dingle_benefits.txt
 !development/fixtures/documents/bingle_dingle_authorization.txt
 !development/fixtures/documents/bingle_dingle_claim_packet.txt
+node_modules/
 
 # Reviewed source-only transfer bundle. Never include local data or configuration.
 !/transfer/repository-bundle.txt

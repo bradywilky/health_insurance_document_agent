@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--region")
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--inspect", action="store_true", help="Print local metadata without AWS calls")
-    parser.add_argument("--trace", type=Path, help="Save full prompts/responses (includes file data)")
+    parser.add_argument("--trace", type=Path, help="Save every model call with its prompt and response (includes file data)")
     parser.add_argument("--encoding", default="utf-8-sig")
     parser.add_argument("--delimiter", default=",")
     parser.add_argument("--overrides", type=Path, help="JSON sheet_type/header_row overrides")
@@ -31,11 +31,10 @@ def main():
             os.environ[name] = value
     logging.basicConfig(level=logging.WARNING)
     from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
-    from backend.agents.llm import LLMCallLog
     from backend.agents.document_agent import run_document_agent_stream
-    from backend.observability.tracing import configure_tracing
     from backend.entrypoint import ask_question_local
-    configure_tracing()
+    from development.observability import capture
+    capture.enable(content=bool(args.trace))
     from backend.preprocessing.documents import document_from_table_inputs
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
     if args.preprocessed and overrides:
@@ -49,24 +48,25 @@ def main():
         return
     doc = document_from_table_inputs(**inputs)
     documents = {doc.id: doc}
-    log = LLMCallLog()
-    try:
-        if args.stream:
-            for event in run_document_agent_stream(documents, [doc.id], args.question, call_log=log, model=args.model):
-                print(json.dumps(event, default=str), flush=True)
-        else:
-            response = ask_question_local(args.question, documents=[doc], app="cli", model=args.model, call_log=log)
-            print(response["answer"] or response["message"])
-            for warning in response["limitations"]:
-                print(f"Limitation: {warning}")
-            print(f"Status: {response['status']}; reference: {response['request_id']}")
-    finally:
-        if args.trace:
-            args.trace.parent.mkdir(parents=True, exist_ok=True)
-            args.trace.write_text(json.dumps(log.records, indent=2, default=str), encoding="utf-8")
-        print(f"\nLLM calls: {len(log.records)}; input tokens: "
-              f"{sum(r['usage'].get('inputTokens', 0) for r in log.records)}; output tokens: "
-              f"{sum(r['usage'].get('outputTokens', 0) for r in log.records)}")
+    with capture.recording() as events:
+        try:
+            if args.stream:
+                for event in run_document_agent_stream(documents, [doc.id], args.question, model=args.model):
+                    print(json.dumps(event, default=str), flush=True)
+            else:
+                response = ask_question_local(args.question, documents=[doc], app="cli", model=args.model)
+                print(response["answer"] or response["message"])
+                for warning in response["limitations"]:
+                    print(f"Limitation: {warning}")
+                print(f"Status: {response['status']}; reference: {response['request_id']}")
+        finally:
+            summary = capture.summarize(events)
+            if args.trace:
+                args.trace.parent.mkdir(parents=True, exist_ok=True)
+                args.trace.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+            totals = summary["totals"]
+            print(f"\nLLM calls: {totals['llm_calls']}; input tokens: {totals['input_tokens']}; "
+                  f"output tokens: {totals['output_tokens']}")
 
 
 if __name__ == "__main__":
