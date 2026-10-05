@@ -525,6 +525,8 @@ agent     document_agent          session, request ID, model, ambiguity mode, do
 workflow  ingest_document         (upload portal) file kind, size, profile requested
 ```
 
+[`backend/observability/SPANS.md`](backend/observability/SPANS.md) lists every span and each field it records.
+
 Datadog shows each question's model calls with tokens, latency, cost estimates and errors, and an audit record's
 `trace_id` finds its trace. Prompts, responses, the question, the answer and tool parameters are sent only with
 `TRACE_CONTENT=true`. They can contain PHI: confirm the Datadog agreement covers PHI (or use Datadog's Sensitive
