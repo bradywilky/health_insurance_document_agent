@@ -3150,7 +3150,7 @@ def _drop_none(values):
 """Preprocessing components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/preprocessing/documents.py", "characters": 7281, "sha256": "1a2758dae92e1487f86313c07ad19b009f5a17874f708892ba40e32af4fdb941"}
+{"path": "backend/preprocessing/documents.py", "characters": 7292, "sha256": "58fb750e8a947f687bcc3a087f7cff7b5a98f27c8247d2c2c7d3ef210bca5ee1"}
 """Document ingestion and optional persistence for selected document Q&A."""
 from backend.shared.models import Document
 from backend.shared.rows import narrative_rows, row_location, row_text
@@ -3257,12 +3257,12 @@ def _populate_table_document(doc):
         frame = load_table(**doc.table_inputs, sheet_name=sheet, sheet_meta=meta)
         if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
             # Narrative sheets are indexed in full, one block per sheet row (not per cell).
-            for number, text in narrative_rows(frame):
+            for number, text in narrative_rows(frame.rows):
                 _add_text(doc, text, {'sheet': sheet, 'row': number})
             continue
         # Data sheets get a text preview; search_documents and table tools read every row from the CSV.
-        preview = frame if meta.get('sheet_type') == 'metadata' else frame.head(TABLE_PREVIEW_ROWS)
-        for i, row in preview.iterrows():
+        preview = frame.rows if meta.get('sheet_type') == 'metadata' else frame.rows[:TABLE_PREVIEW_ROWS]
+        for i, row in enumerate(preview):
             _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
         if len(preview) < len(frame):
             doc.warnings.append(f'{sheet}: text preview holds the first {len(preview)} of {len(frame)} rows. '
@@ -3287,120 +3287,19 @@ def document_from_table_inputs(*, s3_client, s3_bucket, s3_prefix, plan_domain, 
     return doc
 
 ===== REPOSITORY FILE =====
-{"path": "backend/preprocessing/profiling.py", "characters": 7277, "sha256": "a948b29ec4dac538ea5c41019041d684b3d2cc76abd9ff5b05e64ba99bec578c"}
+{"path": "backend/preprocessing/profiling.py", "characters": 2423, "sha256": "67b90d84f4b8c64fad8a0096fb01445335393e05feca84eb7147689c15a272fd"}
 """Column data-quality hints: possible spelling variants, missing markers and placeholder numbers.
 
 Everything here is a suggestion for the agent to verify and disclose. Nothing is merged or
 converted; the exported CSVs keep every original value.
 """
-import re
-
 import pandas as pd
+
+from backend.shared.values import MISSING_MARKERS, placeholder_values, variant_groups
 
 MAX_VARIANT_DISTINCT = 200  # skip free-text / identifier-like columns
 ALL_VALUES_DISTINCT = 30    # list every value for low-cardinality columns
 CATEGORICAL_DISTINCT = 50   # variant checks run on columns with few distinct values (or <= 20% distinct)
-# "NA" is excluded on purpose: it is often a real code (e.g. "not applicable").
-MISSING_MARKERS = {'nan', 'null', 'none', 'nil', 'n/a', '#n/a', 'missing', '(blank)'}
-
-
-def normalize_key(value):
-    """Case-, space- and punctuation-insensitive comparison key."""
-    return re.sub(r'[^0-9a-z]+', '', str(value).casefold())
-
-
-def _subsequence(short, long):
-    rest = iter(long)
-    return all(ch in rest for ch in short)
-
-
-def _similar(raw_a, raw_b):
-    """True when two values plausibly name the same thing.
-
-    Deliberately conservative: only case/space/punctuation differences, or dropped letters
-    (Vsa/Visa, tehr@n/Tehran, fail/failed). Substitutions are never grouped, because pairs
-    such as Medicare/Medicaid, Male/Female and Dental/Rental are different things.
-    """
-    a, b = normalize_key(raw_a), normalize_key(raw_b)
-    if a == b:
-        return True
-    (short, raw_short), (long, raw_long) = sorted([(a, raw_a), (b, raw_b)], key=lambda p: len(p[0]))
-    if len(short) < 3 or short.isdigit() or len(long) - len(short) > 3 or short[0] != long[0]:
-        return False
-    # A separate qualifier word (Medicaid / Medicaid A, Premium / Premium Plus) is a different value.
-    if str(raw_long).strip().casefold().startswith(str(raw_short).strip().casefold() + ' '):
-        return False
-    if re.sub(r'\d', '', a) == re.sub(r'\d', '', b):  # Tier 1 / Tier 10
-        return False
-    fewer, more = sorted([_words(raw_a), _words(raw_b)], key=len)
-    # An added whole word makes a different element (Account - Date / Account - End Date).
-    if len(fewer) < len(more) and _subsequence(fewer, more):
-        return False
-    # In multi-word names, a word extended at either end is a different term (Pack / Package Amount).
-    # Mid-word typos (Acount / Account) and single words (fail / failed) are still grouped.
-    if len(fewer) == len(more) >= 2:
-        changed = [(x, y) for x, y in zip(fewer, more) if x != y]
-        if len(changed) == 1:
-            x, y = sorted(changed[0], key=len)
-            if y.startswith(x) or y.endswith(x):
-                return False
-    return _subsequence(short, long)
-
-
-def _words(raw):
-    return re.findall(r'[0-9a-z]+', str(raw).casefold())
-
-
-def _abbreviation(raw, key, other):
-    """All-caps codes such as THR whose letters appear in order in a longer value's key."""
-    if not (2 <= len(key) <= 4 and str(raw).strip().isupper() and len(other) > len(key) + 1):
-        return False
-    if key[0] != other[0]:
-        return False
-    return _subsequence(key, other)
-
-
-def variant_groups(counts):
-    """Group values (value -> count) that look like spellings of one thing.
-
-    Returns [{'suggested': most frequent value, 'variants': {value: count, ...}}], largest first.
-    """
-    values = [v for v in counts if str(v).strip().casefold() not in MISSING_MARKERS and normalize_key(v)]
-    parent = {v: v for v in values}
-
-    def find(v):
-        while parent[v] != v:
-            parent[v] = parent[parent[v]]
-            v = parent[v]
-        return v
-
-    keys = {v: normalize_key(v) for v in values}
-    for i, a in enumerate(values):
-        for b in values[i + 1:]:
-            ka, kb = keys[a], keys[b]
-            if _similar(a, b) or _abbreviation(a, ka, kb) or _abbreviation(b, kb, ka):
-                parent[find(a)] = find(b)
-    groups = {}
-    for v in values:
-        groups.setdefault(find(v), []).append(v)
-    result = []
-    for members in groups.values():
-        if len(members) > 1:
-            # Most frequent first; on ties prefer a trimmed, non-all-caps spelling over a code such as THR.
-            members.sort(key=lambda v: (-counts[v], str(v).isupper(), str(v) != str(v).strip()))
-            result.append({'suggested': members[0], 'variants': {m: int(counts[m]) for m in members}})
-    return sorted(result, key=lambda g: -sum(g['variants'].values()))
-
-
-def placeholder_values(series):
-    """Repeated values made only of 9s (e.g. 999, -999999), a common 'unknown' sentinel."""
-    counts = series.dropna().value_counts()
-    found = {}
-    for value, count in counts.items():
-        digits = format(abs(float(value)), 'f').rstrip('0').rstrip('.')
-        if count > 1 and len(digits) >= 3 and set(digits) == {'9'}:
-            found[str(value)] = int(count)
-    return found
 
 
 def column_quality(series):
@@ -3411,7 +3310,7 @@ def column_quality(series):
         if len(present):
             notes.update(min=str(present.min()), max=str(present.max()),
                          negative_count=int((present < 0).sum()))
-        placeholders = placeholder_values(series)
+        placeholders = placeholder_values(present)
         if placeholders:
             notes['possible_placeholder_values'] = placeholders
         return notes
@@ -3436,22 +3335,6 @@ def column_quality(series):
         if frequent:
             notes['frequent_values'] = frequent
     return notes
-
-
-def similar_values(requested, counts):
-    """Values in counts (value -> count) that look like spellings of a requested value but were not requested."""
-    wanted = set(requested)
-    found = {}
-    for value, count in counts.items():
-        if value in wanted or value.strip().casefold() in MISSING_MARKERS:
-            continue
-        for target in wanted:
-            kv, kt = normalize_key(value), normalize_key(target)
-            if kv and kt and (_similar(value, target) or _abbreviation(value, kv, kt)
-                              or _abbreviation(target, kt, kv)):
-                found[value] = count
-                break
-    return found
 
 ===== REPOSITORY FILE =====
 {"path": "backend/preprocessing/tables.py", "characters": 7941, "sha256": "b969a6ddb7c35ad3bd5498c523eb1582b1c6732ef7b0d3fe4f8d7595e211ef0a"}
@@ -3632,7 +3515,7 @@ if __name__ == "__main__":
 """Retrieval components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/retrieval/search.py", "characters": 2949, "sha256": "0f187d180b765724fcd402a7ad74350e15092561691a7f728d8ea116ba1f0c7c"}
+{"path": "backend/retrieval/search.py", "characters": 2950, "sha256": "26247e8bb2fd43dd15b5d2fe7dca437e998d5565f2da61bcdceef835a07d5504"}
 """Lexical retrieval over selected preprocessed documents."""
 from collections import OrderedDict
 import re
@@ -3640,7 +3523,7 @@ import re
 from backend.shared.rows import row_location, row_text
 
 STOP = {'the','a','an','is','are','what','which','of','to','for','in','and','or','does','do','with'}
-_FRAMES = OrderedDict()  # (document id, sheet) -> DataFrame; small LRU so repeat searches are fast
+_FRAMES = OrderedDict()  # (document id, sheet) -> Table; small LRU so repeat searches are fast
 _FRAME_CACHE_SIZE = 16
 
 
@@ -3667,7 +3550,7 @@ def _units(doc):
         if not ('csv_record' in location and location.get('sheet') in data_sheets):
             yield block
     for sheet, meta in data_sheets.items():
-        for index, row in _frame(doc, sheet, meta).iterrows():
+        for index, row in enumerate(_frame(doc, sheet, meta).rows):
             location = row_location(sheet, meta, index, row)
             yield {'block_id': f"{sheet}!R{location['csv_record']}", 'text': row_text(row), 'location': location}
 
@@ -3793,7 +3676,7 @@ def profile_hints(profile, *, max_glossary=15):
     return {k: v for k, v in view.items() if v not in ('', [], {}, None)}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/shared/rows.py", "characters": 1948, "sha256": "5dbee37ef618754e3b2367ca88a695a7ffd96d79dcbb81de90c97276a0cd6610"}
+{"path": "backend/shared/rows.py", "characters": 1970, "sha256": "546a3175f9c90b3fdafdec316b4132c36855440167698f43c06d3f1d5e8871a5"}
 """One text form and source location for a table row, shared by preprocessing and search."""
 import re
 
@@ -3801,18 +3684,18 @@ MIDNIGHT = re.compile(r"^(\d{4}-\d{2}-\d{2}) 00:00:00$")
 
 
 def row_text(row):
-    return '; '.join(f'{col}: {value}' for col, value in row.items())
+    return '; '.join(f'{col}: {"" if value is None else value}' for col, value in row.items())
 
 
-def narrative_rows(frame):
-    """Rebuild narrative-sheet cells (source_row, source_column, text) into one text line per sheet row.
+def narrative_rows(cells):
+    """Rebuild narrative-sheet cells (dicts with source_row, source_column, text) into one text line per sheet row.
 
     A multi-cell row whose columns repeat in the rows below acts as a header, so small embedded
     tables (revision logs, sign-offs) read as "Date: ...; Version: ...; Author: ...".
     Yields (source_row, text).
     """
     rows = {}
-    for _, cell in frame.iterrows():
+    for cell in cells:
         # Spreadsheet dates arrive as midnight timestamps; show the date alone.
         text = MIDNIGHT.sub(r'\1', str(cell['text']))
         rows.setdefault(int(cell['source_row']), {})[int(cell['source_column'])] = text
@@ -3842,27 +3725,256 @@ def row_location(sheet, meta, index, row):
     return location
 
 ===== REPOSITORY FILE =====
-{"path": "backend/shared/serialization.py", "characters": 669, "sha256": "ac897f1b89c187a69b59b5c23c6c45ac9f2cd9cc5b507fe8b0c43f71df0b3bf6"}
+{"path": "backend/shared/serialization.py", "characters": 520, "sha256": "fd5aaca43d9cb088bd7c82f9d6767c4cec52c84e8412581541256042d7f84500"}
 """Convert table results to JSON-compatible values without losing decimals."""
 from decimal import Decimal
-import pandas as pd
+
 
 def sanitize_result(obj):
     if isinstance(obj, Decimal):
         return format(obj, 'f')
-    if obj is pd.NA or obj is pd.NaT:
-        return None
     if isinstance(obj, dict):
         return {k: sanitize_result(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [sanitize_result(v) for v in obj]
     if isinstance(obj, float) and (obj != obj):
         return None
-    if hasattr(obj, "item"):
-        return sanitize_result(obj.item())
     if hasattr(obj, "isoformat"):
         return obj.isoformat()
     return obj
+
+===== REPOSITORY FILE =====
+{"path": "backend/shared/table.py", "characters": 4354, "sha256": "d3fce9607f274393d9c4c3b9cd0db39f03114734f10d8cba2f333496353bb6e1"}
+"""A small in-memory table read from a preprocessed CSV, using only the standard library.
+
+Rows are dicts keyed by column name; None is a missing value. Each row keeps its position in the
+source CSV (`index`) through filtering, sorting and selection, so results can cite the rows they came from.
+"""
+import csv
+import io
+import re
+
+NUMBER = re.compile(r'\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*')
+INTEGER = re.compile(r'\s*[+-]?\d+\s*')
+
+
+class Table:
+    def __init__(self, columns, rows, index=None, numeric=()):
+        self.columns = list(columns)
+        self.rows = rows
+        self.index = list(range(len(rows))) if index is None else list(index)
+        self.numeric = {c for c in numeric if c in self.columns}
+
+    def __len__(self):
+        return len(self.rows)
+
+    def column(self, name):
+        return [row[name] for row in self.rows]
+
+    def take(self, positions):
+        """The rows at these positions (not source indices), keeping their source indices."""
+        positions = list(positions)
+        return Table(self.columns, [self.rows[p] for p in positions], [self.index[p] for p in positions],
+                     self.numeric)
+
+    def select(self, columns):
+        return Table(columns, [{c: row[c] for c in columns} for row in self.rows], self.index, self.numeric)
+
+    def with_column(self, name, values, numeric=False):
+        """A copy with column `name` added or replaced."""
+        columns = self.columns if name in self.columns else self.columns + [name]
+        kinds = (self.numeric | {name}) if numeric else (self.numeric - {name})
+        return Table(columns, [{**row, name: value} for row, value in zip(self.rows, values)], self.index, kinds)
+
+    def records(self):
+        return [{c: row[c] for c in self.columns} for row in self.rows]
+
+
+def is_numeric(values):
+    """True when every present value is a number (an all-missing column counts as numeric, as in pandas)."""
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values if v is not None)
+
+
+def from_records(records, columns=None):
+    """A table from row dicts; columns holding only numbers are numeric."""
+    columns = list(columns or dict.fromkeys(k for r in records for k in r))
+    rows = [{c: r.get(c) for c in columns} for r in records]
+    return Table(columns, rows, numeric=[c for c in columns if is_numeric(r[c] for r in rows)])
+
+
+def concat(tables):
+    """Stack tables; a column missing from a table is None there, and stays numeric only if numeric everywhere."""
+    columns = list(dict.fromkeys(c for t in tables for c in t.columns))
+    rows = [{c: row.get(c) for c in columns} for t in tables for row in t.rows]
+    numeric = [c for c in columns if all(c in t.numeric for t in tables if c in t.columns)]
+    return Table(columns, rows, numeric=numeric)
+
+
+def _header(names):
+    """Name blank headers "Unnamed: i" and number repeats "Name.1", as pandas.read_csv does."""
+    out, seen = [], set()
+    for i, name in enumerate(names):
+        name = name if name != '' else f'Unnamed: {i}'
+        base, n = name, 0
+        while name in seen:
+            n += 1
+            name = f'{base}.{n}'
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def parse_csv(raw, text_columns=()):
+    """Parse CSV bytes. Empty cells are missing. A column is numeric when every present value is a number,
+    unless it is named in text_columns (so codes such as "0012" keep their zeros). A numeric column holding
+    any decimal is all floats; otherwise all integers.
+    """
+    lines = [line for line in csv.reader(io.StringIO(raw.decode('utf-8-sig'), newline='')) if line]
+    if not lines:
+        return Table([], [])
+    columns = _header(lines[0])
+    width = len(columns)
+    rows = [{c: (v if v != '' else None) for c, v in zip(columns, line[:width] + [''] * (width - len(line)))}
+            for line in lines[1:]]
+    numeric = []
+    for col in columns:
+        present = [row[col] for row in rows if row[col] is not None]
+        if col in text_columns or not all(NUMBER.fullmatch(v) for v in present):
+            continue
+        convert = int if all(INTEGER.fullmatch(v) for v in present) else float
+        for row in rows:
+            if row[col] is not None:
+                row[col] = convert(row[col])
+        numeric.append(col)
+    return Table(columns, rows, numeric=numeric)
+
+===== REPOSITORY FILE =====
+{"path": "backend/shared/values.py", "characters": 5285, "sha256": "2a444f1241fca75978dc7d7690325d4182506b9e8d3ed3dd6d3454bd9d489d80"}
+"""Value checks shared by preprocessing profiles and query diagnostics: possible spelling variants,
+missing markers and placeholder numbers. Standard library only, so the question path needs no pandas.
+"""
+import re
+from collections import Counter
+
+# "NA" is excluded on purpose: it is often a real code (e.g. "not applicable").
+MISSING_MARKERS = {'nan', 'null', 'none', 'nil', 'n/a', '#n/a', 'missing', '(blank)'}
+
+
+def normalize_key(value):
+    """Case-, space- and punctuation-insensitive comparison key."""
+    return re.sub(r'[^0-9a-z]+', '', str(value).casefold())
+
+
+def _subsequence(short, long):
+    rest = iter(long)
+    return all(ch in rest for ch in short)
+
+
+def _similar(raw_a, raw_b):
+    """True when two values plausibly name the same thing.
+
+    Deliberately conservative: only case/space/punctuation differences, or dropped letters
+    (Vsa/Visa, tehr@n/Tehran, fail/failed). Substitutions are never grouped, because pairs
+    such as Medicare/Medicaid, Male/Female and Dental/Rental are different things.
+    """
+    a, b = normalize_key(raw_a), normalize_key(raw_b)
+    if a == b:
+        return True
+    (short, raw_short), (long, raw_long) = sorted([(a, raw_a), (b, raw_b)], key=lambda p: len(p[0]))
+    if len(short) < 3 or short.isdigit() or len(long) - len(short) > 3 or short[0] != long[0]:
+        return False
+    # A separate qualifier word (Medicaid / Medicaid A, Premium / Premium Plus) is a different value.
+    if str(raw_long).strip().casefold().startswith(str(raw_short).strip().casefold() + ' '):
+        return False
+    if re.sub(r'\d', '', a) == re.sub(r'\d', '', b):  # Tier 1 / Tier 10
+        return False
+    fewer, more = sorted([_words(raw_a), _words(raw_b)], key=len)
+    # An added whole word makes a different element (Account - Date / Account - End Date).
+    if len(fewer) < len(more) and _subsequence(fewer, more):
+        return False
+    # In multi-word names, a word extended at either end is a different term (Pack / Package Amount).
+    # Mid-word typos (Acount / Account) and single words (fail / failed) are still grouped.
+    if len(fewer) == len(more) >= 2:
+        changed = [(x, y) for x, y in zip(fewer, more) if x != y]
+        if len(changed) == 1:
+            x, y = sorted(changed[0], key=len)
+            if y.startswith(x) or y.endswith(x):
+                return False
+    return _subsequence(short, long)
+
+
+def _words(raw):
+    return re.findall(r'[0-9a-z]+', str(raw).casefold())
+
+
+def _abbreviation(raw, key, other):
+    """All-caps codes such as THR whose letters appear in order in a longer value's key."""
+    if not (2 <= len(key) <= 4 and str(raw).strip().isupper() and len(other) > len(key) + 1):
+        return False
+    if key[0] != other[0]:
+        return False
+    return _subsequence(key, other)
+
+
+def variant_groups(counts):
+    """Group values (value -> count) that look like spellings of one thing.
+
+    Returns [{'suggested': most frequent value, 'variants': {value: count, ...}}], largest first.
+    """
+    values = [v for v in counts if str(v).strip().casefold() not in MISSING_MARKERS and normalize_key(v)]
+    parent = {v: v for v in values}
+
+    def find(v):
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
+
+    keys = {v: normalize_key(v) for v in values}
+    for i, a in enumerate(values):
+        for b in values[i + 1:]:
+            ka, kb = keys[a], keys[b]
+            if _similar(a, b) or _abbreviation(a, ka, kb) or _abbreviation(b, kb, ka):
+                parent[find(a)] = find(b)
+    groups = {}
+    for v in values:
+        groups.setdefault(find(v), []).append(v)
+    result = []
+    for members in groups.values():
+        if len(members) > 1:
+            # Most frequent first; on ties prefer a trimmed, non-all-caps spelling over a code such as THR.
+            members.sort(key=lambda v: (-counts[v], str(v).isupper(), str(v) != str(v).strip()))
+            result.append({'suggested': members[0], 'variants': {m: int(counts[m]) for m in members}})
+    return sorted(result, key=lambda g: -sum(g['variants'].values()))
+
+
+def placeholder_values(values):
+    """Repeated numbers made only of 9s (e.g. 999, -999999), a common 'unknown' sentinel. Skips missing values."""
+    found = {}
+    for value, count in Counter(v for v in values if v is not None and v == v).items():
+        try:
+            digits = format(abs(float(value)), 'f').rstrip('0').rstrip('.')
+        except (TypeError, ValueError):
+            continue
+        if count > 1 and len(digits) >= 3 and set(digits) == {'9'}:
+            found[str(value)] = int(count)
+    return found
+
+
+def similar_values(requested, counts):
+    """Values in counts (value -> count) that look like spellings of a requested value but were not requested."""
+    wanted = set(requested)
+    found = {}
+    for value, count in counts.items():
+        if value in wanted or value.strip().casefold() in MISSING_MARKERS:
+            continue
+        for target in wanted:
+            kv, kt = normalize_key(value), normalize_key(target)
+            if kv and kt and (_similar(value, target) or _abbreviation(value, kv, kt)
+                              or _abbreviation(target, kt, kv)):
+                found[value] = count
+                break
+    return found
 
 ===== REPOSITORY FILE =====
 {"path": "backend/storage/__init__.py", "characters": 26, "sha256": "1dbd8e9f0c5a1cf63223092c168c46c8fbd886face5fadfff6a664a0f958ea95"}
@@ -4168,10 +4280,9 @@ def configured_store(*, read_only=False):
                            kms_key_id=os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None, read_only=read_only)
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/tables.py", "characters": 1234, "sha256": "1cd3e2d501707a07158c9ab79b15b2e7ef26401c322eeef476ce4ae6705c4e64"}
+{"path": "backend/storage/tables.py", "characters": 1075, "sha256": "bb651e71c41492272135450541bb85b454d330a2d9850111a6d55da68c07669f"}
 """Read preprocessed table CSVs through either local or S3 storage."""
-import io
-import pandas as pd
+from backend.shared.table import Table, parse_csv
 
 
 def load_table(
@@ -4182,7 +4293,7 @@ def load_table(
     filename: str,
     sheet_name: str | None = None,
     sheet_meta: dict | None = None,
-) -> pd.DataFrame:
+) -> Table:
     if filename.lower().endswith(".csv"):
         key = f"{s3_prefix}{plan_domain}/preprocessed/{filename}/{filename}"
         with s3_client.get_object(Bucket=s3_bucket, Key=key)["Body"] as body:
@@ -4192,15 +4303,10 @@ def load_table(
         csv_key = f"{s3_prefix}{plan_domain}/preprocessed/{filename}/{safe_name}.csv"
         with s3_client.get_object(Bucket=s3_bucket, Key=csv_key)["Body"] as body:
             raw = body.read()
-    try:
-        text_types = {c["name"]: "string" for c in (sheet_meta or {}).get("columns", [])
-                      if c.get("dtype") in {"str", "string", "object"}}
-        df = pd.read_csv(io.BytesIO(raw), dtype=text_types or None,
-                         keep_default_na=False, na_values=[""])
-    except pd.errors.EmptyDataError:
-        df = pd.DataFrame()
-
-    return df[[c for c in df.columns if str(c).strip() != ""]]
+    text_columns = {c["name"] for c in (sheet_meta or {}).get("columns", [])
+                    if c.get("dtype") in {"str", "string", "object"}}
+    table = parse_csv(raw, text_columns)
+    return table.select([c for c in table.columns if c.strip() != ""])
 
 ===== REPOSITORY FILE =====
 {"path": "backend/tools/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
@@ -4384,17 +4490,20 @@ def execute_document_tool(name, params, docs):
     raise ValueError(f'Unknown document tool: {name}')
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/table_operations.py", "characters": 22263, "sha256": "98aa224997b90afc6f891d4cb916e457aad1c76313f885f48f8034410b9e116e"}
+{"path": "backend/tools/table_operations.py", "characters": 25439, "sha256": "0d7f10ff4674e4871be3d8fd961b5c5e7aa60dafe844b1c86e588d55516f99b0"}
 """Validated, deterministic table operations. No eval or generated Python."""
+import operator
+from collections import Counter
 from decimal import Decimal, InvalidOperation, localcontext
 
-import pandas as pd
-
-from backend.preprocessing.profiling import MISSING_MARKERS, placeholder_values, similar_values
+from backend.shared.table import Table
+from backend.shared.values import MISSING_MARKERS, placeholder_values, similar_values
 
 MAX_JOIN_ROWS = 100_000
 QUERY_KEYS = {'filters', 'select', 'group_by', 'aggregations', 'sort', 'offset', 'limit', 'conversions', 'recode',
               'derive'}
+COMPARISONS = {'eq': operator.eq, 'ne': operator.ne, 'gt': operator.gt, 'ge': operator.ge, 'lt': operator.lt,
+               'le': operator.le}
 
 
 def _check_keys(params, allowed):
@@ -4413,14 +4522,22 @@ def _columns(frame, names):
         raise ValueError(f'Unknown columns: {sorted(missing)}; available: {list(frame.columns)}')
 
 
-def _coerce(series, value):
+def _present(frame, col):
+    return [v for v in frame.column(col) if v is not None]
+
+
+def _value_counts(values):
+    """Value -> count, most frequent first."""
+    return dict(Counter(values).most_common())
+
+
+def _coerce(frame, col, value):
     """Compare numeric columns numerically even when the value arrives as text ("-999999")."""
-    if (pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
-            and isinstance(value, str)):
+    if col in frame.numeric and isinstance(value, str):
         try:
             return float(value.replace(',', '').strip())
         except ValueError:
-            raise ValueError(f'Column {series.name!r} is numeric; {value!r} is not a number') from None
+            raise ValueError(f'Column {col!r} is numeric; {value!r} is not a number') from None
     return value
 
 
@@ -4431,7 +4548,6 @@ def recode(frame, specs):
     """
     if not isinstance(specs, list):
         raise ValueError('recode must be a list')
-    frame = frame.copy()
     for spec in specs:
         _check_keys(spec, {'column', 'map'})
         col, mapping = spec['column'], spec['map']
@@ -4449,17 +4565,18 @@ def recode(frame, specs):
             mapping = inverted
         elif not all(v is None or isinstance(v, str) for v in mapping.values()):
             raise ValueError('recode map values must be strings or null, e.g. {"THR": "Tehran", "nan": null}')
-        series = frame[col]
-        if pd.api.types.is_numeric_dtype(series):
+        values = frame.column(col)
+        if col in frame.numeric:
             if any(v is not None for v in mapping.values()):
                 raise ValueError('Numeric recodes may only map values to null')
-            targets = {_coerce(series, k) for k in mapping}
-            frame[col] = series.where(~series.isin(targets))
+            targets = [_coerce(frame, col, k) for k in mapping]
+            frame = frame.with_column(col, [None if v in targets else v for v in values], numeric=True)
         else:
-            unknown = [k for k in mapping if k not in set(series.dropna())]
+            unknown = [k for k in mapping if k not in set(values)]
             if unknown:
                 raise ValueError(f'recode keys not present in {col!r}: {unknown[:10]}. Use exact values from the column.')
-            frame[col] = series.map(lambda v: mapping.get(v, v) if pd.notna(v) else v).astype('string')
+            recoded = [mapping.get(v, v) if v is not None else None for v in values]
+            frame = frame.with_column(col, [None if v is None else str(v) for v in recoded])
     return frame
 
 
@@ -4470,21 +4587,46 @@ def derive(frame, specs):
     """
     if not isinstance(specs, list):
         raise ValueError('derive must be a list')
-    frame = frame.copy()
     for spec in specs:
         _check_keys(spec, {'column', 'as', 'split', 'part'})
         col, name, sep, part = spec.get('column'), spec.get('as'), spec.get('split'), spec.get('part', 0)
         _columns(frame, [col])
-        if not isinstance(name, str) or not name or name in frame:
+        if not isinstance(name, str) or not name or name in frame.columns:
             raise ValueError('derive "as" must name a new column')
         if not isinstance(sep, str) or not sep:
             raise ValueError('derive "split" must be a nonempty separator such as " - "')
         if type(part) is not int:
             raise ValueError('derive "part" must be an integer index (0 = first, -1 = last)')
-        pieces = frame[col].astype('string').str.split(sep, regex=False)
-        frame[name] = pieces.map(lambda p: p[part].strip() if isinstance(p, list) and -len(p) <= part < len(p)
-                                 else pd.NA).astype('string')
+        pieces = [None if v is None else str(v).split(sep) for v in frame.column(col)]
+        frame = frame.with_column(name, [p[part].strip() if p is not None and -len(p) <= part < len(p) else None
+                                         for p in pieces])
     return frame
+
+
+def _matches(frame, col, op, value):
+    """One boolean per row: does the row satisfy the condition? Missing values never match a comparison."""
+    values = frame.column(col)
+    if op in {'is_null', 'not_null'}:
+        return [(v is None) == (op == 'is_null') for v in values]
+    if op == 'contains':
+        if not isinstance(value, str):
+            raise ValueError('contains requires a string')
+        needle = value.casefold()
+        return [v is not None and needle in str(v).casefold() for v in values]
+    if op == 'in':
+        if not isinstance(value, list):
+            raise ValueError('in requires a list')
+        wanted = [_coerce(frame, col, v) for v in value]
+        return [v is not None and v in wanted for v in values]
+    if op in COMPARISONS:
+        if value is None:
+            raise ValueError('Use is_null/not_null to filter missing values')
+        compare, value = COMPARISONS[op], _coerce(frame, col, value)
+        try:
+            return [v is not None and compare(v, value) for v in values]
+        except TypeError:
+            raise ValueError(f'Cannot compare values in {col!r} with {value!r}') from None
+    raise ValueError(f'Unsupported filter operator: {op}')
 
 
 def filter_rows(frame, filters):
@@ -4495,25 +4637,9 @@ def filter_rows(frame, filters):
         _check_keys(condition, {'column', 'op', 'value'})
         col, op = condition['column'], condition['op']
         _columns(result, [col])
-        series, value = result[col], condition.get('value')
-        if op in {'is_null', 'not_null'}:
-            mask = series.isna() if op == 'is_null' else series.notna()
-        elif op == 'contains':
-            if not isinstance(value, str):
-                raise ValueError('contains requires a string')
-            mask = series.astype('string').str.contains(value, case=False, regex=False, na=False)
-        elif op == 'in':
-            if not isinstance(value, list):
-                raise ValueError('in requires a list')
-            mask = series.isin([_coerce(series, v) for v in value])
-        elif op in {'eq', 'ne', 'gt', 'ge', 'lt', 'le'}:
-            if value is None:
-                raise ValueError('Use is_null/not_null to filter missing values')
-            mask = getattr(series, op)(_coerce(series, value)) & series.notna()
-        else:
-            raise ValueError(f'Unsupported filter operator: {op}')
-        result = result.loc[mask.fillna(False)]
-    return result.copy()
+        mask = _matches(result, col, op, condition.get('value'))
+        result = result.take(p for p, keep in enumerate(mask) if keep)
+    return result
 
 
 def _decimal(value):
@@ -4535,15 +4661,15 @@ def _aggregate(frame, spec):
         return len(frame)
     col = spec.get('column')
     _columns(frame, [col])
-    present = frame[col].dropna()
+    present = _present(frame, col)
     if op == 'count':
         return len(present)
     if op == 'nunique':
-        return int(present.nunique())
+        return len(set(present))
     if op not in {'sum', 'mean', 'min', 'max'}:
         raise ValueError(f'Unsupported aggregation: {op}')
     # Empty/all-missing sums must not masquerade as a genuine zero.
-    if present.empty:
+    if not present:
         return None
     numbers = [_decimal(value) for value in present]
     with localcontext() as ctx:
@@ -4555,7 +4681,7 @@ def _aggregate(frame, spec):
 
 
 def _text_columns(frame):
-    return [c for c in frame.columns if not pd.api.types.is_numeric_dtype(frame[c]) and not str(c).startswith('_')]
+    return [c for c in frame.columns if c not in frame.numeric and not str(c).startswith('_')]
 
 
 def _found_elsewhere(frame, condition):
@@ -4566,10 +4692,10 @@ def _found_elsewhere(frame, condition):
     for other in _text_columns(frame):
         if other == col:
             continue
-        values = frame[other].dropna().astype('string').str.strip().str.casefold()
-        mask = (values.str.contains(wanted[0], regex=False) if op == 'contains' else values.isin(wanted))
-        if mask.any():
-            found[other] = int(mask.sum())
+        values = [str(v).strip().casefold() for v in _present(frame, other)]
+        hits = sum(wanted[0] in v if op == 'contains' else v in wanted for v in values)
+        if hits:
+            found[other] = hits
     return found
 
 
@@ -4578,18 +4704,18 @@ def _filter_diagnostics(frame, filters):
     notes = []
     for condition in filters:
         col, op, value = condition.get('column'), condition.get('op'), condition.get('value')
-        if col not in frame or pd.api.types.is_numeric_dtype(frame[col]):
+        if col not in frame.columns or col in frame.numeric:
             continue
-        if op in {'eq', 'in', 'contains'} and value is not None and filter_rows(frame, [condition]).empty:
+        if op in {'eq', 'in', 'contains'} and value is not None and not len(filter_rows(frame, [condition])):
             elsewhere = _found_elsewhere(frame, condition)
             if elsewhere:
                 notes.append({'column': col, 'requested': value, 'matched_rows': 0, 'value_found_in_columns': elsewhere,
                               'message': 'This filter matched nothing in its column, but the value occurs in the '
                                          'columns listed. Check that the query uses the right column.'})
-        counts = frame[col].dropna().value_counts()
+        counts = _value_counts(_present(frame, col))
         if len(counts) > 1000:
             continue
-        counts = {str(k): int(n) for k, n in counts.items()}
+        counts = {str(k): n for k, n in counts.items()}
         if op in {'eq', 'in'}:
             requested = value if isinstance(value, list) else [value]
             others = similar_values([str(v) for v in requested], counts)
@@ -4606,6 +4732,11 @@ def _filter_diagnostics(frame, filters):
     return notes
 
 
+def _ordered(value):
+    """Sort key that orders numbers before text, so a mixed column still sorts."""
+    return (0, value, '') if isinstance(value, (int, float)) and not isinstance(value, bool) else (1, 0, str(value))
+
+
 def _conflicting_rows(frame, filtered, params):
     """Rows that share an identifier-like key but disagree elsewhere (e.g. two different mappings).
 
@@ -4613,22 +4744,44 @@ def _conflicting_rows(frame, filtered, params):
     are mostly unique in the full table count.
     """
     def identifier_like(col):
-        present = frame[col].dropna()
+        present = _present(frame, col)
+        distinct = len(set(present))
         # Enough distinct values to judge, and mostly unique (a list of names or IDs, not a status column).
-        return present.nunique() >= 10 and present.nunique() / len(present) >= 0.5
+        return distinct >= 10 and distinct / len(present) >= 0.5
     keys = [c['column'] for c in params.get('filters', [])
-            if c.get('op') in {'eq', 'in'} and c.get('column') in filtered and identifier_like(c['column'])]
-    shown = [c for c in (params.get('select') or list(filtered.columns))
-             if c in filtered and not str(c).startswith('_') and c not in keys]
+            if c.get('op') in {'eq', 'in'} and c.get('column') in filtered.columns and identifier_like(c['column'])]
+    shown = [c for c in (params.get('select') or filtered.columns)
+             if c in filtered.columns and not str(c).startswith('_') and c not in keys]
     notes = []
     for key in keys[:1]:
-        for value, group in list(filtered.groupby(key, dropna=True))[:5]:
+        groups = {}
+        for row in filtered.rows:
+            if row[key] is not None:
+                groups.setdefault(row[key], []).append(row)
+        for value in sorted(groups, key=_ordered)[:5]:
+            group = groups[value]
             if len(group) > 1 and shown:
-                differing = [c for c in shown if group[c].astype('string').nunique(dropna=False) > 1]
+                differing = [c for c in shown if len({None if r[c] is None else str(r[c]) for r in group}) > 1]
                 if differing:
                     notes.append(f'{len(group)} rows have {key} = {value!r} but disagree in {differing}. '
                                  'Report every version with its sheet and row; do not pick one silently.')
     return notes
+
+
+def _sort(frame, sort, decimal_columns):
+    """Stable multi-column sort; missing values last for every column."""
+    positions = list(range(len(frame)))
+    for item in reversed(sort):
+        col, descending = item['column'], item.get('descending', False)
+        values = frame.column(col)
+        key = (lambda v: Decimal(v)) if col in decimal_columns else (lambda v: v)
+        present = [p for p in positions if values[p] is not None]
+        try:
+            present.sort(key=lambda p: key(values[p]), reverse=descending)
+        except TypeError:
+            raise ValueError(f'Column {col!r} mixes values that cannot be ordered') from None
+        positions = present + [p for p in positions if values[p] is None]
+    return frame.take(positions)
 
 
 def query_table(frame, params):
@@ -4642,14 +4795,14 @@ def query_table(frame, params):
         _check_keys(conversion, {'column', 'unit_column', 'factors', 'as'})
         column, unit_column, name = conversion['column'], conversion['unit_column'], conversion['as']
         _columns(filtered, [column, unit_column])
-        if not isinstance(name, str) or not name or name in filtered:
+        if not isinstance(name, str) or not name or name in filtered.columns:
             raise ValueError('Conversion as must name a new column')
         factors = conversion['factors']
         if not isinstance(factors, dict) or not factors:
             raise ValueError('factors must map source unit labels to numeric multipliers')
         factors = {str(k): _decimal(v) for k, v in factors.items()}
         def convert(row):
-            if pd.isna(row[column]):
+            if row[column] is None:
                 return None
             unit = str(row[unit_column])
             if unit not in factors:
@@ -4657,8 +4810,7 @@ def query_table(frame, params):
             with localcontext() as ctx:
                 ctx.prec = 38
                 return _decimal(row[column]) * factors[unit]
-        filtered[name] = pd.Series([convert(row) for _, row in filtered.iterrows()],
-                                   index=filtered.index, dtype=object)
+        filtered = filtered.with_column(name, [convert(row) for row in filtered.rows])
     group_by = params.get('group_by', [])
     _columns(filtered, group_by)
     aggregates = params.get('aggregations', [])
@@ -4677,20 +4829,26 @@ def query_table(frame, params):
             raise ValueError('Aggregation output names must be unique and distinct from group keys')
         # Validate even if there are no matching groups.
         for spec in aggregates:
-            _aggregate(filtered.iloc[:0], spec)
-        groups = filtered.groupby(group_by, dropna=False, sort=False) if group_by else [((), filtered)]
+            _aggregate(filtered.take([]), spec)
+        if group_by:
+            # Groups in order of first appearance; a missing key is a group of its own.
+            groups = {}
+            for position, row in enumerate(filtered.rows):
+                groups.setdefault(tuple(row[c] for c in group_by), []).append(position)
+            groups = [(keys, filtered.take(positions)) for keys, positions in groups.items()]
+        else:
+            groups = [((), filtered)]
         rows = []
         for keys, group in groups:
-            keys = keys if isinstance(keys, tuple) else (keys,)
             row = dict(zip(group_by, keys))
             row.update({spec['as']: _aggregate(group, spec) for spec in aggregates})
             rows.append(row)
-        result = pd.DataFrame(rows, columns=group_by + aliases)
+        result = Table(group_by + aliases, rows, numeric=[c for c in group_by if c in filtered.numeric])
         numeric_columns = [s['as'] for s in aggregates if s['op'] in {'sum','mean','min','max'}]
     else:
         selected = params.get('select', list(filtered.columns))
         _columns(filtered, selected)
-        result = filtered[selected]
+        result = filtered.select(selected)
     sort = params.get('sort', [])
     if not isinstance(sort, list):
         raise ValueError('sort must be a list')
@@ -4700,15 +4858,11 @@ def query_table(frame, params):
         if not isinstance(item.get('descending', False), bool):
             raise ValueError('descending must be boolean')
     if sort:
-        result = result.sort_values([s['column'] for s in sort],
-                                    ascending=[not s.get('descending', False) for s in sort],
-                                    kind='stable', na_position='last',
-                                    key=lambda s: s.map(lambda v: Decimal(v) if pd.notna(v) else None)
-                                    if s.name in numeric_columns else s)
+        result = _sort(result, sort, numeric_columns)
     offset, limit = params.get('offset', 0), params.get('limit', 50)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError('offset must be nonnegative and limit must be 1..100')
-    page = result.iloc[offset:offset + limit]
+    page = result.take(range(offset, min(offset + limit, len(result))))
     notes = _conflicting_rows(frame, filtered, params) if not aggregates else []
     if len(result) > offset + len(page):
         notes.append(f'Only {len(page)} of {len(result)} result rows are shown. For distinct values use '
@@ -4716,24 +4870,24 @@ def query_table(frame, params):
     placeholders = {}
     for spec in aggregates:
         col = spec.get('column')
-        if spec.get('op') in {'sum', 'mean', 'min', 'max'} and col in frame and col in filtered:
-            suspicious = set(placeholder_values(frame[col]))
-            found = {str(k): int(n) for k, n in filtered[col].value_counts().items() if str(k) in suspicious}
+        if spec.get('op') in {'sum', 'mean', 'min', 'max'} and col in frame.columns and col in filtered.columns:
+            suspicious = set(placeholder_values(frame.column(col)))
+            found = {str(k): n for k, n in _value_counts(_present(filtered, col)).items() if str(k) in suspicious}
             if found:
                 placeholders[col] = found
     if placeholders:
         notes.append(f'Aggregated values include possible placeholder numbers {placeholders}; consider '
                      'reporting results with and without them (filter ne, or recode to null).')
     # Carry available unit labels alongside numeric projections, even when the model omits them.
-    unit_columns = [c for c in filtered if str(c).lower() in {'unit','units','source unit'}]
-    unit_context = ({c: [str(v) for v in filtered[c].dropna().unique()[:20]] for c in unit_columns}
+    unit_columns = [c for c in filtered.columns if str(c).lower() in {'unit','units','source unit'}]
+    unit_context = ({c: [str(v) for v in list(dict.fromkeys(_present(filtered, c)))[:20]] for c in unit_columns}
                     if not aggregates else {})
-    return {'rows': page.to_dict(orient='records'), 'matched_rows': len(filtered),
+    return {'rows': page.records(), 'matched_rows': len(filtered),
             'total_result_rows': len(result), 'next_offset': offset + limit if offset + limit < len(result) else None,
-            'null_counts': {str(c): int(filtered[c].isna().sum()) for c in filtered.columns},
+            'null_counts': {str(c): sum(v is None for v in filtered.column(c)) for c in filtered.columns},
             'decimal_columns': numeric_columns, 'aggregated': bool(aggregates),
-            'result_row_indices': [] if aggregates else [int(i) for i in page.index],
-            'contributing_row_indices': [int(i) for i in filtered.index[:100]],
+            'result_row_indices': [] if aggregates else list(page.index),
+            'contributing_row_indices': filtered.index[:100],
             'provenance_truncated': len(filtered) > 100,
             'unit_context': unit_context, 'conversions': conversions,
             'numeric_policy': 'Decimal arithmetic, 38 significant digits; means may repeat. No implicit rounding.',
@@ -4756,14 +4910,16 @@ def join_tables(left, right, params):
         raise ValueError('how must be left or inner')
     if relationship not in {'one_to_one','many_to_one','one_to_many','many_to_many'}:
         raise ValueError('Invalid relationship')
+    for a, b in zip(left_on, right_on):
+        if (a in left.numeric) != (b in right.numeric):
+            raise ValueError(f'Cannot join text column and numeric column on keys {a!r} and {b!r}')
     reserved = {'__left_index','__right_index'}
     if reserved & (set(left.columns) | set(right.columns)):
         raise ValueError('Source columns collide with reserved join provenance columns')
-    left_valid = left[left[left_on].notna().all(axis=1)]
-    right_valid = right[right[right_on].notna().all(axis=1)]
     def keys(frame, cols):
-        return list(frame[cols].itertuples(index=False, name=None))
-    from collections import Counter
+        return [tuple(row[c] for c in cols) for row in frame.rows]
+    left_valid = left.take(p for p, key in enumerate(keys(left, left_on)) if None not in key)
+    right_valid = right.take(p for p, key in enumerate(keys(right, right_on)) if None not in key)
     lc, rc = Counter(keys(left_valid, left_on)), Counter(keys(right_valid, right_on))
     matched_left = sum(n for key, n in lc.items() if key in rc)
     matched_right = sum(n for key, n in rc.items() if key in lc)
@@ -4787,25 +4943,42 @@ def join_tables(left, right, params):
                 'diagnostics': diagnostics}
     if expected_rows > MAX_JOIN_ROWS:
         return {'error': f'Join exceeds {MAX_JOIN_ROWS} output rows; filter first.', 'diagnostics': diagnostics}
-    left = left.assign(__left_index=left.index)
-    right_valid = right_valid.assign(__right_index=right_valid.index)
-    # Removing null keys from the right prevents pandas' null-equals-null join behavior.
-    joined = left.merge(right_valid, left_on=left_on, right_on=right_on, how=how,
-                        suffixes=('_left','_right'), sort=False)
-    provenance = joined[['__left_index','__right_index']].copy()
-    result = query_table(joined.drop(columns=['__left_index','__right_index']), params.get('query', {}))
+    # A key with the same name on both sides appears once; other shared names get _left/_right suffixes.
+    shared = {a for a, b in zip(left_on, right_on) if a == b}
+    overlap = (set(left.columns) & set(right.columns)) - shared
+    left_names = {c: c + '_left' if c in overlap else c for c in left.columns}
+    right_names = {c: c + '_right' if c in overlap else c for c in right.columns if c not in shared}
+    partners = {}
+    for position, key in enumerate(keys(right_valid, right_on)):
+        partners.setdefault(key, []).append(position)
+    # Null keys never match: they were left out of right_valid, and a left key holding None finds no partner.
+    rows, provenance = [], []
+    for position, (row, key) in enumerate(zip(left.rows, keys(left, left_on))):
+        out = {left_names[c]: row[c] for c in left.columns}
+        matches = partners.get(key, []) if None not in key else []
+        if not matches and how == 'left':
+            rows.append({**out, **dict.fromkeys(right_names.values())})
+            provenance.append({'__left_index': left.index[position], '__right_index': None})
+        for match in matches:
+            other = right_valid.rows[match]
+            rows.append({**out, **{name: other[c] for c, name in right_names.items()}})
+            provenance.append({'__left_index': left.index[position], '__right_index': right_valid.index[match]})
+    joined = Table(list(left_names.values()) + list(right_names.values()), rows,
+                   numeric=[left_names[c] for c in left.numeric] + [right_names[c] for c in right.numeric
+                                                                     if c in right_names])
+    result = query_table(joined, params.get('query', {}))
     indices = result['contributing_row_indices'] if result['aggregated'] else result['result_row_indices']
-    result['join_provenance'] = provenance.iloc[indices].where(provenance.notna(), None).to_dict(orient='records')
+    result['join_provenance'] = [provenance[i] for i in indices]
     result['diagnostics'] = diagnostics
     return result
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/tables.py", "characters": 13240, "sha256": "bf271056e8f762d7a2c544f2a310d8eb232d9d3641c7828cf8bf88aab8c3d08a"}
+{"path": "backend/tools/tables.py", "characters": 13228, "sha256": "803d374d7c2bc9e8815d9b8ec4ce033d3875d4ec892179b3335beaa30a51e083"}
 """Deterministic table tools used by the document agent; no agent imports."""
 import logging
 from backend.shared.serialization import sanitize_result
-import pandas as pd
 from backend.shared.rows import narrative_rows
+from backend.shared.table import Table, concat
 from backend.storage.tables import load_table
 from backend.tools.table_operations import query_table, join_tables
 
@@ -4816,8 +4989,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _source_rows(frame, meta, indices):
-    if meta.get('sheet_type') == 'metadata' and 'source_row' in frame:
-        return [int(frame.iloc[i]['source_row']) for i in indices if i < len(frame)]
+    if meta.get('sheet_type') == 'metadata' and 'source_row' in frame.columns:
+        return [int(frame.rows[i]['source_row']) for i in indices if i < len(frame)]
     rows = meta.get('source_rows', [])
     return [rows[i] for i in indices if i < len(rows)]
 
@@ -4825,9 +4998,8 @@ def _load_for_query(load, name, meta):
     """Narrative tabs are queried as one text line per sheet row, matching read_sheet and search."""
     frame = load(name)
     if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
-        lines = list(narrative_rows(frame))
-        frame = pd.DataFrame({'source_row': [n for n, _ in lines], 'text': [t for _, t in lines]})
-        frame['text'] = frame['text'].astype('string')
+        frame = Table(['source_row', 'text'], [{'source_row': n, 'text': t} for n, t in narrative_rows(frame.rows)],
+                      numeric=['source_row'])
     return frame
 
 
@@ -4849,24 +5021,25 @@ def _query_many(sheet_names, params, load, sheets):
     if unknown or not names:
         return {'error': f'Unknown sheets {unknown}; use exact names from list_sheets or ["*"] for all data sheets.'}
     needed = _referenced_columns(params)
-    frames, skipped = [], {}
+    frames, queried, skipped = [], [], {}
     for name in names:
         frame = load(name)
         missing = sorted(needed - set(frame.columns))
         if missing:
             skipped[name] = f'missing columns {missing}'
             continue
-        frame = frame.copy()
-        frame.insert(0, '_source_row', _source_rows(frame, sheets[name], range(len(frame))) or [None] * len(frame))
-        frame.insert(0, '_sheet', name)
-        frames.append(frame)
+        source = _source_rows(frame, sheets[name], range(len(frame)))
+        source += [None] * (len(frame) - len(source))
+        frames.append(Table(['_sheet', '_source_row'] + frame.columns,
+                            [{'_sheet': name, '_source_row': n, **row} for n, row in zip(source, frame.rows)],
+                            numeric=frame.numeric | {'_source_row'}))
+        queried.append(name)
     if not frames:
         common = sorted(set.intersection(*[set(load(n).columns) for n in names])) if names else []
         return {'error': f'No queried sheet has all referenced columns {sorted(needed)}. Columns shared by these '
                          f'sheets: {common}. The tab name is the virtual column "_sheet" '
                          '(e.g. group_by ["_sheet"]).', 'skipped_sheets': skipped}
-    combined = pd.concat(frames, ignore_index=True)
-    combined['_sheet'] = combined['_sheet'].astype('string')
+    combined = concat(frames)
     params = dict(params)
     if params.get('select') and not params.get('aggregations'):
         params['select'] = ['_sheet', '_source_row'] + [c for c in params['select'] if c not in {'_sheet', '_source_row'}]
@@ -4876,9 +5049,9 @@ def _query_many(sheet_names, params, load, sheets):
     result.pop('contributing_row_indices', None)
     by_sheet = {}
     for i in indices:
-        by_sheet.setdefault(combined.at[i, '_sheet'], []).append(combined.at[i, '_source_row'])
+        by_sheet.setdefault(combined.rows[i]['_sheet'], []).append(combined.rows[i]['_source_row'])
     result['sources'] = [{'sheet': n, 'source_rows': rows} for n, rows in by_sheet.items()]
-    result['sheets_queried'] = [f['_sheet'].iloc[0] for f in frames]
+    result['sheets_queried'] = queried
     result['skipped_sheets'] = skipped
     return result
 
@@ -4943,7 +5116,7 @@ def execute_table_tool(
         refs = result.pop('join_provenance', [])
         result['sources'] = []
         for name, key, frame in [(left_name,'__left_index',left_frame), (right_name,'__right_index',right_frame)]:
-            indices = sorted({int(r[key]) for r in refs if pd.notna(r[key])})
+            indices = sorted({r[key] for r in refs if r[key] is not None})
             result['sources'].append({'sheet':name, 'source_rows':_source_rows(frame,sheets[name],indices),
                                       'csv_record_indices':indices})
         result.pop('contributing_row_indices', None)
@@ -4991,14 +5164,14 @@ def execute_table_tool(
                       sheet_name, sheet_meta=smeta)
         if smeta.get("sheet_type") == "metadata" and {"source_row", "source_column", "text"} <= set(df.columns):
             # Narrative sheets read as one line per sheet row, with embedded table headers applied.
-            lines = [{"source_row": number, "text": text} for number, text in narrative_rows(df)]
+            lines = [{"source_row": number, "text": text} for number, text in narrative_rows(df.rows)]
             end = min(offset + limit, len(lines))
             return sanitize_result({"sheet_name": sheet_name, "offset": offset, "total_rows": len(lines),
                                     "rows": lines[offset:end], "next_offset": end if end < len(lines) else None,
                                     "warnings": smeta.get("warnings", [])})
         end = min(offset + limit, len(df))
         result = {"sheet_name": sheet_name, "offset": offset, "total_rows": len(df),
-                  "rows": df.iloc[offset:end].to_dict(orient="records"),
+                  "rows": df.take(range(offset, end)).records(),
                   "next_offset": end if end < len(df) else None,
                   "source_rows": smeta.get("source_rows", [])[offset:end]
                       if smeta.get("sheet_type") == "data" else [],
@@ -5032,23 +5205,17 @@ def execute_table_tool(
                     s3_client, s3_bucket, s3_prefix,
                     plan_domain, filename, name, sheet_meta=smeta
                 )
-                mask = pd.Series(False, index=df.index)
-
-                for col in cols_to_search:
-                    if col in df.columns:
-                        mask |= df[col].astype("string").str.contains(
-                            str(term), case=False, na=False, regex=False
-                        )
-
-                matched = df[mask][
-                    [c for c in col_names if c in df.columns]
-                ]
-                if not matched.empty:
-                    results[name] = matched.head(50).to_dict(orient="records")
+                needle = term.casefold()
+                searched = [c for c in cols_to_search if c in df.columns]
+                matched = [i for i, row in enumerate(df.rows)
+                           if any(row[c] is not None and needle in str(row[c]).casefold() for c in searched)]
+                if matched:
+                    shown = df.take(matched[:50]).select([c for c in col_names if c in df.columns])
+                    results[name] = shown.records()
                     source = smeta.get('source_rows', [])
-                    details[name] = {'matches': len(matched), 'returned': min(len(matched), 50),
+                    details[name] = {'matches': len(matched), 'returned': len(shown),
                                      'truncated': len(matched) > 50,
-                                     'source_rows': [source[i] for i in matched.head(50).index if i < len(source)]
+                                     'source_rows': [source[i] for i in shown.index if i < len(source)]
                                          if smeta.get('sheet_type') == 'data' else []}
             except Exception as e:
                 logger.warning(
@@ -6332,7 +6499,20 @@ def isolated_audit(monkeypatch, tmp_path):
     return tmp_path / 'audit'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_agent.py", "characters": 1985, "sha256": "12de429052c6aafd33a64b63da76da7b161bf020df9eda7e80270b46b008a25c"}
+{"path": "development/tests/table_helpers.py", "characters": 431, "sha256": "84a3e4eacfd24d86b7fd381d438e75834f0db408f70666e3a3a8b19cf6827213"}
+import pandas as pd
+
+from backend.shared.table import parse_csv
+
+
+def as_table(frame):
+    """A DataFrame as the question path sees it: written to CSV as preprocessing does, then read back,
+    with non-numeric columns kept as text the way sheet metadata marks them."""
+    text = [c for c in frame.columns if not pd.api.types.is_numeric_dtype(frame[c])]
+    return parse_csv(frame.to_csv(index=False).encode(), text_columns=text)
+
+===== REPOSITORY FILE =====
+{"path": "development/tests/test_agent.py", "characters": 1999, "sha256": "7a6b0bf1772c08ba1ef42cb770d588a83b100a9311a1f95fda5b822e95b758e6"}
 import io
 from unittest.mock import Mock
 import pandas as pd
@@ -6361,13 +6541,13 @@ def test_excel_sheets(tmp_path):
     inputs = prepare_local_file(path)
     state = {"metadata": document_from_table_inputs(**inputs).table_metadata}
     assert list(state["metadata"]["sheets"]) == ["First", "Second"]
-    assert load_table(**inputs, sheet_name="Second")["Value"].sum() == 30
+    assert load_table(**inputs, sheet_name="Second").column("Value") == [30]
 
 
 def test_s3_key_unchanged():
     s3 = Mock()
     s3.get_object.return_value = {"Body": io.BytesIO(b"Value\n42\n")}
-    assert load_table(s3, "bucket", "prefix/", "domain", "book.xlsx", "Sales").iloc[0, 0] == 42
+    assert load_table(s3, "bucket", "prefix/", "domain", "book.xlsx", "Sales").rows == [{"Value": 42}]
     s3.get_object.assert_called_once_with(Bucket="bucket", Key="prefix/domain/preprocessed/book.xlsx/Sales.csv")
 
 
@@ -6376,20 +6556,20 @@ def test_empty_worksheet(tmp_path):
     with pd.ExcelWriter(path) as writer:
         pd.DataFrame().to_excel(writer, sheet_name="Empty", index=False)
     inputs = prepare_local_file(path)
-    assert load_table(**inputs, sheet_name="Empty").empty
+    assert len(load_table(**inputs, sheet_name="Empty")) == 0
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_ambiguity.py", "characters": 10035, "sha256": "cd1c16f7a8fe8acf1488fb5fbd29b1e396dc5a4e54fed410566bed38ec3d746e"}
+{"path": "development/tests/test_ambiguity.py", "characters": 10018, "sha256": "a54b1d4c1c45ab8952cd15084fe64cd0d9094655df254800787325e60716c77b"}
 """Ambiguity modes (off / assumptions / ask), the ask policy, and derive grouping. Model replies are scripted."""
 import json
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from backend.agents.ambiguity import decide
 from backend.agents.document_agent import run_document_agent
 from backend.preprocessing.documents import ingest_document
+from backend.shared.table import parse_csv
 from backend.tools.table_operations import query_table
 
 CSV = b'Element,Primary,Secondary\nAddress - Code,Out of Scope,Out of Scope\nAddress - Date,Out of Scope,Kept\n' \
@@ -6499,7 +6679,7 @@ def test_invalid_mode_rejected(doc):
 
 
 def frame():
-    return pd.read_csv(pd.io.common.BytesIO(CSV), dtype='string')
+    return parse_csv(CSV)
 
 
 def test_derive_groups_by_part_of_a_value():
@@ -7629,7 +7809,7 @@ def test_duplicate_request_reuses_evidence(monkeypatch,insurance_workbook,native
     assert 'already_retrieved' in requests[2]['messages'][-1]['content'][0]['toolResult']['content'][0]['text']
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_filesystem_documents.py", "characters": 2391, "sha256": "bca41a67e67dfcd2056d994f1eba480bef1f38d851b177b3fec036b379ca042e"}
+{"path": "development/tests/test_filesystem_documents.py", "characters": 2392, "sha256": "32187915c97a008ee2958e958f78b75b10494a752f8649984db4e09b6be1f60d"}
 import pytest
 from backend.storage.filesystem import LocalDocumentStore
 from backend.preprocessing.documents import ingest_document
@@ -7662,8 +7842,8 @@ def test_persistent_table_roundtrip(tmp_path):
         assert b'0012' in body.read()
     assert loaded.table_metadata == doc.table_metadata
     frame = load_table(**inputs, sheet_meta=sheet)
-    assert frame["Amount"].sum() == 320
-    assert str(frame.iloc[0]["Claim"]) == "0012"
+    assert sum(frame.column("Amount")) == 320
+    assert frame.rows[0]["Claim"] == "0012"
 
 
 @pytest.mark.parametrize('key', ['../escape', '/absolute', 'documents/../../escape', 'C:/escape', 'documents\\escape'])
@@ -7830,7 +8010,7 @@ def test_missing_column_error_suggests_sheet_column(workbook):
     assert '_sheet' in result['error'] and 'Legacy Name' in result['error']
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_messy_tables.py", "characters": 7878, "sha256": "addb30cfad117b6de88e306db52d9b19f434d96548f0ff57cf3b5eb9cfd6778e"}
+{"path": "development/tests/test_messy_tables.py", "characters": 7963, "sha256": "60529d82838601f1b2d09dea3be566116313eaa36af7f75f6a1bccead1c36870"}
 """Messy categorical data: variant spellings, text missing markers, placeholder numbers, large sheets."""
 import json
 
@@ -7843,6 +8023,7 @@ from backend.preprocessing.profiling import column_quality, variant_groups
 from backend.retrieval.search import search_documents
 from backend.tools.documents import execute_document_tool
 from backend.tools.table_operations import query_table
+from table_helpers import as_table
 
 ROWS = [('fail', 'Visa', 'Denver', -999999), ('FAIL', 'VISA', 'DENVER', 120.0), ('failed', 'Vsa', 'DEN', 80.0),
         ('success', 'MasterCard', 'Denver ', 50.0), ('Success', 'Master Card', 'Boulder', 0.0),
@@ -7858,7 +8039,7 @@ def frame():
 
 
 def count(frame, **params):
-    return query_table(frame, {**params, 'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
+    return query_table(as_table(frame), {**params, 'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
 
 
 def test_profile_suggests_variants_markers_and_placeholders(frame):
@@ -7914,7 +8095,7 @@ def test_recode_combines_variants_in_either_form(frame, mapping):
     result = count(frame, recode=[{'column': 'city', 'map': mapping}],
                    filters=[{'column': 'city', 'op': 'eq', 'value': 'Denver'}])
     assert result['rows'] == [{'n': 12}] and result['filter_diagnostics'] == []
-    grouped = query_table(frame, {'recode': [{'column': 'city', 'map': mapping}], 'group_by': ['city'],
+    grouped = query_table(as_table(frame), {'recode': [{'column': 'city', 'map': mapping}], 'group_by': ['city'],
                                   'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
     assert {r['city']: r['n'] for r in grouped['rows']}['Denver'] == 12
 
@@ -7922,7 +8103,7 @@ def test_recode_combines_variants_in_either_form(frame, mapping):
 def test_recode_to_null_and_validation(frame):
     assert count(frame, recode=[{'column': 'card', 'map': {'nan': None}}],
                  filters=[{'column': 'card', 'op': 'is_null'}])['rows'] == [{'n': 3}]
-    total = query_table(frame, {'recode': [{'column': 'amount', 'map': {'-999999': None}}],
+    total = query_table(as_table(frame), {'recode': [{'column': 'amount', 'map': {'-999999': None}}],
                                 'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
     assert total['rows'] == [{'t': '840.0'}]
     with pytest.raises(ValueError, match='not present'):
@@ -7934,9 +8115,9 @@ def test_recode_to_null_and_validation(frame):
 
 
 def test_notes_flag_truncated_lists_and_placeholder_totals(frame):
-    listed = query_table(frame, {'select': ['city'], 'limit': 5})
+    listed = query_table(as_table(frame), {'select': ['city'], 'limit': 5})
     assert 'Only 5 of 21 result rows' in listed['notes'][0]
-    total = query_table(frame, {'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
+    total = query_table(as_table(frame), {'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
     assert '-999999.0' in total['notes'][0]
 
 
@@ -8740,17 +8921,19 @@ def test_replacement_removes_stale_outputs_and_preserves_other_files(store):
     assert new.storage_ref['manifest_key'] == 'test-scope/documents/preprocessed/rules.txt/manifest.json'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_table_tools.py", "characters": 6188, "sha256": "f5e7e867fe4e5a4eac48a969029879e4938497858d5be8090ae9afded988c321"}
+{"path": "development/tests/test_table_tools.py", "characters": 7305, "sha256": "6e6cbced1ed3f9760141795e064e49cfd329ecc735d8f9d5ff87ed7b85d5cc17"}
 import pandas as pd
 import pytest
+
+from table_helpers import as_table
 
 from backend.tools.table_operations import query_table, join_tables
 from backend.agents.evidence import numeric_display_check, bounded, compact
 
 
 def test_filter_group_and_sort_decimal_precision():
-    df = pd.DataFrame({'Group':['A','A','B','B'], 'Amount':[0.1,0.2,10,None],
-                       'Status':['Approved']*4})
+    df = as_table(pd.DataFrame({'Group':['A','A','B','B'], 'Amount':[0.1,0.2,10,None],
+                       'Status':['Approved']*4}))
     result = query_table(df, {'filters':[{'column':'Status','op':'eq','value':'Approved'}],
         'group_by':['Group'], 'aggregations':[{'column':'Amount','op':'sum','as':'total'}],
         'sort':[{'column':'total','descending':True}]})
@@ -8760,12 +8943,12 @@ def test_filter_group_and_sort_decimal_precision():
 
 def test_all_missing_sum_is_not_zero():
     params = {'aggregations':[{'column':'x','op':'sum','as':'total'}]}
-    assert query_table(pd.DataFrame({'x':[None,None]}), params)['rows'] == [{'total':None}]
-    assert query_table(pd.DataFrame({'x':[None,0]}), params)['rows'] == [{'total':'0.0'}]
+    assert query_table(as_table(pd.DataFrame({'x':[None,None]})), params)['rows'] == [{'total':None}]
+    assert query_table(as_table(pd.DataFrame({'x':[None,0]})), params)['rows'] == [{'total':'0.0'}]
 
 
 def test_counts_and_missing_group():
-    df = pd.DataFrame({'group':['A',None,None], 'x':[1,2,None]})
+    df = as_table(pd.DataFrame({'group':['A',None,None], 'x':[1,2,None]}))
     r = query_table(df, {'group_by':['group'], 'aggregations':[
         {'op':'count_rows','as':'rows'}, {'op':'count','column':'x','as':'populated'}]})
     assert r['rows'][1]['rows'] == 2
@@ -8773,7 +8956,7 @@ def test_counts_and_missing_group():
 
 
 def test_literal_filter_and_pagination_preserve_source_indices():
-    df = pd.DataFrame({'ID':['0012','0013','0014'], 'Name':['A.B','AxB','A.B']})
+    df = as_table(pd.DataFrame({'ID':['0012','0013','0014'], 'Name':['A.B','AxB','A.B']}))
     result = query_table(df, {'filters':[{'column':'Name','op':'contains','value':'A.B'}],
                               'select':['ID'], 'limit':1, 'offset':1})
     assert result['rows'] == [{'ID':'0014'}]
@@ -8789,29 +8972,29 @@ def test_literal_filter_and_pagination_preserve_source_indices():
 ])
 def test_invalid_queries_fail_explicitly(params):
     with pytest.raises(ValueError):
-        query_table(pd.DataFrame({'x':[1,2]}), params)
+        query_table(as_table(pd.DataFrame({'x':[1,2]})), params)
 
 
 def test_non_numeric_sum_is_not_silently_coerced():
     with pytest.raises(ValueError, match='Non-numeric'):
-        query_table(pd.DataFrame({'x':['12 oz','bad']}),
+        query_table(as_table(pd.DataFrame({'x':['12 oz','bad']})),
                     {'aggregations':[{'column':'x','op':'sum','as':'total'}]})
 
 
 def test_join_reports_unmatched_and_never_matches_nulls():
-    left = pd.DataFrame({'k':['a','b',None], 'amount':[1,2,3]})
-    right = pd.DataFrame({'code':['a',None,'c'], 'label':['Alpha','Not a match','Gamma']})
+    left = as_table(pd.DataFrame({'k':['a','b',None], 'amount':[1,2,3]}))
+    right = as_table(pd.DataFrame({'code':['a',None,'c'], 'label':['Alpha','Not a match','Gamma']}))
     result = join_tables(left, right, {'left_on':['k'], 'right_on':['code']})
     assert result['diagnostics']['unmatched_left_rows'] == 2
     assert result['diagnostics']['unmatched_right_rows'] == 2
     assert result['diagnostics']['expected_output_rows'] == 3
     assert result['rows'][0]['label'] == 'Alpha'
-    assert pd.isna(result['rows'][2]['label'])
+    assert result['rows'][2]['label'] is None
 
 
 def test_join_blocks_accidental_multiplication():
-    left = pd.DataFrame({'k':['a','b'], 'amount':[10,20]})
-    right = pd.DataFrame({'k':['a','a'], 'label':['One','Two']})
+    left = as_table(pd.DataFrame({'k':['a','b'], 'amount':[10,20]}))
+    right = as_table(pd.DataFrame({'k':['a','a'], 'label':['One','Two']}))
     result = join_tables(left, right, {'left_on':['k'],'right_on':['k']})
     assert 'error' in result
     assert result['diagnostics']['matched_rows_multiplied']
@@ -8820,8 +9003,8 @@ def test_join_blocks_accidental_multiplication():
 
 
 def test_explicit_one_to_many_keeps_diagnostics_and_aggregate():
-    left = pd.DataFrame({'k':['a','b'], 'amount':[10,20]})
-    right = pd.DataFrame({'k':['a','a'], 'label':['One','Two']})
+    left = as_table(pd.DataFrame({'k':['a','b'], 'amount':[10,20]}))
+    right = as_table(pd.DataFrame({'k':['a','a'], 'label':['One','Two']}))
     result = join_tables(left, right, {'left_on':['k'],'right_on':['k'], 'relationship':'one_to_many',
         'query':{'aggregations':[{'column':'amount','op':'sum','as':'total'}]}})
     assert result['rows'] == [{'total':'40'}]
@@ -8830,14 +9013,14 @@ def test_explicit_one_to_many_keeps_diagnostics_and_aggregate():
 
 def test_join_cap_checked_before_materialization(monkeypatch):
     monkeypatch.setattr('backend.tools.table_operations.MAX_JOIN_ROWS', 3)
-    result = join_tables(pd.DataFrame({'k':['a']*2}), pd.DataFrame({'k':['a']*2}),
+    result = join_tables(as_table(pd.DataFrame({'k':['a']*2})), as_table(pd.DataFrame({'k':['a']*2})),
                          {'left_on':['k'],'right_on':['k'],'relationship':'many_to_many'})
     assert 'exceeds' in result['error']
 
 
 def test_join_filters_applied_before_cardinality_validation():
-    result = join_tables(pd.DataFrame({'k':['a']}),
-        pd.DataFrame({'k':['a','a'],'status':['Approved','Draft']}),
+    result = join_tables(as_table(pd.DataFrame({'k':['a']})),
+        as_table(pd.DataFrame({'k':['a','a'],'status':['Approved','Draft']})),
         {'left_on':['k'],'right_on':['k'], 'right_filters':[{'column':'status','op':'eq','value':'Approved'}]})
     assert 'error' not in result
     assert result['rows'][0]['status'] == 'Approved'
@@ -8858,7 +9041,7 @@ def test_bounded_result_remains_json_and_marks_omissions():
 
 
 def test_decimal_unit_conversion_before_aggregation():
-    frame = pd.DataFrame({'amount':[16,500,2,None,0], 'unit':['oz','g','lb','oz','g']})
+    frame = as_table(pd.DataFrame({'amount':[16,500,2,None,0], 'unit':['oz','g','lb','oz','g']}))
     result = query_table(frame, {'conversions':[{'column':'amount','unit_column':'unit',
         'factors':{'oz':'28.3495','g':'1','lb':'453.592'},'as':'grams'}],
         'aggregations':[{'column':'grams','op':'sum','as':'total_g'}]})
@@ -8868,8 +9051,24 @@ def test_decimal_unit_conversion_before_aggregation():
 
 def test_missing_conversion_factor_cannot_silently_drop_records():
     with pytest.raises(ValueError,match='No conversion factor'):
-        query_table(pd.DataFrame({'x':[1],'unit':['lb']}), {'conversions':[
+        query_table(as_table(pd.DataFrame({'x':[1],'unit':['lb']})), {'conversions':[
             {'column':'x','unit_column':'unit','factors':{'oz':'28.3495'},'as':'g'}]})
+
+
+def test_join_rejects_text_against_numeric_keys():
+    with pytest.raises(ValueError, match='text column and numeric column'):
+        join_tables(as_table(pd.DataFrame({'k':['1','2']})), as_table(pd.DataFrame({'k':[1,2]})),
+                    {'left_on':['k'],'right_on':['k']})
+
+
+def test_csv_types_match_preprocessed_exports():
+    from backend.shared.table import parse_csv
+    table = parse_csv(b'\xef\xbb\xbfID,Count,Amount,Note,Note,\n0012,1,2.5,a,,x\n0013,,3,"b, c",d,\n',
+                      text_columns={'ID'})
+    assert table.columns == ['ID', 'Count', 'Amount', 'Note', 'Note.1', 'Unnamed: 5']
+    assert table.rows[0] == {'ID': '0012', 'Count': 1, 'Amount': 2.5, 'Note': 'a', 'Note.1': None, 'Unnamed: 5': 'x'}
+    assert table.rows[1]['Count'] is None and table.rows[1]['Amount'] == 3.0 and table.rows[1]['Note'] == 'b, c'
+    assert table.numeric == {'Count', 'Amount'}
 
 ===== REPOSITORY FILE =====
 {"path": "pytest.ini", "characters": 39, "sha256": "bfde5914d70040c3d6c60dab685dcf0c91531c55f412c323e39ae63fe95cd7c1"}

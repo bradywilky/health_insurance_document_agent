@@ -1,8 +1,8 @@
 """Deterministic table tools used by the document agent; no agent imports."""
 import logging
 from backend.shared.serialization import sanitize_result
-import pandas as pd
 from backend.shared.rows import narrative_rows
+from backend.shared.table import Table, concat
 from backend.storage.tables import load_table
 from backend.tools.table_operations import query_table, join_tables
 
@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _source_rows(frame, meta, indices):
-    if meta.get('sheet_type') == 'metadata' and 'source_row' in frame:
-        return [int(frame.iloc[i]['source_row']) for i in indices if i < len(frame)]
+    if meta.get('sheet_type') == 'metadata' and 'source_row' in frame.columns:
+        return [int(frame.rows[i]['source_row']) for i in indices if i < len(frame)]
     rows = meta.get('source_rows', [])
     return [rows[i] for i in indices if i < len(rows)]
 
@@ -22,9 +22,8 @@ def _load_for_query(load, name, meta):
     """Narrative tabs are queried as one text line per sheet row, matching read_sheet and search."""
     frame = load(name)
     if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
-        lines = list(narrative_rows(frame))
-        frame = pd.DataFrame({'source_row': [n for n, _ in lines], 'text': [t for _, t in lines]})
-        frame['text'] = frame['text'].astype('string')
+        frame = Table(['source_row', 'text'], [{'source_row': n, 'text': t} for n, t in narrative_rows(frame.rows)],
+                      numeric=['source_row'])
     return frame
 
 
@@ -46,24 +45,25 @@ def _query_many(sheet_names, params, load, sheets):
     if unknown or not names:
         return {'error': f'Unknown sheets {unknown}; use exact names from list_sheets or ["*"] for all data sheets.'}
     needed = _referenced_columns(params)
-    frames, skipped = [], {}
+    frames, queried, skipped = [], [], {}
     for name in names:
         frame = load(name)
         missing = sorted(needed - set(frame.columns))
         if missing:
             skipped[name] = f'missing columns {missing}'
             continue
-        frame = frame.copy()
-        frame.insert(0, '_source_row', _source_rows(frame, sheets[name], range(len(frame))) or [None] * len(frame))
-        frame.insert(0, '_sheet', name)
-        frames.append(frame)
+        source = _source_rows(frame, sheets[name], range(len(frame)))
+        source += [None] * (len(frame) - len(source))
+        frames.append(Table(['_sheet', '_source_row'] + frame.columns,
+                            [{'_sheet': name, '_source_row': n, **row} for n, row in zip(source, frame.rows)],
+                            numeric=frame.numeric | {'_source_row'}))
+        queried.append(name)
     if not frames:
         common = sorted(set.intersection(*[set(load(n).columns) for n in names])) if names else []
         return {'error': f'No queried sheet has all referenced columns {sorted(needed)}. Columns shared by these '
                          f'sheets: {common}. The tab name is the virtual column "_sheet" '
                          '(e.g. group_by ["_sheet"]).', 'skipped_sheets': skipped}
-    combined = pd.concat(frames, ignore_index=True)
-    combined['_sheet'] = combined['_sheet'].astype('string')
+    combined = concat(frames)
     params = dict(params)
     if params.get('select') and not params.get('aggregations'):
         params['select'] = ['_sheet', '_source_row'] + [c for c in params['select'] if c not in {'_sheet', '_source_row'}]
@@ -73,9 +73,9 @@ def _query_many(sheet_names, params, load, sheets):
     result.pop('contributing_row_indices', None)
     by_sheet = {}
     for i in indices:
-        by_sheet.setdefault(combined.at[i, '_sheet'], []).append(combined.at[i, '_source_row'])
+        by_sheet.setdefault(combined.rows[i]['_sheet'], []).append(combined.rows[i]['_source_row'])
     result['sources'] = [{'sheet': n, 'source_rows': rows} for n, rows in by_sheet.items()]
-    result['sheets_queried'] = [f['_sheet'].iloc[0] for f in frames]
+    result['sheets_queried'] = queried
     result['skipped_sheets'] = skipped
     return result
 
@@ -140,7 +140,7 @@ def execute_table_tool(
         refs = result.pop('join_provenance', [])
         result['sources'] = []
         for name, key, frame in [(left_name,'__left_index',left_frame), (right_name,'__right_index',right_frame)]:
-            indices = sorted({int(r[key]) for r in refs if pd.notna(r[key])})
+            indices = sorted({r[key] for r in refs if r[key] is not None})
             result['sources'].append({'sheet':name, 'source_rows':_source_rows(frame,sheets[name],indices),
                                       'csv_record_indices':indices})
         result.pop('contributing_row_indices', None)
@@ -188,14 +188,14 @@ def execute_table_tool(
                       sheet_name, sheet_meta=smeta)
         if smeta.get("sheet_type") == "metadata" and {"source_row", "source_column", "text"} <= set(df.columns):
             # Narrative sheets read as one line per sheet row, with embedded table headers applied.
-            lines = [{"source_row": number, "text": text} for number, text in narrative_rows(df)]
+            lines = [{"source_row": number, "text": text} for number, text in narrative_rows(df.rows)]
             end = min(offset + limit, len(lines))
             return sanitize_result({"sheet_name": sheet_name, "offset": offset, "total_rows": len(lines),
                                     "rows": lines[offset:end], "next_offset": end if end < len(lines) else None,
                                     "warnings": smeta.get("warnings", [])})
         end = min(offset + limit, len(df))
         result = {"sheet_name": sheet_name, "offset": offset, "total_rows": len(df),
-                  "rows": df.iloc[offset:end].to_dict(orient="records"),
+                  "rows": df.take(range(offset, end)).records(),
                   "next_offset": end if end < len(df) else None,
                   "source_rows": smeta.get("source_rows", [])[offset:end]
                       if smeta.get("sheet_type") == "data" else [],
@@ -229,23 +229,17 @@ def execute_table_tool(
                     s3_client, s3_bucket, s3_prefix,
                     plan_domain, filename, name, sheet_meta=smeta
                 )
-                mask = pd.Series(False, index=df.index)
-
-                for col in cols_to_search:
-                    if col in df.columns:
-                        mask |= df[col].astype("string").str.contains(
-                            str(term), case=False, na=False, regex=False
-                        )
-
-                matched = df[mask][
-                    [c for c in col_names if c in df.columns]
-                ]
-                if not matched.empty:
-                    results[name] = matched.head(50).to_dict(orient="records")
+                needle = term.casefold()
+                searched = [c for c in cols_to_search if c in df.columns]
+                matched = [i for i, row in enumerate(df.rows)
+                           if any(row[c] is not None and needle in str(row[c]).casefold() for c in searched)]
+                if matched:
+                    shown = df.take(matched[:50]).select([c for c in col_names if c in df.columns])
+                    results[name] = shown.records()
                     source = smeta.get('source_rows', [])
-                    details[name] = {'matches': len(matched), 'returned': min(len(matched), 50),
+                    details[name] = {'matches': len(matched), 'returned': len(shown),
                                      'truncated': len(matched) > 50,
-                                     'source_rows': [source[i] for i in matched.head(50).index if i < len(source)]
+                                     'source_rows': [source[i] for i in shown.index if i < len(source)]
                                          if smeta.get('sheet_type') == 'data' else []}
             except Exception as e:
                 logger.warning(

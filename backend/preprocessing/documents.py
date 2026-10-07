@@ -104,12 +104,12 @@ def _populate_table_document(doc):
         frame = load_table(**doc.table_inputs, sheet_name=sheet, sheet_meta=meta)
         if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
             # Narrative sheets are indexed in full, one block per sheet row (not per cell).
-            for number, text in narrative_rows(frame):
+            for number, text in narrative_rows(frame.rows):
                 _add_text(doc, text, {'sheet': sheet, 'row': number})
             continue
         # Data sheets get a text preview; search_documents and table tools read every row from the CSV.
-        preview = frame if meta.get('sheet_type') == 'metadata' else frame.head(TABLE_PREVIEW_ROWS)
-        for i, row in preview.iterrows():
+        preview = frame.rows if meta.get('sheet_type') == 'metadata' else frame.rows[:TABLE_PREVIEW_ROWS]
+        for i, row in enumerate(preview):
             _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
         if len(preview) < len(frame):
             doc.warnings.append(f'{sheet}: text preview holds the first {len(preview)} of {len(frame)} rows. '

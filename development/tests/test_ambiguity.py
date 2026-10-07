@@ -2,12 +2,12 @@
 import json
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from backend.agents.ambiguity import decide
 from backend.agents.document_agent import run_document_agent
 from backend.preprocessing.documents import ingest_document
+from backend.shared.table import parse_csv
 from backend.tools.table_operations import query_table
 
 CSV = b'Element,Primary,Secondary\nAddress - Code,Out of Scope,Out of Scope\nAddress - Date,Out of Scope,Kept\n' \
@@ -117,7 +117,7 @@ def test_invalid_mode_rejected(doc):
 
 
 def frame():
-    return pd.read_csv(pd.io.common.BytesIO(CSV), dtype='string')
+    return parse_csv(CSV)
 
 
 def test_derive_groups_by_part_of_a_value():

@@ -1,13 +1,15 @@
 import pandas as pd
 import pytest
 
+from table_helpers import as_table
+
 from backend.tools.table_operations import query_table, join_tables
 from backend.agents.evidence import numeric_display_check, bounded, compact
 
 
 def test_filter_group_and_sort_decimal_precision():
-    df = pd.DataFrame({'Group':['A','A','B','B'], 'Amount':[0.1,0.2,10,None],
-                       'Status':['Approved']*4})
+    df = as_table(pd.DataFrame({'Group':['A','A','B','B'], 'Amount':[0.1,0.2,10,None],
+                       'Status':['Approved']*4}))
     result = query_table(df, {'filters':[{'column':'Status','op':'eq','value':'Approved'}],
         'group_by':['Group'], 'aggregations':[{'column':'Amount','op':'sum','as':'total'}],
         'sort':[{'column':'total','descending':True}]})
@@ -17,12 +19,12 @@ def test_filter_group_and_sort_decimal_precision():
 
 def test_all_missing_sum_is_not_zero():
     params = {'aggregations':[{'column':'x','op':'sum','as':'total'}]}
-    assert query_table(pd.DataFrame({'x':[None,None]}), params)['rows'] == [{'total':None}]
-    assert query_table(pd.DataFrame({'x':[None,0]}), params)['rows'] == [{'total':'0.0'}]
+    assert query_table(as_table(pd.DataFrame({'x':[None,None]})), params)['rows'] == [{'total':None}]
+    assert query_table(as_table(pd.DataFrame({'x':[None,0]})), params)['rows'] == [{'total':'0.0'}]
 
 
 def test_counts_and_missing_group():
-    df = pd.DataFrame({'group':['A',None,None], 'x':[1,2,None]})
+    df = as_table(pd.DataFrame({'group':['A',None,None], 'x':[1,2,None]}))
     r = query_table(df, {'group_by':['group'], 'aggregations':[
         {'op':'count_rows','as':'rows'}, {'op':'count','column':'x','as':'populated'}]})
     assert r['rows'][1]['rows'] == 2
@@ -30,7 +32,7 @@ def test_counts_and_missing_group():
 
 
 def test_literal_filter_and_pagination_preserve_source_indices():
-    df = pd.DataFrame({'ID':['0012','0013','0014'], 'Name':['A.B','AxB','A.B']})
+    df = as_table(pd.DataFrame({'ID':['0012','0013','0014'], 'Name':['A.B','AxB','A.B']}))
     result = query_table(df, {'filters':[{'column':'Name','op':'contains','value':'A.B'}],
                               'select':['ID'], 'limit':1, 'offset':1})
     assert result['rows'] == [{'ID':'0014'}]
@@ -46,29 +48,29 @@ def test_literal_filter_and_pagination_preserve_source_indices():
 ])
 def test_invalid_queries_fail_explicitly(params):
     with pytest.raises(ValueError):
-        query_table(pd.DataFrame({'x':[1,2]}), params)
+        query_table(as_table(pd.DataFrame({'x':[1,2]})), params)
 
 
 def test_non_numeric_sum_is_not_silently_coerced():
     with pytest.raises(ValueError, match='Non-numeric'):
-        query_table(pd.DataFrame({'x':['12 oz','bad']}),
+        query_table(as_table(pd.DataFrame({'x':['12 oz','bad']})),
                     {'aggregations':[{'column':'x','op':'sum','as':'total'}]})
 
 
 def test_join_reports_unmatched_and_never_matches_nulls():
-    left = pd.DataFrame({'k':['a','b',None], 'amount':[1,2,3]})
-    right = pd.DataFrame({'code':['a',None,'c'], 'label':['Alpha','Not a match','Gamma']})
+    left = as_table(pd.DataFrame({'k':['a','b',None], 'amount':[1,2,3]}))
+    right = as_table(pd.DataFrame({'code':['a',None,'c'], 'label':['Alpha','Not a match','Gamma']}))
     result = join_tables(left, right, {'left_on':['k'], 'right_on':['code']})
     assert result['diagnostics']['unmatched_left_rows'] == 2
     assert result['diagnostics']['unmatched_right_rows'] == 2
     assert result['diagnostics']['expected_output_rows'] == 3
     assert result['rows'][0]['label'] == 'Alpha'
-    assert pd.isna(result['rows'][2]['label'])
+    assert result['rows'][2]['label'] is None
 
 
 def test_join_blocks_accidental_multiplication():
-    left = pd.DataFrame({'k':['a','b'], 'amount':[10,20]})
-    right = pd.DataFrame({'k':['a','a'], 'label':['One','Two']})
+    left = as_table(pd.DataFrame({'k':['a','b'], 'amount':[10,20]}))
+    right = as_table(pd.DataFrame({'k':['a','a'], 'label':['One','Two']}))
     result = join_tables(left, right, {'left_on':['k'],'right_on':['k']})
     assert 'error' in result
     assert result['diagnostics']['matched_rows_multiplied']
@@ -77,8 +79,8 @@ def test_join_blocks_accidental_multiplication():
 
 
 def test_explicit_one_to_many_keeps_diagnostics_and_aggregate():
-    left = pd.DataFrame({'k':['a','b'], 'amount':[10,20]})
-    right = pd.DataFrame({'k':['a','a'], 'label':['One','Two']})
+    left = as_table(pd.DataFrame({'k':['a','b'], 'amount':[10,20]}))
+    right = as_table(pd.DataFrame({'k':['a','a'], 'label':['One','Two']}))
     result = join_tables(left, right, {'left_on':['k'],'right_on':['k'], 'relationship':'one_to_many',
         'query':{'aggregations':[{'column':'amount','op':'sum','as':'total'}]}})
     assert result['rows'] == [{'total':'40'}]
@@ -87,14 +89,14 @@ def test_explicit_one_to_many_keeps_diagnostics_and_aggregate():
 
 def test_join_cap_checked_before_materialization(monkeypatch):
     monkeypatch.setattr('backend.tools.table_operations.MAX_JOIN_ROWS', 3)
-    result = join_tables(pd.DataFrame({'k':['a']*2}), pd.DataFrame({'k':['a']*2}),
+    result = join_tables(as_table(pd.DataFrame({'k':['a']*2})), as_table(pd.DataFrame({'k':['a']*2})),
                          {'left_on':['k'],'right_on':['k'],'relationship':'many_to_many'})
     assert 'exceeds' in result['error']
 
 
 def test_join_filters_applied_before_cardinality_validation():
-    result = join_tables(pd.DataFrame({'k':['a']}),
-        pd.DataFrame({'k':['a','a'],'status':['Approved','Draft']}),
+    result = join_tables(as_table(pd.DataFrame({'k':['a']})),
+        as_table(pd.DataFrame({'k':['a','a'],'status':['Approved','Draft']})),
         {'left_on':['k'],'right_on':['k'], 'right_filters':[{'column':'status','op':'eq','value':'Approved'}]})
     assert 'error' not in result
     assert result['rows'][0]['status'] == 'Approved'
@@ -115,7 +117,7 @@ def test_bounded_result_remains_json_and_marks_omissions():
 
 
 def test_decimal_unit_conversion_before_aggregation():
-    frame = pd.DataFrame({'amount':[16,500,2,None,0], 'unit':['oz','g','lb','oz','g']})
+    frame = as_table(pd.DataFrame({'amount':[16,500,2,None,0], 'unit':['oz','g','lb','oz','g']}))
     result = query_table(frame, {'conversions':[{'column':'amount','unit_column':'unit',
         'factors':{'oz':'28.3495','g':'1','lb':'453.592'},'as':'grams'}],
         'aggregations':[{'column':'grams','op':'sum','as':'total_g'}]})
@@ -125,5 +127,21 @@ def test_decimal_unit_conversion_before_aggregation():
 
 def test_missing_conversion_factor_cannot_silently_drop_records():
     with pytest.raises(ValueError,match='No conversion factor'):
-        query_table(pd.DataFrame({'x':[1],'unit':['lb']}), {'conversions':[
+        query_table(as_table(pd.DataFrame({'x':[1],'unit':['lb']})), {'conversions':[
             {'column':'x','unit_column':'unit','factors':{'oz':'28.3495'},'as':'g'}]})
+
+
+def test_join_rejects_text_against_numeric_keys():
+    with pytest.raises(ValueError, match='text column and numeric column'):
+        join_tables(as_table(pd.DataFrame({'k':['1','2']})), as_table(pd.DataFrame({'k':[1,2]})),
+                    {'left_on':['k'],'right_on':['k']})
+
+
+def test_csv_types_match_preprocessed_exports():
+    from backend.shared.table import parse_csv
+    table = parse_csv(b'\xef\xbb\xbfID,Count,Amount,Note,Note,\n0012,1,2.5,a,,x\n0013,,3,"b, c",d,\n',
+                      text_columns={'ID'})
+    assert table.columns == ['ID', 'Count', 'Amount', 'Note', 'Note.1', 'Unnamed: 5']
+    assert table.rows[0] == {'ID': '0012', 'Count': 1, 'Amount': 2.5, 'Note': 'a', 'Note.1': None, 'Unnamed: 5': 'x'}
+    assert table.rows[1]['Count'] is None and table.rows[1]['Amount'] == 3.0 and table.rows[1]['Note'] == 'b, c'
+    assert table.numeric == {'Count', 'Amount'}

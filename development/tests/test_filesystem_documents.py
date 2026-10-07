@@ -30,8 +30,8 @@ def test_persistent_table_roundtrip(tmp_path):
         assert b'0012' in body.read()
     assert loaded.table_metadata == doc.table_metadata
     frame = load_table(**inputs, sheet_meta=sheet)
-    assert frame["Amount"].sum() == 320
-    assert str(frame.iloc[0]["Claim"]) == "0012"
+    assert sum(frame.column("Amount")) == 320
+    assert frame.rows[0]["Claim"] == "0012"
 
 
 @pytest.mark.parametrize('key', ['../escape', '/absolute', 'documents/../../escape', 'C:/escape', 'documents\\escape'])

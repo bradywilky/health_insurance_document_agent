@@ -1,6 +1,5 @@
 """Read preprocessed table CSVs through either local or S3 storage."""
-import io
-import pandas as pd
+from backend.shared.table import Table, parse_csv
 
 
 def load_table(
@@ -11,7 +10,7 @@ def load_table(
     filename: str,
     sheet_name: str | None = None,
     sheet_meta: dict | None = None,
-) -> pd.DataFrame:
+) -> Table:
     if filename.lower().endswith(".csv"):
         key = f"{s3_prefix}{plan_domain}/preprocessed/{filename}/{filename}"
         with s3_client.get_object(Bucket=s3_bucket, Key=key)["Body"] as body:
@@ -21,12 +20,7 @@ def load_table(
         csv_key = f"{s3_prefix}{plan_domain}/preprocessed/{filename}/{safe_name}.csv"
         with s3_client.get_object(Bucket=s3_bucket, Key=csv_key)["Body"] as body:
             raw = body.read()
-    try:
-        text_types = {c["name"]: "string" for c in (sheet_meta or {}).get("columns", [])
-                      if c.get("dtype") in {"str", "string", "object"}}
-        df = pd.read_csv(io.BytesIO(raw), dtype=text_types or None,
-                         keep_default_na=False, na_values=[""])
-    except pd.errors.EmptyDataError:
-        df = pd.DataFrame()
-
-    return df[[c for c in df.columns if str(c).strip() != ""]]
+    text_columns = {c["name"] for c in (sheet_meta or {}).get("columns", [])
+                    if c.get("dtype") in {"str", "string", "object"}}
+    table = parse_csv(raw, text_columns)
+    return table.select([c for c in table.columns if c.strip() != ""])

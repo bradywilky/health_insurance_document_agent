@@ -10,6 +10,7 @@ from backend.preprocessing.profiling import column_quality, variant_groups
 from backend.retrieval.search import search_documents
 from backend.tools.documents import execute_document_tool
 from backend.tools.table_operations import query_table
+from table_helpers import as_table
 
 ROWS = [('fail', 'Visa', 'Denver', -999999), ('FAIL', 'VISA', 'DENVER', 120.0), ('failed', 'Vsa', 'DEN', 80.0),
         ('success', 'MasterCard', 'Denver ', 50.0), ('Success', 'Master Card', 'Boulder', 0.0),
@@ -25,7 +26,7 @@ def frame():
 
 
 def count(frame, **params):
-    return query_table(frame, {**params, 'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
+    return query_table(as_table(frame), {**params, 'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
 
 
 def test_profile_suggests_variants_markers_and_placeholders(frame):
@@ -81,7 +82,7 @@ def test_recode_combines_variants_in_either_form(frame, mapping):
     result = count(frame, recode=[{'column': 'city', 'map': mapping}],
                    filters=[{'column': 'city', 'op': 'eq', 'value': 'Denver'}])
     assert result['rows'] == [{'n': 12}] and result['filter_diagnostics'] == []
-    grouped = query_table(frame, {'recode': [{'column': 'city', 'map': mapping}], 'group_by': ['city'],
+    grouped = query_table(as_table(frame), {'recode': [{'column': 'city', 'map': mapping}], 'group_by': ['city'],
                                   'aggregations': [{'op': 'count_rows', 'as': 'n'}]})
     assert {r['city']: r['n'] for r in grouped['rows']}['Denver'] == 12
 
@@ -89,7 +90,7 @@ def test_recode_combines_variants_in_either_form(frame, mapping):
 def test_recode_to_null_and_validation(frame):
     assert count(frame, recode=[{'column': 'card', 'map': {'nan': None}}],
                  filters=[{'column': 'card', 'op': 'is_null'}])['rows'] == [{'n': 3}]
-    total = query_table(frame, {'recode': [{'column': 'amount', 'map': {'-999999': None}}],
+    total = query_table(as_table(frame), {'recode': [{'column': 'amount', 'map': {'-999999': None}}],
                                 'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
     assert total['rows'] == [{'t': '840.0'}]
     with pytest.raises(ValueError, match='not present'):
@@ -101,9 +102,9 @@ def test_recode_to_null_and_validation(frame):
 
 
 def test_notes_flag_truncated_lists_and_placeholder_totals(frame):
-    listed = query_table(frame, {'select': ['city'], 'limit': 5})
+    listed = query_table(as_table(frame), {'select': ['city'], 'limit': 5})
     assert 'Only 5 of 21 result rows' in listed['notes'][0]
-    total = query_table(frame, {'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
+    total = query_table(as_table(frame), {'aggregations': [{'column': 'amount', 'op': 'sum', 'as': 't'}]})
     assert '-999999.0' in total['notes'][0]
 
 

@@ -26,13 +26,13 @@ def test_excel_sheets(tmp_path):
     inputs = prepare_local_file(path)
     state = {"metadata": document_from_table_inputs(**inputs).table_metadata}
     assert list(state["metadata"]["sheets"]) == ["First", "Second"]
-    assert load_table(**inputs, sheet_name="Second")["Value"].sum() == 30
+    assert load_table(**inputs, sheet_name="Second").column("Value") == [30]
 
 
 def test_s3_key_unchanged():
     s3 = Mock()
     s3.get_object.return_value = {"Body": io.BytesIO(b"Value\n42\n")}
-    assert load_table(s3, "bucket", "prefix/", "domain", "book.xlsx", "Sales").iloc[0, 0] == 42
+    assert load_table(s3, "bucket", "prefix/", "domain", "book.xlsx", "Sales").rows == [{"Value": 42}]
     s3.get_object.assert_called_once_with(Bucket="bucket", Key="prefix/domain/preprocessed/book.xlsx/Sales.csv")
 
 
@@ -41,4 +41,4 @@ def test_empty_worksheet(tmp_path):
     with pd.ExcelWriter(path) as writer:
         pd.DataFrame().to_excel(writer, sheet_name="Empty", index=False)
     inputs = prepare_local_file(path)
-    assert load_table(**inputs, sheet_name="Empty").empty
+    assert len(load_table(**inputs, sheet_name="Empty")) == 0

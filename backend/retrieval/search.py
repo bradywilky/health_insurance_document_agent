@@ -5,7 +5,7 @@ import re
 from backend.shared.rows import row_location, row_text
 
 STOP = {'the','a','an','is','are','what','which','of','to','for','in','and','or','does','do','with'}
-_FRAMES = OrderedDict()  # (document id, sheet) -> DataFrame; small LRU so repeat searches are fast
+_FRAMES = OrderedDict()  # (document id, sheet) -> Table; small LRU so repeat searches are fast
 _FRAME_CACHE_SIZE = 16
 
 
@@ -32,7 +32,7 @@ def _units(doc):
         if not ('csv_record' in location and location.get('sheet') in data_sheets):
             yield block
     for sheet, meta in data_sheets.items():
-        for index, row in _frame(doc, sheet, meta).iterrows():
+        for index, row in enumerate(_frame(doc, sheet, meta).rows):
             location = row_location(sheet, meta, index, row)
             yield {'block_id': f"{sheet}!R{location['csv_record']}", 'text': row_text(row), 'location': location}
 

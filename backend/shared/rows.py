@@ -5,18 +5,18 @@ MIDNIGHT = re.compile(r"^(\d{4}-\d{2}-\d{2}) 00:00:00$")
 
 
 def row_text(row):
-    return '; '.join(f'{col}: {value}' for col, value in row.items())
+    return '; '.join(f'{col}: {"" if value is None else value}' for col, value in row.items())
 
 
-def narrative_rows(frame):
-    """Rebuild narrative-sheet cells (source_row, source_column, text) into one text line per sheet row.
+def narrative_rows(cells):
+    """Rebuild narrative-sheet cells (dicts with source_row, source_column, text) into one text line per sheet row.
 
     A multi-cell row whose columns repeat in the rows below acts as a header, so small embedded
     tables (revision logs, sign-offs) read as "Date: ...; Version: ...; Author: ...".
     Yields (source_row, text).
     """
     rows = {}
-    for _, cell in frame.iterrows():
+    for cell in cells:
         # Spreadsheet dates arrive as midnight timestamps; show the date alone.
         text = MIDNIGHT.sub(r'\1', str(cell['text']))
         rows.setdefault(int(cell['source_row']), {})[int(cell['source_column'])] = text
