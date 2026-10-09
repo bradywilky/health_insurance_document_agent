@@ -1,7 +1,7 @@
 """AWS Lambda handler: a thin adapter from the event to backend.entrypoint.ask_question.
 
 Event:
-    {"question": "...", "session_id": "...", "document_keys": ["<manifest key>", ...],
+    {"question": "...", "session_id": "...", "document_keys": ["<saved filename>", ...],
      "chat_history": [{"role": "user" | "assistant", "content": "..."}],
      "clarification": "<chosen reading, after a needs_clarification response>",
      "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_name": "..."}}

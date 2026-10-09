@@ -85,8 +85,19 @@ class ObjectDocumentStore:
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':key}
         return doc.storage_ref
 
-    def load(self, manifest_key):
+    def manifest_key(self, filename):
+        """Manifest key for a saved filename. A full manifest key is returned unchanged."""
+        if isinstance(filename, str) and filename.endswith('/manifest.json'):
+            return filename
+        if not isinstance(filename, str) or not filename or '/' in filename or '\\' in filename \
+                or filename in {'.', '..'}:
+            raise ValueError('Document must be a saved filename or manifest key')
+        return f'{self.prefix}documents/preprocessed/{filename}/manifest.json'
+
+    def load(self, filename):
+        """Load a saved document by filename (e.g. 'rates.txt') or by its full manifest key."""
         from backend.shared.models import Document
+        manifest_key = self.manifest_key(filename)
         root = self._root(manifest_key)
         manifest = self._read_json(manifest_key)
         if manifest.get('schema_version') != 2:

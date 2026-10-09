@@ -56,7 +56,7 @@ def ask_question(question, *, document_keys, history=None, session_id=None, clar
                  ambiguity='off', app='api', store=None, sink=None):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
-    document_keys  saved-document manifest keys (1 to MAX_DOCUMENTS)
+    document_keys  saved-document filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS); full manifest keys also work
     history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
     session_id     conversation identifier, recorded in the audit record and trace
     clarification  the reading the user chose after a needs_clarification response

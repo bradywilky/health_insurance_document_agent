@@ -32,9 +32,9 @@ def answered(native_script, doc_id):
 
 def test_answer_from_saved_document_keys(native_script, store, saved):
     answered(native_script, store.load(saved).id)
-    response = ask_question('What is the Alpha rate?', document_keys=[saved], session_id='s1', app='test')
+    response = ask_question('What is the Alpha rate?', document_keys=['rates.txt'], session_id='s1', app='test')
     assert response['status'] == 'answered' and response['status_code'] == 200
-    assert response['answer'] == 'The member rate is USD 88 [E1].' and response['message'] is None
+    assert response['answer'] == 'The member rate is USD 88.' and response['message'] is None
     assert response['documents'][0]['name'] == 'rates.txt' and response['documents'][0]['key'] == saved
     [source] = response['sources']
     assert source['id'] == 'E1' and source['passages'][0] == {
@@ -59,6 +59,17 @@ def test_invalid_requests_are_reported_and_audited(kwargs, message, isolated_aud
     assert message in response['message'] and response['answer'] is None
     lines = (next((isolated_audit / 'metadata' / 'questions').glob('*.jsonl'))).read_text().splitlines()
     assert json.loads(lines[-1])['status'] == 'invalid_request'
+
+
+@pytest.mark.parametrize('key', ['rates.txt', 'documents/preprocessed/rates.txt/manifest.json'])
+def test_documents_load_by_filename_or_manifest_key(store, saved, key):
+    assert store.load(key).storage_ref['manifest_key'] == saved
+
+
+@pytest.mark.parametrize('key', ['../rates.txt', 'sub/rates.txt'])
+def test_filename_keys_cannot_escape(store, saved, key):
+    response = ask_question('Rate?', document_keys=[key])
+    assert response['status'] == 'documents_unavailable'
 
 
 def test_missing_saved_document(store):
