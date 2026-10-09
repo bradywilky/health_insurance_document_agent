@@ -67,7 +67,7 @@ The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with a
 
 `backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
 
-This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. Citations identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
+This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. The returned `sources` identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
 
 **Load Bingle-Dingle examples** loads eight Bingle-Dingle health-insurance documents: provider agreement, rate schedule, executed amendment, processing guide, unexecuted draft, benefit summary, authorization rules, and claim packet. Bingle-Dingle Insurance is a regional health insurer offering the Meadow product. The documents cover provider terms, benefits, authorization, and claim-specific records.
 
@@ -364,6 +364,10 @@ unread amendments, and answers stating what the insurer "will pay".
   planner once to compute them with `calculate`. Sentences asserting a payment as certain ("the insurer
   will pay") trigger one writer revision. Issues that remain are added to limitations as
   `Answer check: ...`. These checks flag likely errors; they do not prove an answer correct.
+- **No in-text citations.** Evidence IDs (`E1`, `E2`, ...) are internal: the planner uses them to name
+  `calculate` inputs, and each item in the response's `sources` carries one. The answer text itself has no
+  `[E1]`-style markers; the writer is told not to add them, and any that slip through are removed. See
+  [Future features](#future-features).
 
 Results include `protocol` counters (`coverage_prompts`, `auto_reads`, `calculation_prompts`,
 `answer_revisions`) and `coverage` (`examined`, `auto_read`, `unexamined`).
@@ -596,7 +600,7 @@ from backend.entrypoint import ask_question
 
 response = ask_question(
     "What is the member rate for plan Alpha?",
-    document_keys=["document-agent/documents/preprocessed/<id>/manifest.json"],
+    document_keys=["rates.txt", "benefit_summary.pdf"],  # saved filenames
     history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
     session_id="abc123",
     model="maverick",            # optional; a key of MODELS
@@ -622,7 +626,22 @@ kind, key, extraction warnings), `sources` (each evidence item with its passages
 result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
 `usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
 
+`document_keys` are the filenames as uploaded (`rates.txt`). The store resolves each one to
+`<prefix>documents/preprocessed/<filename>/manifest.json` under the configured bucket and prefix, so callers do
+not need the S3 path. Full manifest keys are still accepted.
+
 The Lambda event is `{"question", "session_id", "document_keys", "chat_history", "clarification",
 "args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
 identifiers, because questions and history can contain PHI. It creates the document store and audit sink on the
 first request and reuses them while the Lambda stays warm.
+
+## Future features
+
+Features that work or are designed but are not in the current product requirements.
+
+- **In-text evidence citations.** The answer writer can tag each claim with the evidence it came from, e.g.
+  "The member rate is USD 88 [E1]", where `E1` matches an item in `sources`. A post-answer check then flags
+  IDs that match no evidence and answers with no recognizable citations. To restore it: in
+  `backend/agents/document_agent.py`, tell the `WRITER` prompt to cite every substantive claim with an evidence
+  ID, stop calling `strip_evidence_ids`, and add the citation checks back to `node_synthesize` (removed in the
+  commit "Remove in-text evidence citations from answers").

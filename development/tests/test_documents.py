@@ -107,16 +107,17 @@ def test_agent_sees_only_selected_documents(native_script):
     requests=native_script([{'tool':'read_document','parameters':{'document_id':selected}},
                            {'tool':'answer','parameters':{}},'USD 88.00 per session [E1].'])
     result=run_document_agent(docs,[selected],'What is the session rate?')
-    assert result['answer']=='USD 88.00 per session [E1].'
+    assert result['answer']=='USD 88.00 per session.'
     payload=json.loads(requests[0]['messages'][0]['content'][0]['text'])
     assert all(d['document_id']==selected for d in payload['selected_documents'])
     assert len(result['evidence'])==1
 
 
-def test_invalid_citation_is_flagged(native_script):
+def test_in_text_evidence_ids_are_removed(native_script):
     docs=make_docs()
     selected=next(iter(docs))
     native_script([{'tool':'read_document','parameters':{'document_id':selected}},
-                   {'tool':'answer','parameters':{}},'A statement [E99].'])
+                   {'tool':'answer','parameters':{}},'A statement [E99]; another [E1, rates.txt]. Plan [A] stays.'])
     result=run_document_agent(docs,[selected],'Question')
-    assert any('unrecognized' in w for w in result['limitations'])
+    assert result['answer']=='A statement; another. Plan [A] stays.'
+    assert not any('citation' in w for w in result['limitations'])

@@ -133,7 +133,7 @@ def test_uncomputed_amount_returns_to_planner_once(native_script):
     assert '176.00' in note and 'calculate' in note
     assert [m['role'] for m in requests[3]['messages']] == ['user', 'assistant', 'user', 'assistant', 'user']
     assert result['protocol']['calculation_prompts'] == 1
-    assert result['answer'] == 'Scheduled amount USD 176.00 [E2].'
+    assert result['answer'] == 'Scheduled amount USD 176.00.'
     assert not result['limitations']
 
 

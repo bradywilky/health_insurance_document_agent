@@ -13,7 +13,7 @@ def test_graph_stream_exposes_real_nodes(native_script):
                    {'tool':'answer','parameters':{}}, 'USD 88 [E1].'])
     events = list(DOCUMENT_GRAPH.stream(inputs(doc), stream_mode='updates'))
     assert [next(iter(e)) for e in events] == ['init','assess','plan','tools','plan','tools','synthesize']
-    assert events[-1]['synthesize']['result']['answer'] == 'USD 88 [E1].'
+    assert events[-1]['synthesize']['result']['answer'] == 'USD 88.'
 
 
 def test_graph_step_limit_synthesizes_without_recursion_error(native_script):
