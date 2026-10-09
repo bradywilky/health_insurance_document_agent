@@ -1,6 +1,6 @@
 REPOSITORY-TEXT-BUNDLE-V1
 ===== REPOSITORY FILE =====
-{"path": ".env.example", "characters": 2259, "sha256": "8333d20f662bad24e478b4b03c78a5e83d5614e6d60abae934824138690c2a53"}
+{"path": ".env.example", "characters": 2752, "sha256": "a91cb97c751487b6f1bfed6bd0d338305d3bc53b6491fddaec435ac16526709f"}
 # Replace with your own local profile name. Never add credentials here.
 AWS_PROFILE=dev-profile
 AWS_DEFAULT_REGION=us-east-1
@@ -20,8 +20,14 @@ BEDROCK_MAX_ATTEMPTS=6
 DOCUMENTS_STORAGE=local
 # Shared by both apps; relative paths resolve from the project root.
 DOCUMENTS_LOCAL_DIR=data/document_library
+# Saved documents: s3://<bucket>/<prefix base><group name>/<ppdocs>/<filename>/ (manifest.json and outputs).
 DOCUMENTS_S3_BUCKET=
-DOCUMENTS_S3_PREFIX=document-agent/
+DOCUMENTS_S3_PREFIX_BASE=content/health_insurance_document_agent/
+# Default group; ask_question(group_name=...) or the Lambda event's group_name overrides it per request.
+# Also applies in local mode, under DOCUMENTS_LOCAL_DIR.
+DOCUMENTS_GROUP_NAME=
+# Must end in /preprocessed. Originals go to the sibling raw folder (documents/raw).
+DOCUMENTS_S3_PREFIX_PPDOCS=documents/preprocessed
 # Optional; otherwise the destination bucket encryption policy applies.
 # DOCUMENTS_S3_KMS_KEY_ID=
 
@@ -30,7 +36,7 @@ DOCUMENTS_S3_PREFIX=document-agent/
 AUDIT_STORAGE=local
 AUDIT_LOCAL_DIR=data/audit
 # AUDIT_S3_BUCKET=            # defaults to DOCUMENTS_S3_BUCKET
-# AUDIT_S3_PREFIX=document-agent/
+# AUDIT_S3_PREFIX=            # defaults to DOCUMENTS_S3_PREFIX_BASE
 # AUDIT_S3_KMS_KEY_ID=        # defaults to DOCUMENTS_S3_KMS_KEY_ID
 # Also record question, answer and evidence in a separate content tier. Can contain PHI.
 AUDIT_CONTENT=false
@@ -109,7 +115,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 47913, "sha256": "dda2b8c7ed50bcf8808ffb8964c0d7e41005813a1ca0a5b8dc4bf04ebc4555e1"}
+{"path": "README.md", "characters": 48982, "sha256": "d8701521e458321030ef7e6acf12379833b9de697bf4896f7eefcabd5e4c6604"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
@@ -345,8 +351,10 @@ Use an existing bucket. Set these values in your ignored `.env` and restart Stre
 
 ```dotenv
 DOCUMENTS_STORAGE=s3
-DOCUMENTS_S3_BUCKET=your-bucket
-DOCUMENTS_S3_PREFIX=document-agent/
+DOCUMENTS_S3_BUCKET=abc123
+DOCUMENTS_S3_PREFIX_BASE=content/health_insurance_document_agent/
+DOCUMENTS_GROUP_NAME=aol.com
+DOCUMENTS_S3_PREFIX_PPDOCS=documents/preprocessed
 # Optional KMS override; otherwise the bucket encryption policy applies:
 # DOCUMENTS_S3_KMS_KEY_ID=your-key-id
 ```
@@ -355,10 +363,20 @@ The app uses `AWS_PROFILE` for local development or the deployment IAM role when
 
 In the chat app, click **Refresh saved files** and select sources under **Files to answer from**. The upload portal handles all ingestion; the chat app opens its store in read-only mode. In production, give the chat service a read-only storage role and the separate upload service write permissions. The picker shows up to 100 saved documents from the configured prefix; this is a prototype library, not automatic retrieval across a bucket. Everyone using this app configuration has the same storage scope; add authentication and server-side authorization before a shared deployment.
 
-Documents are stored by their full filename, including extension:
+Every S3 key is built from these settings, so a document's preprocessed folder is always:
 
 ```text
-<prefix>/documents/
+<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/
+content/health_insurance_document_agent/aol.com/documents/preprocessed/benefits.pdf/
+```
+
+`DOCUMENTS_GROUP_NAME` is the default group for the apps. `ask_question(group_name=...)` and the Lambda
+event's `group_name` choose the group per request; S3 storage refuses a question with no group.
+`DOCUMENTS_S3_PREFIX_PPDOCS` must end in `/preprocessed`; originals go in the sibling `raw` folder. Documents are
+stored by their full filename, including extension:
+
+```text
+<prefix base><group name>/documents/
   raw/
     benefits.pdf
     claims.xlsx
@@ -375,15 +393,15 @@ Documents are stored by their full filename, including extension:
 
 `extracted.json` preserves text blocks, source locations, warnings, and table metadata. The manifest is written last. Re-uploading the same filename replaces its raw file and preprocessed outputs; use distinct filenames to retain separate documents. The previous manifest and outputs are removed before replacement so a failed upload cannot be opened as complete. A failed replacement requires re-uploading the source; this is not an atomic transaction or version-history system. Concurrent writes to the same filename are not supported. Bucket versioning may be enabled separately if recovery history is required.
 
-Table inputs use `s3_prefix=<prefix>/`, `plan_domain=documents`, and `filename=<filename>`, preserving the existing preprocessing reading contract. Saved documents reopen without re-extraction; table queries read CSVs directly from S3.
+Table inputs use `s3_prefix=<prefix base><group name>/`, `plan_domain=documents` (the parent of the preprocessed folder), and `filename=<filename>`, preserving the existing preprocessing reading contract. Saved documents reopen without re-extraction; table queries read CSVs directly from S3.
 
 The configured identity needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the chosen object prefix, `s3:ListBucket` restricted to that prefix for the saved-file picker, and `s3:AbortMultipartUpload` for transfer cleanup. A KMS-encrypted bucket/key may also require `kms:GenerateDataKey` and `kms:Decrypt` plus an appropriate key policy. This code does not create buckets, modify policies, add public access, or offer a delete-file UI. Replacement does remove prior preprocessed objects for that filename.
 
-Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Keep and use the returned document's `storage_ref['manifest_key']` with `store.load(...)`. Existing calls without a store remain local.
+Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Reopen it with `store.load('<filename>')` (the full `storage_ref['manifest_key']` also works); `store.for_group('<group>')` scopes the store to another group. Existing calls without a store remain local.
 
 For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
 
-The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout. Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
+The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout under `DOCUMENTS_LOCAL_DIR`, inside a `<group name>/` folder when `DOCUMENTS_GROUP_NAME` is set (the S3 prefix base is not used locally). Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
 
 ## LangGraph workflows
 
@@ -712,7 +730,8 @@ from backend.entrypoint import ask_question
 
 response = ask_question(
     "What is the member rate for plan Alpha?",
-    document_keys=["rates.txt", "benefit_summary.pdf"],  # saved filenames
+    group_name="aol.com",        # optional; default DOCUMENTS_GROUP_NAME
+    document_filenames=["rates.txt", "benefit_summary.pdf"],
     history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
     session_id="abc123",
     model="maverick",            # optional; a key of MODELS
@@ -738,11 +757,11 @@ kind, key, extraction warnings), `sources` (each evidence item with its passages
 result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
 `usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
 
-`document_keys` are the filenames as uploaded (`rates.txt`). The store resolves each one to
-`<prefix>documents/preprocessed/<filename>/manifest.json` under the configured bucket and prefix, so callers do
-not need the S3 path. Full manifest keys are still accepted.
+`document_filenames` are the filenames as uploaded (`rates.txt`). Each one is read from
+`<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/` in `DOCUMENTS_S3_BUCKET`, so callers
+never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `invalid_request`.
 
-The Lambda event is `{"question", "session_id", "document_keys", "chat_history", "clarification",
+The Lambda event is `{"question", "session_id", "group_name", "document_filenames", "chat_history", "clarification",
 "args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
 identifiers, because questions and history can contain PHI. It creates the document store and audit sink on the
 first request and reuses them while the Lambda stays warm.
@@ -765,11 +784,11 @@ Features that work or are designed but are not in the current product requiremen
 {"path": "apps/api/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/api/lambda_handler.py", "characters": 1962, "sha256": "50ae474c5885f34a135fea3e1db9334f852a1bd70f25dd1799007302e7a539b8"}
+{"path": "apps/api/lambda_handler.py", "characters": 2044, "sha256": "8c9c38584c909e8eb2a7f72d3073bc77a99577843f724b72ab5c3b1492c5c7f3"}
 """AWS Lambda handler: a thin adapter from the event to backend.entrypoint.ask_question.
 
 Event:
-    {"question": "...", "session_id": "...", "document_keys": ["<saved filename>", ...],
+    {"question": "...", "session_id": "...", "group_name": "aol.com", "document_filenames": ["rates.txt", ...],
      "chat_history": [{"role": "user" | "assistant", "content": "..."}],
      "clarification": "<chosen reading, after a needs_clarification response>",
      "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_name": "..."}}
@@ -798,11 +817,12 @@ def lambda_handler(event, context):
     event = event or {}
     args = event.get('args') or {}
     # Log identifiers only: questions and history can contain PHI.
-    logger.info('Request session=%s documents=%s', event.get('session_id'), len(event.get('document_keys') or []))
+    logger.info('Request session=%s documents=%s', event.get('session_id'), len(event.get('document_filenames') or []))
     store, sink = clients()
     response = ask_question(
         event.get('question'),
-        document_keys=event.get('document_keys') or [],
+        document_filenames=event.get('document_filenames') or [],
+        group_name=event.get('group_name'),
         history=event.get('chat_history') or [],
         session_id=event.get('session_id'),
         clarification=event.get('clarification'),
@@ -2368,10 +2388,10 @@ def get_model_config():
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/entrypoint.py", "characters": 13348, "sha256": "a46fc7b8bbe6d7a679d001700193b944b880495b175d16a7408c6e39011d6611"}
+{"path": "backend/entrypoint.py", "characters": 14038, "sha256": "e6631470442f4bd0ca219cd6ad35ada59bb4bb98e125aeb060ba722cc9efdea2"}
 """Single entry point for document question answering.
 
-ask_question is the production entry point (the Lambda handler calls it with saved-document keys).
+ask_question is the production entry point (the Lambda handler calls it with a group and saved filenames).
 ask_question_local is for development callers (the Streamlit app, the command-line tool, tests): it takes
 already-loaded documents and adds a progress hook. Both validate the request, load the documents, run
 the agent, write the audit record and trace, and return the same JSON-serializable response, whose `status`
@@ -2382,7 +2402,7 @@ needs_clarification   `answer` is a clarifying question; resend the same questio
                       one of `clarification.options` or the user's own wording
 no_evidence           nothing relevant was retrieved; `message` explains
 invalid_request       bad input (no question, too many documents, unknown model, ...); `message` explains
-documents_unavailable a document key could not be loaded
+documents_unavailable a saved document could not be loaded
 credentials_expired   AWS credentials are missing or expired
 model_unavailable     Bedrock throttled, timed out or was unreachable after retries
 error                 anything else; `error` holds the exception type and message
@@ -2423,11 +2443,13 @@ class RequestError(ValueError):
         self.status = status
 
 
-def ask_question(question, *, document_keys, history=None, session_id=None, clarification=None, model=None,
-                 ambiguity='off', app='api', store=None, sink=None):
+def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, clarification=None,
+                 model=None, ambiguity='off', app='api', store=None, sink=None):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
-    document_keys  saved-document filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS); full manifest keys also work
+    document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
+                   <DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/
+    group_name     the group folder, e.g. 'aol.com'; default DOCUMENTS_GROUP_NAME. Required for S3 storage.
     history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
     session_id     conversation identifier, recorded in the audit record and trace
     clarification  the reading the user chose after a needs_clarification response
@@ -2437,7 +2459,8 @@ def ask_question(question, *, document_keys, history=None, session_id=None, clar
     store, sink    document store and audit sink; default from the environment. A long-lived process (a warm
                    Lambda) can create them once and pass them to reuse their AWS clients across requests.
     """
-    return _run(question, selected=document_keys, load=lambda: _load(document_keys, store), history=history,
+    return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name, store),
+                history=history,
                 session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
                 sink=sink)
 
@@ -2530,20 +2553,28 @@ def _validate(question, history, clarification, model, ambiguity, selected):
     return question.strip(), turns, clarification.strip() if clarification else None
 
 
-def _load(document_keys, store):
-    if not all(isinstance(k, str) and k for k in document_keys):
-        raise RequestError('invalid_request', 'document_keys must be nonempty strings.')
+def _load(filenames, group_name, store):
+    from backend.storage.documents import check_group_name
+    if not all(isinstance(f, str) and f for f in filenames):
+        raise RequestError('invalid_request', 'document_filenames must be nonempty strings.')
     if store is None:
         from backend.storage.s3 import configured_store
         store = configured_store(read_only=True)
-    loaded = []
-    for key in dict.fromkeys(document_keys):
+    if group_name is not None:
         try:
-            loaded.append(store.load(key))
+            store = store.for_group(check_group_name(group_name))
+        except ValueError as exc:
+            raise RequestError('invalid_request', str(exc)) from exc
+    if store.requires_group and store.group is None:
+        raise RequestError('invalid_request', 'group_name is required (or set DOCUMENTS_GROUP_NAME).')
+    loaded = []
+    for name in dict.fromkeys(filenames):
+        try:
+            loaded.append(store.load(name))
         except Exception as exc:
             if classify(exc) != 'error':
                 raise
-            raise RequestError('documents_unavailable', f'Could not open saved document {key}: {exc}') from exc
+            raise RequestError('documents_unavailable', f'Could not open saved document {name}: {exc}') from exc
     return loaded
 
 
@@ -2796,7 +2827,7 @@ ID, start time and duration. Metadata, metric and tag values of `None` are dropp
 """Audit records and Datadog LLM Observability spans."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/audit.py", "characters": 11183, "sha256": "fcc074f3e5fbf13b13acb70db57f4c2ccc3db8930f6899b6ebcc81c007bbb945"}
+{"path": "backend/observability/audit.py", "characters": 11247, "sha256": "71fdd34d6d62058a561020b858d0f9931090cbec98deebd5eec74f098b80d2b6"}
 """Application audit records: one per question and one per document event.
 
 Two tiers, written to separate locations so they can have separate access policies and retention:
@@ -2934,7 +2965,9 @@ def configured_audit_sink():
                             region_name=os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'us-east-1')
     client = session.client('s3', config=Config(connect_timeout=5, read_timeout=30,
                                                 retries={'mode': 'standard', 'total_max_attempts': 3}))
-    return S3AuditSink(client, bucket, os.getenv('AUDIT_S3_PREFIX', os.getenv('DOCUMENTS_S3_PREFIX', 'document-agent/')),
+    prefix = os.getenv('AUDIT_S3_PREFIX') or os.getenv('DOCUMENTS_S3_PREFIX_BASE') \
+        or 'content/health_insurance_document_agent/'
+    return S3AuditSink(client, bucket, prefix,
                        kms_key_id=os.getenv('AUDIT_S3_KMS_KEY_ID') or os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None)
 
 
@@ -3999,26 +4032,70 @@ def similar_values(requested, counts):
 """Storage components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/documents.py", "characters": 8510, "sha256": "cc237c3dacbecadc2db91d600c16ccbfc33148dbcb0329030ad65199823e7d99"}
-"""Shared object-store layout for originals, extracted blocks, and table CSVs."""
+{"path": "backend/storage/documents.py", "characters": 10387, "sha256": "c6913c96fbf0e4f1e989930fe70a3d19d269cb63e08ca994b7e8457fadb2d8ef"}
+"""Shared object-store layout for originals, extracted blocks, and table CSVs.
+
+Saved files live under <prefix><group>/<preprocessed>/<filename>/ (manifest.json, extracted.json, table CSVs),
+and originals under the sibling folder <prefix><group>/<parent of preprocessed>/raw/<filename>. In S3:
+
+    content/health_insurance_document_agent/<group_name>/documents/preprocessed/<filename>/manifest.json
+"""
+import copy
 from io import BytesIO
 import json
 import mimetypes
 import re
 
+PREPROCESSED = 'documents/preprocessed'
+
+
+def _segments(value, what):
+    value = value.strip('/')
+    parts = value.split('/') if value else []
+    if any(part in {'', '.', '..'} or '\\' in part for part in parts):
+        raise ValueError(f'{what} cannot contain empty or dot path segments')
+    return parts
+
+
+def check_group_name(group):
+    """A group name is one folder name, e.g. 'aol.com'."""
+    if not isinstance(group, str) or not group or group != group.strip() or '/' in group or '\\' in group \
+            or group in {'.', '..'}:
+        raise ValueError('group_name must be a single folder name, e.g. "aol.com"')
+    return group
 
 
 class ObjectDocumentStore:
-    def __init__(self, client, bucket, prefix='document-agent/', *, kms_key_id=None, read_only=False):
+    # S3 libraries are always split by group, so ask_question requires a group name for them.
+    requires_group = False
+
+    def __init__(self, client, bucket, prefix='', *, group=None, preprocessed=PREPROCESSED, kms_key_id=None,
+                 read_only=False):
         if not bucket or '/' in bucket or bucket != bucket.strip():
             raise ValueError('S3 bucket must be a bucket name, not an s3:// URI')
-        prefix = prefix.strip('/')
-        if any(part in {'.', '..'} for part in prefix.split('/')):
-            raise ValueError('S3 prefix cannot contain dot path segments')
+        base = _segments(prefix, 'S3 prefix')
+        folders = _segments(preprocessed, 'Preprocessed prefix')
+        if len(folders) < 2 or folders[-1] != 'preprocessed':
+            raise ValueError("Preprocessed prefix must end in '/preprocessed', e.g. 'documents/preprocessed'")
         self.client, self.bucket = client, bucket
-        self.prefix = (prefix + '/') if prefix else ''
+        self.base_prefix = '/'.join(base) + '/' if base else ''
+        # The table tools read <s3_prefix><plan_domain>/preprocessed/<filename>/, so keep the parent separately.
+        self.domain = '/'.join(folders[:-1])
         self.kms_key_id = kms_key_id
         self.read_only = read_only
+        self.group = None if group is None else check_group_name(group)
+        self.prefix = self.base_prefix + (self.group + '/' if self.group else '')
+
+    def for_group(self, group):
+        """The same store and client, scoped to another group's folder."""
+        scoped = copy.copy(self)
+        scoped.group = check_group_name(group)
+        scoped.prefix = self.base_prefix + scoped.group + '/'
+        return scoped
+
+    @property
+    def preprocessed(self):
+        return f'{self.prefix}{self.domain}/preprocessed/'
 
     def _write(self, key, body, content_type):
         extra = {'ContentType': content_type}
@@ -4039,7 +4116,7 @@ class ObjectDocumentStore:
         return json.loads(raw)
 
     def _root(self, manifest_key):
-        pattern = re.escape(self.prefix) + r'documents/preprocessed/[^/\\]+/manifest\.json'
+        pattern = re.escape(self.preprocessed) + r'[^/\\]+/manifest\.json'
         if not isinstance(manifest_key, str) or not re.fullmatch(pattern, manifest_key):
             raise ValueError('Manifest must be inside the configured document prefix')
         root = manifest_key[:-len('manifest.json')]
@@ -4055,14 +4132,14 @@ class ObjectDocumentStore:
             raise ValueError('Original bytes do not match the processed document')
         if not doc.name or '/' in doc.name or '\\' in doc.name or doc.name in {'.', '..'}:
             raise ValueError('Document filename must be a basename')
-        root = f'{self.prefix}documents/preprocessed/{doc.name}/'
+        root = f'{self.preprocessed}{doc.name}/'
         # A filename identifies one current document. Invalidate completion before replacing it.
         self.client.delete_object(Bucket=self.bucket, Key=root + 'manifest.json')
         pages = self.client.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=root)
         stale = [obj['Key'] for page in pages for obj in page.get('Contents', [])]
         for key in stale:
             self.client.delete_object(Bucket=self.bucket, Key=key)
-        self._write(f'{self.prefix}documents/raw/' + doc.name, content,
+        self._write(f'{self.prefix}{self.domain}/raw/' + doc.name, content,
                     mimetypes.guess_type(doc.name)[0] or 'application/octet-stream')
         if doc.table_inputs:
             inputs = doc.table_inputs
@@ -4094,7 +4171,7 @@ class ObjectDocumentStore:
         if not isinstance(filename, str) or not filename or '/' in filename or '\\' in filename \
                 or filename in {'.', '..'}:
             raise ValueError('Document must be a saved filename or manifest key')
-        return f'{self.prefix}documents/preprocessed/{filename}/manifest.json'
+        return f'{self.preprocessed}{filename}/manifest.json'
 
     def load(self, filename):
         """Load a saved document by filename (e.g. 'rates.txt') or by its full manifest key."""
@@ -4121,7 +4198,7 @@ class ObjectDocumentStore:
                 if '/' in csv_name or '\\' in csv_name or csv_name in {'.', '..'}:
                     raise ValueError('Invalid saved CSV filename')
             doc.table_inputs = dict(s3_client=self.client, s3_bucket=self.bucket,
-                                    s3_prefix=self.prefix, plan_domain='documents', filename=name)
+                                    s3_prefix=self.prefix, plan_domain=self.domain, filename=name)
         if manifest.get('has_profile'):
             doc.profile = self._read_json(root + 'semantic_profile.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
@@ -4143,7 +4220,7 @@ class ObjectDocumentStore:
             raise ValueError('limit must be a positive integer')
         items = []
         pages = self.client.get_paginator('list_objects_v2').paginate(
-            Bucket=self.bucket, Prefix=self.prefix + 'documents/preprocessed/')
+            Bucket=self.bucket, Prefix=self.preprocessed)
         for page in pages:
             for obj in page.get('Contents', []):
                 key = obj['Key']
@@ -4159,13 +4236,13 @@ class ObjectDocumentStore:
         return items
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/filesystem.py", "characters": 2710, "sha256": "e14c08f801eef66fbb1940047be50e5d98f9b20a4257b413d003f2d6ffe17636"}
+{"path": "backend/storage/filesystem.py", "characters": 2803, "sha256": "23dde33218df0b9c915657310b9057cc88532e0a298324807a140f9d420df16c"}
 """Persistent local object storage shared by the upload and chat processes."""
 from pathlib import Path
 import os
 import shutil
 import tempfile
-from backend.storage.documents import ObjectDocumentStore
+from backend.storage.documents import ObjectDocumentStore, PREPROCESSED
 
 
 class DirectoryClient:
@@ -4224,13 +4301,13 @@ class DirectoryClient:
 
 
 class LocalDocumentStore(ObjectDocumentStore):
-    def __init__(self, directory="data/document_library", *, read_only=False):
+    def __init__(self, directory="data/document_library", *, group=None, preprocessed=PREPROCESSED, read_only=False):
         root = Path(directory).expanduser()
         if not root.is_absolute():
             root = Path(__file__).resolve().parents[2] / root
         self.directory = root.resolve()
         super().__init__(DirectoryClient(self.directory, read_only=read_only),
-                         "local", prefix="", read_only=read_only)
+                         "local", prefix="", group=group, preprocessed=preprocessed, read_only=read_only)
 
 ===== REPOSITORY FILE =====
 {"path": "backend/storage/local.py", "characters": 2021, "sha256": "9ac6352f04888dfcdab81befacfce2be9f0ec15388a78ac339bbd7554aa70688"}
@@ -4279,25 +4356,36 @@ def prepare_preprocessed_directory(path):
                 plan_domain='local', filename=filename)
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/s3.py", "characters": 1474, "sha256": "44e7623ba0aa55d03ac86021883129ef4b5906bee3f9bb366d7c95ba575c9390"}
+{"path": "backend/storage/s3.py", "characters": 2091, "sha256": "2e0df00c31ea521b0fedb3e5843bd9eeaacb3dec197467ed7577345741efcefd"}
 """S3 adapter and local/S3 document-store configuration."""
 import os
 import boto3
 from botocore.config import Config
-from backend.storage.documents import ObjectDocumentStore
+from backend.storage.documents import ObjectDocumentStore, PREPROCESSED
+
+PREFIX_BASE = 'content/health_insurance_document_agent/'
+
 
 class S3DocumentStore(ObjectDocumentStore):
     """Persist documents using an AWS S3 client."""
+    requires_group = True
 
 
 def configured_store(*, read_only=False):
-    """Local mode makes no AWS calls. S3 mode uses profile credentials or deployment IAM roles."""
+    """Local mode makes no AWS calls. S3 mode uses profile credentials or deployment IAM roles.
+
+    S3 documents live at s3://DOCUMENTS_S3_BUCKET/DOCUMENTS_S3_PREFIX_BASE<group>/DOCUMENTS_S3_PREFIX_PPDOCS/<filename>/.
+    The group comes from DOCUMENTS_GROUP_NAME, or per request from ask_question(group_name=...).
+    """
     mode = os.getenv('DOCUMENTS_STORAGE', 'local').strip().lower()
     if mode not in {'local', 's3'}:
         raise ValueError('DOCUMENTS_STORAGE must be local or s3')
+    group = os.getenv('DOCUMENTS_GROUP_NAME', '').strip() or None
+    preprocessed = os.getenv('DOCUMENTS_S3_PREFIX_PPDOCS', '').strip() or PREPROCESSED
     if mode == 'local':
         from backend.storage.filesystem import LocalDocumentStore
-        return LocalDocumentStore(os.getenv("DOCUMENTS_LOCAL_DIR", "data/document_library"), read_only=read_only)
+        return LocalDocumentStore(os.getenv("DOCUMENTS_LOCAL_DIR", "data/document_library"), group=group,
+                                  preprocessed=preprocessed, read_only=read_only)
     bucket = os.getenv('DOCUMENTS_S3_BUCKET', '').strip()
     if not bucket:
         raise ValueError('DOCUMENTS_S3_BUCKET is required in s3 mode')
@@ -4305,8 +4393,9 @@ def configured_store(*, read_only=False):
                             region_name=os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'us-east-1')
     client = session.client('s3', config=Config(connect_timeout=5, read_timeout=60,
         retries={'mode':'standard', 'total_max_attempts':3}))
-    return S3DocumentStore(client, bucket, os.getenv('DOCUMENTS_S3_PREFIX', 'document-agent/'),
-                           kms_key_id=os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None, read_only=read_only)
+    return S3DocumentStore(client, bucket, os.getenv('DOCUMENTS_S3_PREFIX_BASE', PREFIX_BASE), group=group,
+                           preprocessed=preprocessed, kms_key_id=os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None,
+                           read_only=read_only)
 
 ===== REPOSITORY FILE =====
 {"path": "backend/storage/tables.py", "characters": 1075, "sha256": "bb651e71c41492272135450541bb85b454d330a2d9850111a6d55da68c07669f"}
@@ -6465,7 +6554,7 @@ if __name__ == '__main__':
     print(create_samples('data'))
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/conftest.py", "characters": 2391, "sha256": "55585330baaa3581128312d9ab2bae4da98a78130e197a5081192205d9ea38ce"}
+{"path": "development/tests/conftest.py", "characters": 2581, "sha256": "86e12eadf9d93b40a6fa247814860114493cc5decee2ed9181d4c85529a3845f"}
 import pytest
 from development.scripts.make_samples import create_samples
 
@@ -6518,10 +6607,12 @@ def llm_capture():
 
 @pytest.fixture(autouse=True)
 def isolated_audit(monkeypatch, tmp_path):
-    """Audit records from tests go to a temporary directory; prompt and response capture stays off."""
+    """Audit records from tests go to a temporary directory; prompt and response capture stays off.
+    Document layout settings from a local .env are cleared so saved paths match the tests."""
     monkeypatch.setenv('AUDIT_STORAGE', 'local')
     monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
-    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED']:
+    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED',
+                 'DOCUMENTS_GROUP_NAME', 'DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_PREFIX_PPDOCS']:
         monkeypatch.delenv(name, raising=False)
     # setenv, not delenv, so the value is restored even after an app under test changes it.
     monkeypatch.setenv('TRACE_CONTENT', 'false')
@@ -7662,7 +7753,7 @@ def test_spreadsheet_profiles_sample_data_rows_and_keep_narrative():
     assert 'SHEET INDEX' in text and f'first {SAMPLE_ROWS} rows' in text
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_entrypoint.py", "characters": 7186, "sha256": "0878b5cdba65bc12f5dfe04dfaf6c2c00ae558bf5fe94e743212f920a64905e7"}
+{"path": "development/tests/test_entrypoint.py", "characters": 8510, "sha256": "ee958aa049db6f553aadf9b483c345bfa8e683ee13bee3fef227eb3754070d0a"}
 import json
 
 import pytest
@@ -7695,9 +7786,9 @@ def answered(native_script, doc_id):
                    {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
 
 
-def test_answer_from_saved_document_keys(native_script, store, saved):
+def test_answer_from_saved_filenames(native_script, store, saved):
     answered(native_script, store.load(saved).id)
-    response = ask_question('What is the Alpha rate?', document_keys=['rates.txt'], session_id='s1', app='test')
+    response = ask_question('What is the Alpha rate?', document_filenames=['rates.txt'], session_id='s1', app='test')
     assert response['status'] == 'answered' and response['status_code'] == 200
     assert response['answer'] == 'The member rate is USD 88.' and response['message'] is None
     assert response['documents'][0]['name'] == 'rates.txt' and response['documents'][0]['key'] == saved
@@ -7710,15 +7801,15 @@ def test_answer_from_saved_document_keys(native_script, store, saved):
 
 @pytest.mark.parametrize('kwargs, message', [
     ({'question': ' '}, 'question is required'),
-    ({'document_keys': []}, 'at least one document'),
-    ({'document_keys': ['k'] * 11}, 'at most 10'),
+    ({'document_filenames': []}, 'at least one document'),
+    ({'document_filenames': ['k'] * 11}, 'at most 10'),
     ({'model': 'unknown'}, 'model must be one of'),
     ({'ambiguity': 'sometimes'}, 'ambiguity must be one of'),
     ({'history': [{'role': 'system', 'content': 'x'}]}, 'history items'),
-    ({'document_keys': ['']}, 'nonempty strings'),
+    ({'document_filenames': ['']}, 'nonempty strings'),
 ])
 def test_invalid_requests_are_reported_and_audited(kwargs, message, isolated_audit):
-    request = {'question': 'Rate?', 'document_keys': ['k'], **kwargs}
+    request = {'question': 'Rate?', 'document_filenames': ['k'], **kwargs}
     response = ask_question(request.pop('question'), app='test', **request)
     assert response['status'] == 'invalid_request' and response['status_code'] == 400
     assert message in response['message'] and response['answer'] is None
@@ -7733,12 +7824,34 @@ def test_documents_load_by_filename_or_manifest_key(store, saved, key):
 
 @pytest.mark.parametrize('key', ['../rates.txt', 'sub/rates.txt'])
 def test_filename_keys_cannot_escape(store, saved, key):
-    response = ask_question('Rate?', document_keys=[key])
+    response = ask_question('Rate?', document_filenames=[key])
     assert response['status'] == 'documents_unavailable'
 
 
+def test_group_name_selects_the_group_folder(native_script, store):
+    doc = ingest_document('rates.txt', b'Plan Alpha member rate is USD 88 per month.', store=store.for_group('aol.com'))
+    assert doc.storage_ref['manifest_key'] == 'aol.com/documents/preprocessed/rates.txt/manifest.json'
+    answered(native_script, doc.id)
+    response = ask_question('What is the Alpha rate?', group_name='aol.com', document_filenames=['rates.txt'])
+    assert response['status'] == 'answered'
+    assert ask_question('Rate?', group_name='other.com', document_filenames=['rates.txt'])['status']         == 'documents_unavailable'
+
+
+@pytest.mark.parametrize('group', ['', 'a/b', '..'])
+def test_invalid_group_name(store, group):
+    response = ask_question('Rate?', group_name=group, document_filenames=['rates.txt'])
+    assert response['status'] == 'invalid_request' and 'group_name' in response['message']
+
+
+def test_s3_requires_a_group_name():
+    from development.tests.test_s3_documents import MemoryS3
+    from backend.storage.s3 import S3DocumentStore
+    response = ask_question('Rate?', document_filenames=['rates.txt'], store=S3DocumentStore(MemoryS3(), 'b'))
+    assert response['status'] == 'invalid_request' and 'group_name is required' in response['message']
+
+
 def test_missing_saved_document(store):
-    response = ask_question('Rate?', document_keys=['document-agent/documents/preprocessed/nope/manifest.json'])
+    response = ask_question('Rate?', document_filenames=['document-agent/documents/preprocessed/nope/manifest.json'])
     assert response['status'] == 'documents_unavailable' and response['status_code'] == 404
 
 
@@ -7785,17 +7898,17 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
     from apps.api import lambda_handler as module
     module.clients.cache_clear()
     answered(native_script, store.load(saved).id)
-    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_keys': [saved],
+    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_filenames': [saved],
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
-    assert lambda_handler({'document_keys': [saved]}, None)['status_code'] == 400
+    assert lambda_handler({'document_filenames': [saved]}, None)['status_code'] == 400
     assert module.clients.cache_info().misses == 1  # store and audit sink created once
     module.clients.cache_clear()
 
 
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
-    assert production == {'question', 'document_keys', 'history', 'session_id', 'clarification', 'model',
+    assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'clarification', 'model',
                           'ambiguity', 'app', 'store', 'sink'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
@@ -8811,7 +8924,7 @@ def test_upload_batch_failure_isolation_and_limit(pack, tmp_path, monkeypatch, c
         assert LocalDocumentStore(tmp_path).list_documents() == []
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_s3_documents.py", "characters": 6784, "sha256": "02de922c60ed4fdcfc444a1b835ae63150a99a3d50ea041aec5a6558f611708c"}
+{"path": "development/tests/test_s3_documents.py", "characters": 8816, "sha256": "35a983f904dc35104d1d2fbaa9139a043ee1d2a3402818425611aa9f6e2c3803"}
 from io import BytesIO
 import json
 
@@ -8932,6 +9045,40 @@ def test_tampered_table_metadata_cannot_escape_saved_directory(store, insurance_
     store.client.objects[(store.bucket, key)] = json.dumps(data).encode()
     with pytest.raises(ValueError, match='CSV filename'):
         store.load(doc.storage_ref['manifest_key'])
+
+
+def test_configured_s3_layout(monkeypatch):
+    monkeypatch.setenv('DOCUMENTS_STORAGE', 's3')
+    monkeypatch.setenv('DOCUMENTS_S3_BUCKET', 'abc123')
+    monkeypatch.setenv('DOCUMENTS_GROUP_NAME', 'aol.com')
+    for name in ('DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_PREFIX_PPDOCS'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr('backend.storage.s3.boto3.Session', lambda **kwargs: type('S', (), {
+        'client': lambda self, *a, **kw: MemoryS3()})())
+    store = configured_store()
+    doc = ingest_document('rates.txt', b'USD 88', store=store)
+    assert doc.storage_ref == {'bucket': 'abc123', 'manifest_key':
+        'content/health_insurance_document_agent/aol.com/documents/preprocessed/rates.txt/manifest.json'}
+    assert ('abc123', 'content/health_insurance_document_agent/aol.com/documents/raw/rates.txt') in store.client.objects
+    assert store.load('rates.txt').id == doc.id
+    assert store.for_group('other.com').list_documents() == []
+
+
+def test_custom_preprocessed_folder_with_tables(insurance_workbook):
+    store = S3DocumentStore(MemoryS3(), 'b', 'base/', group='g', preprocessed='docs/v2/preprocessed')
+    doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes(), store=store)
+    assert doc.storage_ref['manifest_key'] == f'base/g/docs/v2/preprocessed/{insurance_workbook.name}/manifest.json'
+    restored = store.load(insurance_workbook.name)
+    result = execute_document_tool('table_tool', {'document_id': restored.id, 'name': 'query_table',
+        'parameters': {'sheet_name': 'Claim Samples', 'filters': [{'column': 'Claim ID', 'op': 'eq', 'value': '0012'}]}},
+        {restored.id: restored})
+    assert result['table_result']['rows'][0]['Billed Amount'] == 220
+
+
+@pytest.mark.parametrize('preprocessed', ['preprocessed', 'documents/processed', 'documents/../preprocessed'])
+def test_preprocessed_folder_must_end_in_preprocessed(preprocessed):
+    with pytest.raises(ValueError):
+        S3DocumentStore(MemoryS3(), 'b', preprocessed=preprocessed)
 
 
 def test_s3_mode_requires_explicit_bucket(monkeypatch):
