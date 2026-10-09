@@ -1,7 +1,7 @@
 """AWS Lambda handler: a thin adapter from the event to backend.entrypoint.ask_question.
 
 Event:
-    {"question": "...", "session_id": "...", "document_keys": ["<saved filename>", ...],
+    {"question": "...", "session_id": "...", "group_name": "aol.com", "document_filenames": ["rates.txt", ...],
      "chat_history": [{"role": "user" | "assistant", "content": "..."}],
      "clarification": "<chosen reading, after a needs_clarification response>",
      "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_name": "..."}}
@@ -30,11 +30,12 @@ def lambda_handler(event, context):
     event = event or {}
     args = event.get('args') or {}
     # Log identifiers only: questions and history can contain PHI.
-    logger.info('Request session=%s documents=%s', event.get('session_id'), len(event.get('document_keys') or []))
+    logger.info('Request session=%s documents=%s', event.get('session_id'), len(event.get('document_filenames') or []))
     store, sink = clients()
     response = ask_question(
         event.get('question'),
-        document_keys=event.get('document_keys') or [],
+        document_filenames=event.get('document_filenames') or [],
+        group_name=event.get('group_name'),
         history=event.get('chat_history') or [],
         session_id=event.get('session_id'),
         clarification=event.get('clarification'),

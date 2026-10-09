@@ -233,8 +233,10 @@ Use an existing bucket. Set these values in your ignored `.env` and restart Stre
 
 ```dotenv
 DOCUMENTS_STORAGE=s3
-DOCUMENTS_S3_BUCKET=your-bucket
-DOCUMENTS_S3_PREFIX=document-agent/
+DOCUMENTS_S3_BUCKET=abc123
+DOCUMENTS_S3_PREFIX_BASE=content/health_insurance_document_agent/
+DOCUMENTS_GROUP_NAME=aol.com
+DOCUMENTS_S3_PREFIX_PPDOCS=documents/preprocessed
 # Optional KMS override; otherwise the bucket encryption policy applies:
 # DOCUMENTS_S3_KMS_KEY_ID=your-key-id
 ```
@@ -243,10 +245,20 @@ The app uses `AWS_PROFILE` for local development or the deployment IAM role when
 
 In the chat app, click **Refresh saved files** and select sources under **Files to answer from**. The upload portal handles all ingestion; the chat app opens its store in read-only mode. In production, give the chat service a read-only storage role and the separate upload service write permissions. The picker shows up to 100 saved documents from the configured prefix; this is a prototype library, not automatic retrieval across a bucket. Everyone using this app configuration has the same storage scope; add authentication and server-side authorization before a shared deployment.
 
-Documents are stored by their full filename, including extension:
+Every S3 key is built from these settings, so a document's preprocessed folder is always:
 
 ```text
-<prefix>/documents/
+<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/
+content/health_insurance_document_agent/aol.com/documents/preprocessed/benefits.pdf/
+```
+
+`DOCUMENTS_GROUP_NAME` is the default group for the apps. `ask_question(group_name=...)` and the Lambda
+event's `group_name` choose the group per request; S3 storage refuses a question with no group.
+`DOCUMENTS_S3_PREFIX_PPDOCS` must end in `/preprocessed`; originals go in the sibling `raw` folder. Documents are
+stored by their full filename, including extension:
+
+```text
+<prefix base><group name>/documents/
   raw/
     benefits.pdf
     claims.xlsx
@@ -263,15 +275,15 @@ Documents are stored by their full filename, including extension:
 
 `extracted.json` preserves text blocks, source locations, warnings, and table metadata. The manifest is written last. Re-uploading the same filename replaces its raw file and preprocessed outputs; use distinct filenames to retain separate documents. The previous manifest and outputs are removed before replacement so a failed upload cannot be opened as complete. A failed replacement requires re-uploading the source; this is not an atomic transaction or version-history system. Concurrent writes to the same filename are not supported. Bucket versioning may be enabled separately if recovery history is required.
 
-Table inputs use `s3_prefix=<prefix>/`, `plan_domain=documents`, and `filename=<filename>`, preserving the existing preprocessing reading contract. Saved documents reopen without re-extraction; table queries read CSVs directly from S3.
+Table inputs use `s3_prefix=<prefix base><group name>/`, `plan_domain=documents` (the parent of the preprocessed folder), and `filename=<filename>`, preserving the existing preprocessing reading contract. Saved documents reopen without re-extraction; table queries read CSVs directly from S3.
 
 The configured identity needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the chosen object prefix, `s3:ListBucket` restricted to that prefix for the saved-file picker, and `s3:AbortMultipartUpload` for transfer cleanup. A KMS-encrypted bucket/key may also require `kms:GenerateDataKey` and `kms:Decrypt` plus an appropriate key policy. This code does not create buckets, modify policies, add public access, or offer a delete-file UI. Replacement does remove prior preprocessed objects for that filename.
 
-Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Keep and use the returned document's `storage_ref['manifest_key']` with `store.load(...)`. Existing calls without a store remain local.
+Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Reopen it with `store.load('<filename>')` (the full `storage_ref['manifest_key']` also works); `store.for_group('<group>')` scopes the store to another group. Existing calls without a store remain local.
 
 For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
 
-The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout. Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
+The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout under `DOCUMENTS_LOCAL_DIR`, inside a `<group name>/` folder when `DOCUMENTS_GROUP_NAME` is set (the S3 prefix base is not used locally). Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
 
 ## LangGraph workflows
 
@@ -600,7 +612,8 @@ from backend.entrypoint import ask_question
 
 response = ask_question(
     "What is the member rate for plan Alpha?",
-    document_keys=["rates.txt", "benefit_summary.pdf"],  # saved filenames
+    group_name="aol.com",        # optional; default DOCUMENTS_GROUP_NAME
+    document_filenames=["rates.txt", "benefit_summary.pdf"],
     history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
     session_id="abc123",
     model="maverick",            # optional; a key of MODELS
@@ -626,11 +639,11 @@ kind, key, extraction warnings), `sources` (each evidence item with its passages
 result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
 `usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
 
-`document_keys` are the filenames as uploaded (`rates.txt`). The store resolves each one to
-`<prefix>documents/preprocessed/<filename>/manifest.json` under the configured bucket and prefix, so callers do
-not need the S3 path. Full manifest keys are still accepted.
+`document_filenames` are the filenames as uploaded (`rates.txt`). Each one is read from
+`<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/` in `DOCUMENTS_S3_BUCKET`, so callers
+never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `invalid_request`.
 
-The Lambda event is `{"question", "session_id", "document_keys", "chat_history", "clarification",
+The Lambda event is `{"question", "session_id", "group_name", "document_filenames", "chat_history", "clarification",
 "args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
 identifiers, because questions and history can contain PHI. It creates the document store and audit sink on the
 first request and reuses them while the Lambda stays warm.

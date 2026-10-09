@@ -1,6 +1,6 @@
 """Single entry point for document question answering.
 
-ask_question is the production entry point (the Lambda handler calls it with saved-document keys).
+ask_question is the production entry point (the Lambda handler calls it with a group and saved filenames).
 ask_question_local is for development callers (the Streamlit app, the command-line tool, tests): it takes
 already-loaded documents and adds a progress hook. Both validate the request, load the documents, run
 the agent, write the audit record and trace, and return the same JSON-serializable response, whose `status`
@@ -11,7 +11,7 @@ needs_clarification   `answer` is a clarifying question; resend the same questio
                       one of `clarification.options` or the user's own wording
 no_evidence           nothing relevant was retrieved; `message` explains
 invalid_request       bad input (no question, too many documents, unknown model, ...); `message` explains
-documents_unavailable a document key could not be loaded
+documents_unavailable a saved document could not be loaded
 credentials_expired   AWS credentials are missing or expired
 model_unavailable     Bedrock throttled, timed out or was unreachable after retries
 error                 anything else; `error` holds the exception type and message
@@ -52,11 +52,13 @@ class RequestError(ValueError):
         self.status = status
 
 
-def ask_question(question, *, document_keys, history=None, session_id=None, clarification=None, model=None,
-                 ambiguity='off', app='api', store=None, sink=None):
+def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, clarification=None,
+                 model=None, ambiguity='off', app='api', store=None, sink=None):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
-    document_keys  saved-document filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS); full manifest keys also work
+    document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
+                   <DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/
+    group_name     the group folder, e.g. 'aol.com'; default DOCUMENTS_GROUP_NAME. Required for S3 storage.
     history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
     session_id     conversation identifier, recorded in the audit record and trace
     clarification  the reading the user chose after a needs_clarification response
@@ -66,7 +68,8 @@ def ask_question(question, *, document_keys, history=None, session_id=None, clar
     store, sink    document store and audit sink; default from the environment. A long-lived process (a warm
                    Lambda) can create them once and pass them to reuse their AWS clients across requests.
     """
-    return _run(question, selected=document_keys, load=lambda: _load(document_keys, store), history=history,
+    return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name, store),
+                history=history,
                 session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
                 sink=sink)
 
@@ -159,20 +162,28 @@ def _validate(question, history, clarification, model, ambiguity, selected):
     return question.strip(), turns, clarification.strip() if clarification else None
 
 
-def _load(document_keys, store):
-    if not all(isinstance(k, str) and k for k in document_keys):
-        raise RequestError('invalid_request', 'document_keys must be nonempty strings.')
+def _load(filenames, group_name, store):
+    from backend.storage.documents import check_group_name
+    if not all(isinstance(f, str) and f for f in filenames):
+        raise RequestError('invalid_request', 'document_filenames must be nonempty strings.')
     if store is None:
         from backend.storage.s3 import configured_store
         store = configured_store(read_only=True)
-    loaded = []
-    for key in dict.fromkeys(document_keys):
+    if group_name is not None:
         try:
-            loaded.append(store.load(key))
+            store = store.for_group(check_group_name(group_name))
+        except ValueError as exc:
+            raise RequestError('invalid_request', str(exc)) from exc
+    if store.requires_group and store.group is None:
+        raise RequestError('invalid_request', 'group_name is required (or set DOCUMENTS_GROUP_NAME).')
+    loaded = []
+    for name in dict.fromkeys(filenames):
+        try:
+            loaded.append(store.load(name))
         except Exception as exc:
             if classify(exc) != 'error':
                 raise
-            raise RequestError('documents_unavailable', f'Could not open saved document {key}: {exc}') from exc
+            raise RequestError('documents_unavailable', f'Could not open saved document {name}: {exc}') from exc
     return loaded
 
 

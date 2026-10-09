@@ -1,22 +1,66 @@
-"""Shared object-store layout for originals, extracted blocks, and table CSVs."""
+"""Shared object-store layout for originals, extracted blocks, and table CSVs.
+
+Saved files live under <prefix><group>/<preprocessed>/<filename>/ (manifest.json, extracted.json, table CSVs),
+and originals under the sibling folder <prefix><group>/<parent of preprocessed>/raw/<filename>. In S3:
+
+    content/health_insurance_document_agent/<group_name>/documents/preprocessed/<filename>/manifest.json
+"""
+import copy
 from io import BytesIO
 import json
 import mimetypes
 import re
 
+PREPROCESSED = 'documents/preprocessed'
+
+
+def _segments(value, what):
+    value = value.strip('/')
+    parts = value.split('/') if value else []
+    if any(part in {'', '.', '..'} or '\\' in part for part in parts):
+        raise ValueError(f'{what} cannot contain empty or dot path segments')
+    return parts
+
+
+def check_group_name(group):
+    """A group name is one folder name, e.g. 'aol.com'."""
+    if not isinstance(group, str) or not group or group != group.strip() or '/' in group or '\\' in group \
+            or group in {'.', '..'}:
+        raise ValueError('group_name must be a single folder name, e.g. "aol.com"')
+    return group
 
 
 class ObjectDocumentStore:
-    def __init__(self, client, bucket, prefix='document-agent/', *, kms_key_id=None, read_only=False):
+    # S3 libraries are always split by group, so ask_question requires a group name for them.
+    requires_group = False
+
+    def __init__(self, client, bucket, prefix='', *, group=None, preprocessed=PREPROCESSED, kms_key_id=None,
+                 read_only=False):
         if not bucket or '/' in bucket or bucket != bucket.strip():
             raise ValueError('S3 bucket must be a bucket name, not an s3:// URI')
-        prefix = prefix.strip('/')
-        if any(part in {'.', '..'} for part in prefix.split('/')):
-            raise ValueError('S3 prefix cannot contain dot path segments')
+        base = _segments(prefix, 'S3 prefix')
+        folders = _segments(preprocessed, 'Preprocessed prefix')
+        if len(folders) < 2 or folders[-1] != 'preprocessed':
+            raise ValueError("Preprocessed prefix must end in '/preprocessed', e.g. 'documents/preprocessed'")
         self.client, self.bucket = client, bucket
-        self.prefix = (prefix + '/') if prefix else ''
+        self.base_prefix = '/'.join(base) + '/' if base else ''
+        # The table tools read <s3_prefix><plan_domain>/preprocessed/<filename>/, so keep the parent separately.
+        self.domain = '/'.join(folders[:-1])
         self.kms_key_id = kms_key_id
         self.read_only = read_only
+        self.group = None if group is None else check_group_name(group)
+        self.prefix = self.base_prefix + (self.group + '/' if self.group else '')
+
+    def for_group(self, group):
+        """The same store and client, scoped to another group's folder."""
+        scoped = copy.copy(self)
+        scoped.group = check_group_name(group)
+        scoped.prefix = self.base_prefix + scoped.group + '/'
+        return scoped
+
+    @property
+    def preprocessed(self):
+        return f'{self.prefix}{self.domain}/preprocessed/'
 
     def _write(self, key, body, content_type):
         extra = {'ContentType': content_type}
@@ -37,7 +81,7 @@ class ObjectDocumentStore:
         return json.loads(raw)
 
     def _root(self, manifest_key):
-        pattern = re.escape(self.prefix) + r'documents/preprocessed/[^/\\]+/manifest\.json'
+        pattern = re.escape(self.preprocessed) + r'[^/\\]+/manifest\.json'
         if not isinstance(manifest_key, str) or not re.fullmatch(pattern, manifest_key):
             raise ValueError('Manifest must be inside the configured document prefix')
         root = manifest_key[:-len('manifest.json')]
@@ -53,14 +97,14 @@ class ObjectDocumentStore:
             raise ValueError('Original bytes do not match the processed document')
         if not doc.name or '/' in doc.name or '\\' in doc.name or doc.name in {'.', '..'}:
             raise ValueError('Document filename must be a basename')
-        root = f'{self.prefix}documents/preprocessed/{doc.name}/'
+        root = f'{self.preprocessed}{doc.name}/'
         # A filename identifies one current document. Invalidate completion before replacing it.
         self.client.delete_object(Bucket=self.bucket, Key=root + 'manifest.json')
         pages = self.client.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=root)
         stale = [obj['Key'] for page in pages for obj in page.get('Contents', [])]
         for key in stale:
             self.client.delete_object(Bucket=self.bucket, Key=key)
-        self._write(f'{self.prefix}documents/raw/' + doc.name, content,
+        self._write(f'{self.prefix}{self.domain}/raw/' + doc.name, content,
                     mimetypes.guess_type(doc.name)[0] or 'application/octet-stream')
         if doc.table_inputs:
             inputs = doc.table_inputs
@@ -92,7 +136,7 @@ class ObjectDocumentStore:
         if not isinstance(filename, str) or not filename or '/' in filename or '\\' in filename \
                 or filename in {'.', '..'}:
             raise ValueError('Document must be a saved filename or manifest key')
-        return f'{self.prefix}documents/preprocessed/{filename}/manifest.json'
+        return f'{self.preprocessed}{filename}/manifest.json'
 
     def load(self, filename):
         """Load a saved document by filename (e.g. 'rates.txt') or by its full manifest key."""
@@ -119,7 +163,7 @@ class ObjectDocumentStore:
                 if '/' in csv_name or '\\' in csv_name or csv_name in {'.', '..'}:
                     raise ValueError('Invalid saved CSV filename')
             doc.table_inputs = dict(s3_client=self.client, s3_bucket=self.bucket,
-                                    s3_prefix=self.prefix, plan_domain='documents', filename=name)
+                                    s3_prefix=self.prefix, plan_domain=self.domain, filename=name)
         if manifest.get('has_profile'):
             doc.profile = self._read_json(root + 'semantic_profile.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
@@ -141,7 +185,7 @@ class ObjectDocumentStore:
             raise ValueError('limit must be a positive integer')
         items = []
         pages = self.client.get_paginator('list_objects_v2').paginate(
-            Bucket=self.bucket, Prefix=self.prefix + 'documents/preprocessed/')
+            Bucket=self.bucket, Prefix=self.preprocessed)
         for page in pages:
             for obj in page.get('Contents', []):
                 key = obj['Key']

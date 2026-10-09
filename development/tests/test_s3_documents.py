@@ -120,6 +120,40 @@ def test_tampered_table_metadata_cannot_escape_saved_directory(store, insurance_
         store.load(doc.storage_ref['manifest_key'])
 
 
+def test_configured_s3_layout(monkeypatch):
+    monkeypatch.setenv('DOCUMENTS_STORAGE', 's3')
+    monkeypatch.setenv('DOCUMENTS_S3_BUCKET', 'abc123')
+    monkeypatch.setenv('DOCUMENTS_GROUP_NAME', 'aol.com')
+    for name in ('DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_PREFIX_PPDOCS'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr('backend.storage.s3.boto3.Session', lambda **kwargs: type('S', (), {
+        'client': lambda self, *a, **kw: MemoryS3()})())
+    store = configured_store()
+    doc = ingest_document('rates.txt', b'USD 88', store=store)
+    assert doc.storage_ref == {'bucket': 'abc123', 'manifest_key':
+        'content/health_insurance_document_agent/aol.com/documents/preprocessed/rates.txt/manifest.json'}
+    assert ('abc123', 'content/health_insurance_document_agent/aol.com/documents/raw/rates.txt') in store.client.objects
+    assert store.load('rates.txt').id == doc.id
+    assert store.for_group('other.com').list_documents() == []
+
+
+def test_custom_preprocessed_folder_with_tables(insurance_workbook):
+    store = S3DocumentStore(MemoryS3(), 'b', 'base/', group='g', preprocessed='docs/v2/preprocessed')
+    doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes(), store=store)
+    assert doc.storage_ref['manifest_key'] == f'base/g/docs/v2/preprocessed/{insurance_workbook.name}/manifest.json'
+    restored = store.load(insurance_workbook.name)
+    result = execute_document_tool('table_tool', {'document_id': restored.id, 'name': 'query_table',
+        'parameters': {'sheet_name': 'Claim Samples', 'filters': [{'column': 'Claim ID', 'op': 'eq', 'value': '0012'}]}},
+        {restored.id: restored})
+    assert result['table_result']['rows'][0]['Billed Amount'] == 220
+
+
+@pytest.mark.parametrize('preprocessed', ['preprocessed', 'documents/processed', 'documents/../preprocessed'])
+def test_preprocessed_folder_must_end_in_preprocessed(preprocessed):
+    with pytest.raises(ValueError):
+        S3DocumentStore(MemoryS3(), 'b', preprocessed=preprocessed)
+
+
 def test_s3_mode_requires_explicit_bucket(monkeypatch):
     monkeypatch.setenv('DOCUMENTS_STORAGE', 's3')
     monkeypatch.delenv('DOCUMENTS_S3_BUCKET', raising=False)

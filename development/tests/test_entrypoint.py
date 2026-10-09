@@ -30,9 +30,9 @@ def answered(native_script, doc_id):
                    {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
 
 
-def test_answer_from_saved_document_keys(native_script, store, saved):
+def test_answer_from_saved_filenames(native_script, store, saved):
     answered(native_script, store.load(saved).id)
-    response = ask_question('What is the Alpha rate?', document_keys=['rates.txt'], session_id='s1', app='test')
+    response = ask_question('What is the Alpha rate?', document_filenames=['rates.txt'], session_id='s1', app='test')
     assert response['status'] == 'answered' and response['status_code'] == 200
     assert response['answer'] == 'The member rate is USD 88.' and response['message'] is None
     assert response['documents'][0]['name'] == 'rates.txt' and response['documents'][0]['key'] == saved
@@ -45,15 +45,15 @@ def test_answer_from_saved_document_keys(native_script, store, saved):
 
 @pytest.mark.parametrize('kwargs, message', [
     ({'question': ' '}, 'question is required'),
-    ({'document_keys': []}, 'at least one document'),
-    ({'document_keys': ['k'] * 11}, 'at most 10'),
+    ({'document_filenames': []}, 'at least one document'),
+    ({'document_filenames': ['k'] * 11}, 'at most 10'),
     ({'model': 'unknown'}, 'model must be one of'),
     ({'ambiguity': 'sometimes'}, 'ambiguity must be one of'),
     ({'history': [{'role': 'system', 'content': 'x'}]}, 'history items'),
-    ({'document_keys': ['']}, 'nonempty strings'),
+    ({'document_filenames': ['']}, 'nonempty strings'),
 ])
 def test_invalid_requests_are_reported_and_audited(kwargs, message, isolated_audit):
-    request = {'question': 'Rate?', 'document_keys': ['k'], **kwargs}
+    request = {'question': 'Rate?', 'document_filenames': ['k'], **kwargs}
     response = ask_question(request.pop('question'), app='test', **request)
     assert response['status'] == 'invalid_request' and response['status_code'] == 400
     assert message in response['message'] and response['answer'] is None
@@ -68,12 +68,34 @@ def test_documents_load_by_filename_or_manifest_key(store, saved, key):
 
 @pytest.mark.parametrize('key', ['../rates.txt', 'sub/rates.txt'])
 def test_filename_keys_cannot_escape(store, saved, key):
-    response = ask_question('Rate?', document_keys=[key])
+    response = ask_question('Rate?', document_filenames=[key])
     assert response['status'] == 'documents_unavailable'
 
 
+def test_group_name_selects_the_group_folder(native_script, store):
+    doc = ingest_document('rates.txt', b'Plan Alpha member rate is USD 88 per month.', store=store.for_group('aol.com'))
+    assert doc.storage_ref['manifest_key'] == 'aol.com/documents/preprocessed/rates.txt/manifest.json'
+    answered(native_script, doc.id)
+    response = ask_question('What is the Alpha rate?', group_name='aol.com', document_filenames=['rates.txt'])
+    assert response['status'] == 'answered'
+    assert ask_question('Rate?', group_name='other.com', document_filenames=['rates.txt'])['status']         == 'documents_unavailable'
+
+
+@pytest.mark.parametrize('group', ['', 'a/b', '..'])
+def test_invalid_group_name(store, group):
+    response = ask_question('Rate?', group_name=group, document_filenames=['rates.txt'])
+    assert response['status'] == 'invalid_request' and 'group_name' in response['message']
+
+
+def test_s3_requires_a_group_name():
+    from development.tests.test_s3_documents import MemoryS3
+    from backend.storage.s3 import S3DocumentStore
+    response = ask_question('Rate?', document_filenames=['rates.txt'], store=S3DocumentStore(MemoryS3(), 'b'))
+    assert response['status'] == 'invalid_request' and 'group_name is required' in response['message']
+
+
 def test_missing_saved_document(store):
-    response = ask_question('Rate?', document_keys=['document-agent/documents/preprocessed/nope/manifest.json'])
+    response = ask_question('Rate?', document_filenames=['document-agent/documents/preprocessed/nope/manifest.json'])
     assert response['status'] == 'documents_unavailable' and response['status_code'] == 404
 
 
@@ -120,17 +142,17 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
     from apps.api import lambda_handler as module
     module.clients.cache_clear()
     answered(native_script, store.load(saved).id)
-    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_keys': [saved],
+    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_filenames': [saved],
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
-    assert lambda_handler({'document_keys': [saved]}, None)['status_code'] == 400
+    assert lambda_handler({'document_filenames': [saved]}, None)['status_code'] == 400
     assert module.clients.cache_info().misses == 1  # store and audit sink created once
     module.clients.cache_clear()
 
 
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
-    assert production == {'question', 'document_keys', 'history', 'session_id', 'clarification', 'model',
+    assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'clarification', 'model',
                           'ambiguity', 'app', 'store', 'sink'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 

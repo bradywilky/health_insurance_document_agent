@@ -135,7 +135,9 @@ def configured_audit_sink():
                             region_name=os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'us-east-1')
     client = session.client('s3', config=Config(connect_timeout=5, read_timeout=30,
                                                 retries={'mode': 'standard', 'total_max_attempts': 3}))
-    return S3AuditSink(client, bucket, os.getenv('AUDIT_S3_PREFIX', os.getenv('DOCUMENTS_S3_PREFIX', 'document-agent/')),
+    prefix = os.getenv('AUDIT_S3_PREFIX') or os.getenv('DOCUMENTS_S3_PREFIX_BASE') \
+        or 'content/health_insurance_document_agent/'
+    return S3AuditSink(client, bucket, prefix,
                        kms_key_id=os.getenv('AUDIT_S3_KMS_KEY_ID') or os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None)
 
 

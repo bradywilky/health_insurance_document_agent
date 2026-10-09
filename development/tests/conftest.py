@@ -50,10 +50,12 @@ def llm_capture():
 
 @pytest.fixture(autouse=True)
 def isolated_audit(monkeypatch, tmp_path):
-    """Audit records from tests go to a temporary directory; prompt and response capture stays off."""
+    """Audit records from tests go to a temporary directory; prompt and response capture stays off.
+    Document layout settings from a local .env are cleared so saved paths match the tests."""
     monkeypatch.setenv('AUDIT_STORAGE', 'local')
     monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
-    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED']:
+    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED',
+                 'DOCUMENTS_GROUP_NAME', 'DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_PREFIX_PPDOCS']:
         monkeypatch.delenv(name, raising=False)
     # setenv, not delenv, so the value is restored even after an app under test changes it.
     monkeypatch.setenv('TRACE_CONTENT', 'false')
