@@ -30,6 +30,29 @@ def test_graph_uses_query_and_structured_evidence(insurance_workbook, native_scr
     assert record['data']['table_result']['sources'][0]['source_rows'] == [2,3,4,5,6]
 
 
+def test_list_sheets_answers_structure_questions(insurance_workbook, native_script):
+    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    requests = native_script([
+        {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'list_sheets','parameters':{}}},
+        {'tool':'answer','parameters':{}}, 'The workbook has About, Claim Samples and other sheets.'])
+    result = agent.run_document_agent({doc.id:doc}, [doc.id], 'What sheets are in this file?')
+    assert result['status'] == 'answered' and result['protocol']['validation_errors'] == 0
+    assert result['coverage']['examined'] == [doc.name]
+    writer = json.loads(requests[-1]['messages'][0]['content'][0]['text'])
+    assert 'Claim Samples' in json.dumps(writer['evidence'])
+
+
+def test_search_all_sheets_counts_only_with_matches(insurance_workbook, native_script):
+    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    search = lambda term: {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'search_all_sheets',
+                                                             'parameters':{'term':term}}}
+    native_script([search('zzz-not-present'), {'tool':'answer','parameters':{}},
+                   search('DEMO-REMOTE'), {'tool':'answer','parameters':{}}, 'DEMO-REMOTE is listed.'])
+    result = agent.run_document_agent({doc.id:doc}, [doc.id], 'Is DEMO-REMOTE listed?')
+    assert result['status'] == 'answered' and result['protocol']['validation_errors'] == 1
+    assert 'Service Codes' in result['evidence'][1]['data']['table_result']
+
+
 def test_duplicate_request_reuses_evidence(monkeypatch,insurance_workbook,native_script):
     doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
     action = {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'read_sheet',

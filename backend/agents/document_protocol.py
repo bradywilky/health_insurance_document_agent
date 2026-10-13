@@ -51,8 +51,15 @@ def has_content(record):
     if record['tool']=='search_documents':
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
-        # Schemas count: they carry value counts and data-quality profiles computed over every row.
-        return record['parameters']['name'] in {'get_sheet_schema','read_sheet','query_table','join_tables'} and not data.get('table_result',{}).get('error')
+        result = data.get('table_result',{})
+        if result.get('error'):
+            return False
+        name = record['parameters']['name']
+        if name=='search_all_sheets':
+            # Hits are keyed by sheet name; a miss returns only a message and diagnostics.
+            return any(key not in {'message','_search_details'} for key in result)
+        # Sheet lists and schemas count: they describe this workbook's structure, computed from the file itself.
+        return name in {'list_sheets','get_sheet_schema','read_sheet','query_table','join_tables'}
     return False
 
 

@@ -56,7 +56,8 @@ benefit rules, authorization rules and claim-specific records. Never say a fact 
 selected source remains unread. For short relevant text files prefer read_document over narrow searches.
 For payment questions distinguish scheduled/allowed amount, member cost sharing and insurer payment.
 For utilization questions distinguish authorization balances from annual benefit balances.
-Retrieve actual passages or records before answering. An index is not evidence of document contents.
+Retrieve actual passages or records before answering. The list_documents index is not evidence of document contents;
+list_sheets is evidence of a workbook's sheets and columns, not of the values inside them.
 Use query_table for totals, not partial search snippets. Never repeat an identical request.
 Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
 and date arithmetic or comparisons with date_calculate, before calling answer.
@@ -229,8 +230,8 @@ def node_tools(state: DocumentState) -> dict:
                 if len(state['actions']) != 1:
                     raise ValueError('Call answer alone on the next turn after reviewing tool results.')
                 if not any(has_content(e) for e in evidence):
-                    raise ValueError('Retrieve supporting passages or records before finishing. The document '
-                                     'index is not evidence: use get_sheet_schema for column profiles, '
+                    raise ValueError('Retrieve supporting passages or records before finishing. list_documents '
+                                     'is not evidence: use list_sheets or get_sheet_schema for workbook structure, '
                                      'query_table for records, or read_document/search_documents for text.')
                 unexamined = _unexamined(state['docs'], evidence)
                 if unexamined and not coverage_prompted:
