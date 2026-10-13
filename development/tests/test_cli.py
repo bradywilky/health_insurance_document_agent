@@ -2,9 +2,9 @@ import json
 import sys
 import pytest
 from development.cli.run_local import main
-from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
-from backend.preprocessing.documents import document_from_table_inputs
-from backend.preprocessing.tables import preprocess_file
+from backend.storage.local import exported_document
+from backend.preprocessing.documents import ingest_document
+from backend.preprocessing.tables import main as export
 
 
 def script(doc, native_script):
@@ -18,7 +18,7 @@ def script(doc, native_script):
 def test_cli_uses_document_graph_with_csv_options(tmp_path, monkeypatch, native_script, capsys, stream):
     path = tmp_path / 'sales.csv'
     path.write_bytes('Region;Revenue\nOuest;100\nEst;200\nOuest;150\n'.encode('cp1252'))
-    doc = document_from_table_inputs(**prepare_local_file(path, encoding='cp1252', delimiter=';'))
+    doc = ingest_document(path.name, path.read_bytes(), table_options={'encoding': 'cp1252', 'delimiter': ';'})
     requests = script(doc, native_script)
     args = ['run_local',str(path),'Total?', '--encoding','cp1252','--delimiter',';', '--model','maverick']
     if stream:
@@ -30,23 +30,22 @@ def test_cli_uses_document_graph_with_csv_options(tmp_path, monkeypatch, native_
     assert len(requests) == 3
     if stream:
         assert '"node": "plan"' in output
-        assert 's3_client' not in output and '"evidence"' not in output
+        assert 'table_folder' not in output and '"evidence"' not in output
 
 
 def test_cli_exported_directory_inspect_and_answer(tmp_path, monkeypatch, native_script, capsys):
     path = tmp_path / 'sales.csv'
     path.write_text('Revenue\n450\n')
-    objects, _ = preprocess_file(path)
     folder = tmp_path / 'export'
-    folder.mkdir()
-    for name, body in objects.items():
-        (folder / name).write_bytes(body)
+    monkeypatch.setattr(sys, 'argv', ['export', str(path), '--output', str(folder)])
+    export()
+    assert sorted(p.name for p in folder.iterdir()) == ['Sheet1.csv', 'sheets.json']
     args = ['run_local',str(folder),'Total?', '--preprocessed']
     monkeypatch.setattr(sys,'argv',args + ['--inspect'])
+    capsys.readouterr()
     main()
     assert 'Sheet1' in capsys.readouterr().out
-    doc = document_from_table_inputs(**prepare_preprocessed_directory(folder))
-    script(doc, native_script)
+    script(exported_document(folder), native_script)
     monkeypatch.setattr(sys,'argv',args)
     main()
     assert '450' in capsys.readouterr().out
@@ -56,7 +55,7 @@ def test_table_evaluation_uses_document_graph(tmp_path, monkeypatch, native_scri
     from development.evaluation.tables import main as evaluate
     path = tmp_path / 'sales.csv'
     path.write_text('Revenue\n450\n')
-    doc = document_from_table_inputs(**prepare_local_file(path))
+    doc = ingest_document(path.name, path.read_bytes())
     requests = script(doc, native_script)
     questions = tmp_path / 'questions.json'
     questions.write_text(json.dumps([{'id':'total','question':'Total?',

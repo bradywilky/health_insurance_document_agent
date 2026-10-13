@@ -13,7 +13,7 @@ def _frame(doc, sheet, meta):
     from backend.storage.tables import load_table
     key = (doc.id, sheet)
     if key not in _FRAMES:
-        _FRAMES[key] = load_table(**doc.table_inputs, sheet_name=sheet, sheet_meta=meta)
+        _FRAMES[key] = load_table(doc.table_folder, meta)
         if len(_FRAMES) > _FRAME_CACHE_SIZE:
             _FRAMES.popitem(last=False)
     _FRAMES.move_to_end(key)
@@ -23,7 +23,7 @@ def _frame(doc, sheet, meta):
 def _units(doc):
     """Searchable units: text blocks, plus every row of each table data sheet read from its CSV."""
     data_sheets = {}
-    if doc.table_inputs and doc.table_metadata:
+    if doc.table_folder and doc.table_metadata:
         data_sheets = {name: meta for name, meta in doc.table_metadata.get('sheets', {}).items()
                        if meta.get('sheet_type') != 'metadata'}
     for block in doc.blocks:

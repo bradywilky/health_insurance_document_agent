@@ -4,8 +4,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
-from backend.preprocessing.tables import normalize_sheet, preprocess_file
+from backend.storage.local import read_exported_tables
+from backend.storage.tables import MemoryTableFolder
+from backend.preprocessing.tables import SHEETS_FILE, normalize_sheet, preprocess_file
 from backend.tools.tables import execute_table_tool
 
 
@@ -13,12 +14,13 @@ from backend.tools.tables import execute_table_tool
 
 @pytest.fixture
 def workbook(insurance_workbook):
-    return prepare_local_file(insurance_workbook), preprocess_file(insurance_workbook)[1]
+    files, meta = preprocess_file(insurance_workbook)
+    return MemoryTableFolder(files), meta
 
 
 def tool(workbook, name, **parameters):
-    inputs, meta = workbook
-    return execute_table_tool(name, parameters, **inputs, metadata=meta)
+    folder, meta = workbook
+    return execute_table_tool(name, parameters, folder, metadata=meta)
 
 
 def test_messy_headers_and_provenance(workbook):
@@ -61,11 +63,10 @@ def test_ground_truth_billed_total(workbook):
     assert sum(r['Billed Amount'] for r in rows if r['Billed Amount'] is not None) == 445
 
 
-def test_profiles_and_export_contract(workbook, insurance_workbook):
-    objects, meta = preprocess_file(insurance_workbook)
-    assert len(objects) == 9
-    assert '_metadata.json' in objects
-    assert json.loads(objects['_metadata.json']) == meta
+def test_profiles_and_one_csv_per_sheet(workbook, insurance_workbook):
+    files, meta = preprocess_file(insurance_workbook)
+    assert sorted(files) == sorted(s['csv_file'] for s in meta['sheets'].values())
+    assert len(files) == 8
     mass = next(c for c in meta['sheets']['Claim Samples']['columns'] if c['name'] == 'Billed Amount')
     assert mass['null_count'] == 1
     assert mass['distinct_count'] == 4
@@ -88,22 +89,24 @@ def test_blank_header_column_and_duplicate_names():
 def test_ragged_csv_keeps_identifiers(tmp_path):
     file = tmp_path / 'ragged.csv'
     file.write_text('Insurance export\n\nID,Value\n0012,10\n0013,0\n', encoding='utf-8')
-    objects, meta = preprocess_file(file)
+    files, meta = preprocess_file(file)
     assert meta['sheets']['Sheet1']['header_row'] == 3
-    assert b'0012' in objects['ragged.csv']
+    assert b'0012' in files['Sheet1.csv']
 
 
 def test_exported_directory_round_trip(tmp_path, insurance_workbook):
-    objects, meta = preprocess_file(insurance_workbook)
-    for name, body in objects.items():
+    files, meta = preprocess_file(insurance_workbook)
+    for name, body in files.items():
         (tmp_path / name).write_bytes(body)
-    inputs = prepare_preprocessed_directory(tmp_path)
-    rows = execute_table_tool('read_sheet', {'sheet_name':'Claim Samples'}, **inputs, metadata=meta)['rows']
+    (tmp_path / SHEETS_FILE).write_text(json.dumps(meta))
+    filename, read_meta, folder = read_exported_tables(tmp_path)
+    assert filename == insurance_workbook.name and read_meta == meta
+    rows = execute_table_tool('read_sheet', {'sheet_name':'Claim Samples'}, folder, metadata=meta)['rows']
     assert rows[0]['Claim ID'] == '0012'
 
 
 def test_exported_directory_rejects_traversal(tmp_path):
     meta = {'filename':'book.xlsx', 'sheets':{'Bad': {'csv_file':'../outside.csv'}}}
-    (tmp_path / '_metadata.json').write_text(json.dumps(meta))
+    (tmp_path / SHEETS_FILE).write_text(json.dumps(meta))
     with pytest.raises(ValueError, match='basename'):
-        prepare_preprocessed_directory(tmp_path)
+        read_exported_tables(tmp_path)

@@ -56,10 +56,11 @@ def test_text_round_trip_and_manifest_published_last(store):
     assert store.list_documents()[0]['document_id'] == doc.id
 
 
-def test_table_round_trip_uses_real_s3_contract(store, insurance_workbook):
+def test_table_round_trip_reads_csvs_from_the_saved_folder(store, insurance_workbook):
     doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes(), store=store)
     restored = store.load(doc.storage_ref['manifest_key'])
-    assert restored.table_inputs['s3_client'] is store.client
+    root = doc.storage_ref['manifest_key'].removesuffix('manifest.json')
+    assert (restored.table_folder.client, restored.table_folder.folder) == (store.client, root)
     result = execute_document_tool('table_tool', {'document_id':restored.id, 'name':'query_table',
         'parameters':{'sheet_name':'Claim Samples', 'filters':[{'column':'Claim ID','op':'eq','value':'0012'}]}},
         {restored.id:restored})
@@ -67,7 +68,8 @@ def test_table_round_trip_uses_real_s3_contract(store, insurance_workbook):
     assert result['table_result']['rows'][0]['Claim ID'] == '0012'
     assert restored.table_metadata == doc.table_metadata
     assert all(body.closed for body in store.client.reads)
-    assert any('/documents/preprocessed/insurance_mappings.xlsx/_metadata.json' in key for key, _ in store.client.uploads)
+    saved = {key.removeprefix(root) for key, _ in store.client.uploads if key.startswith(root)}
+    assert saved == {'manifest.json', 'extracted.json'} | {s['csv_file'] for s in doc.table_metadata['sheets'].values()}
 
 
 def test_failed_upload_never_publishes_manifest(store):
@@ -116,7 +118,7 @@ def test_tampered_table_metadata_cannot_escape_saved_directory(store, insurance_
     data = json.loads(store.client.objects[(store.bucket, key)])
     next(iter(data['table_metadata']['sheets'].values()))['csv_file'] = '../other.csv'
     store.client.objects[(store.bucket, key)] = json.dumps(data).encode()
-    with pytest.raises(ValueError, match='CSV filename'):
+    with pytest.raises(ValueError, match='basename'):
         store.load(doc.storage_ref['manifest_key'])
 
 
@@ -180,3 +182,13 @@ def test_replacement_removes_stale_outputs_and_preserves_other_files(store):
     assert store.load(other.storage_ref['manifest_key']).blocks == other.blocks
     assert set(key.split('/')[2] for bucket,key in store.client.objects) == {'raw','preprocessed'}
     assert new.storage_ref['manifest_key'] == 'test-scope/documents/preprocessed/rules.txt/manifest.json'
+
+
+def test_delete_removes_outputs_and_original_within_the_group(store):
+    scoped = store.for_group('example.org')
+    ingest_document('rules.txt', b'Contract terms', store=scoped)
+    ingest_document('rules.txt', b'Other group', store=store.for_group('other.org'))
+    scoped.delete('rules.txt')
+    assert scoped.list_documents() == []
+    assert not [k for (_, k) in store.client.objects if k.startswith(scoped.prefix)]
+    assert [d['filename'] for d in store.for_group('other.org').list_documents()] == ['rules.txt']

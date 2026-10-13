@@ -56,7 +56,7 @@ PREVIEW_CHARS = 1200
 def document_view(doc):
     """Summary plus the opening text, so the check knows which quantities and terms a document uses."""
     view = doc.summary()
-    if not doc.table_inputs:
+    if not doc.table_folder:
         text, used = [], 0
         for block in doc.blocks:
             if used >= PREVIEW_CHARS:

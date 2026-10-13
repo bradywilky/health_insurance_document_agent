@@ -3,14 +3,14 @@ import json
 from unittest.mock import Mock
 
 import backend.agents.document_agent as agent
-from backend.storage.local import prepare_local_file
-from backend.preprocessing.documents import document_from_table_inputs
+
+from backend.preprocessing.documents import ingest_document
 
 
 
 
 def test_initial_prompt_omits_profiles_and_source_row_arrays(insurance_workbook):
-    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes())
     payload = json.dumps(doc.summary())
     assert 'top_values' not in payload
     assert 'source_rows' not in payload
@@ -18,7 +18,7 @@ def test_initial_prompt_omits_profiles_and_source_row_arrays(insurance_workbook)
 
 
 def test_graph_uses_query_and_structured_evidence(insurance_workbook, native_script):
-    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes())
     native_script([
         {'tool':'table_tool','parameters':{'document_id':doc.id, 'name':'query_table',
          'parameters':{'sheet_name':'Claim Samples','aggregations':[{'op':'count_rows','as':'claim_count'}]}}},
@@ -31,7 +31,7 @@ def test_graph_uses_query_and_structured_evidence(insurance_workbook, native_scr
 
 
 def test_list_sheets_answers_structure_questions(insurance_workbook, native_script):
-    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes())
     requests = native_script([
         {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'list_sheets','parameters':{}}},
         {'tool':'answer','parameters':{}}, 'The workbook has About, Claim Samples and other sheets.'])
@@ -43,7 +43,7 @@ def test_list_sheets_answers_structure_questions(insurance_workbook, native_scri
 
 
 def test_search_all_sheets_counts_only_with_matches(insurance_workbook, native_script):
-    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes())
     search = lambda term: {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'search_all_sheets',
                                                              'parameters':{'term':term}}}
     native_script([search('zzz-not-present'), {'tool':'answer','parameters':{}},
@@ -54,7 +54,7 @@ def test_search_all_sheets_counts_only_with_matches(insurance_workbook, native_s
 
 
 def test_duplicate_request_reuses_evidence(monkeypatch,insurance_workbook,native_script):
-    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    doc = ingest_document(insurance_workbook.name, insurance_workbook.read_bytes())
     action = {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'read_sheet',
                                              'parameters':{'sheet_name':'About'}}}
     requests = native_script([action, action, {'tool':'answer','parameters':{}}, 'About [E1].'])

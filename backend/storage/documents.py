@@ -1,15 +1,22 @@
-"""Shared object-store layout for originals, extracted blocks, and table CSVs.
+"""Saved documents, separated by group: save, list, load and delete.
 
-Saved files live under <prefix><group>/<preprocessed>/<filename>/ (manifest.json, extracted.json, table CSVs),
-and originals under the sibling folder <prefix><group>/<parent of preprocessed>/raw/<filename>. In S3:
+Each group (one organization's users) has its own folder; everyone in a group sees all of its documents.
 
-    content/health_insurance_document_agent/<group_name>/documents/preprocessed/<filename>/manifest.json
+    <prefix><group>/documents/raw/<filename>                                  the original upload
+    <prefix><group>/documents/preprocessed/<filename>/manifest.json           written last; marks it complete
+    <prefix><group>/documents/preprocessed/<filename>/extracted.json          text blocks, warnings, sheet metadata
+    <prefix><group>/documents/preprocessed/<filename>/<sheet>.csv             one per sheet, for spreadsheets
+    <prefix><group>/documents/preprocessed/<filename>/semantic_profile.json   when a profile was generated
+
+The same code serves S3 and the local document library (backend/storage/filesystem.py).
 """
 import copy
 from io import BytesIO
 import json
 import mimetypes
 import re
+
+from backend.storage.tables import TableFolder
 
 PREPROCESSED = 'documents/preprocessed'
 
@@ -20,6 +27,12 @@ def _segments(value, what):
     if any(part in {'', '.', '..'} or '\\' in part for part in parts):
         raise ValueError(f'{what} cannot contain empty or dot path segments')
     return parts
+
+
+def _basename(name):
+    if not isinstance(name, str) or not name or '/' in name or '\\' in name or name in {'.', '..'}:
+        raise ValueError('Saved file name must be a basename')
+    return name
 
 
 def check_group_name(group):
@@ -44,8 +57,8 @@ class ObjectDocumentStore:
             raise ValueError("Preprocessed prefix must end in '/preprocessed', e.g. 'documents/preprocessed'")
         self.client, self.bucket = client, bucket
         self.base_prefix = '/'.join(base) + '/' if base else ''
-        # The table tools read <s3_prefix><plan_domain>/preprocessed/<filename>/, so keep the parent separately.
-        self.domain = '/'.join(folders[:-1])
+        # Originals go in the raw folder beside preprocessed.
+        self.library = '/'.join(folders[:-1])
         self.kms_key_id = kms_key_id
         self.read_only = read_only
         self.group = None if group is None else check_group_name(group)
@@ -60,7 +73,10 @@ class ObjectDocumentStore:
 
     @property
     def preprocessed(self):
-        return f'{self.prefix}{self.domain}/preprocessed/'
+        return f'{self.prefix}{self.library}/preprocessed/'
+
+    def _raw_key(self, filename):
+        return f'{self.prefix}{self.library}/raw/{filename}'
 
     def _write(self, key, body, content_type):
         extra = {'ContentType': content_type}
@@ -99,24 +115,12 @@ class ObjectDocumentStore:
             raise ValueError('Document filename must be a basename')
         root = f'{self.preprocessed}{doc.name}/'
         # A filename identifies one current document. Invalidate completion before replacing it.
-        self.client.delete_object(Bucket=self.bucket, Key=root + 'manifest.json')
-        pages = self.client.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=root)
-        stale = [obj['Key'] for page in pages for obj in page.get('Contents', [])]
-        for key in stale:
-            self.client.delete_object(Bucket=self.bucket, Key=key)
-        self._write(f'{self.prefix}{self.domain}/raw/' + doc.name, content,
-                    mimetypes.guess_type(doc.name)[0] or 'application/octet-stream')
-        if doc.table_inputs:
-            inputs = doc.table_inputs
-            source_base = f"{inputs['s3_prefix']}{inputs['plan_domain']}/preprocessed/{doc.name}/"
-            names = ['_metadata.json'] + [s['csv_file'] for s in doc.table_metadata['sheets'].values()]
-            for name in dict.fromkeys(names):
-                if '/' in name or '\\' in name or name in {'.', '..'}:
-                    raise ValueError('Preprocessed object name must be a basename')
-                with inputs['s3_client'].get_object(Bucket=inputs['s3_bucket'], Key=source_base+name)['Body'] as stream:
-                    data = stream.read()
-                self._write(root + name, data,
-                            'application/json' if name.endswith('.json') else 'text/csv')
+        self._remove_outputs(root)
+        self._write(self._raw_key(doc.name), content, mimetypes.guess_type(doc.name)[0] or 'application/octet-stream')
+        if doc.table_folder:
+            for sheet in doc.table_metadata['sheets'].values():
+                name = _basename(sheet['csv_file'])
+                self._write(root + name, doc.table_folder.read(name), 'text/csv')
         self._json(root + 'extracted.json', {'blocks':doc.blocks, 'warnings':doc.warnings,
                                             'table_metadata':doc.table_metadata})
         if doc.profile:
@@ -124,7 +128,7 @@ class ObjectDocumentStore:
         # Publish the manifest last. Failed uploads do not appear in the saved-file picker.
         key = root + 'manifest.json'
         manifest = {'schema_version':2, 'document_id':doc.id, 'filename':doc.name,
-                    'kind':doc.kind, 'has_tables':bool(doc.table_inputs), 'has_profile':bool(doc.profile)}
+                    'kind':doc.kind, 'has_tables':bool(doc.table_folder), 'has_profile':bool(doc.profile)}
         self._json(key, manifest)
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':key}
         return doc.storage_ref
@@ -159,15 +163,30 @@ class ObjectDocumentStore:
             if not doc.table_metadata:
                 raise ValueError('Saved table metadata is missing')
             for sheet in doc.table_metadata['sheets'].values():
-                csv_name = sheet['csv_file']
-                if '/' in csv_name or '\\' in csv_name or csv_name in {'.', '..'}:
-                    raise ValueError('Invalid saved CSV filename')
-            doc.table_inputs = dict(s3_client=self.client, s3_bucket=self.bucket,
-                                    s3_prefix=self.prefix, plan_domain=self.domain, filename=name)
+                _basename(sheet['csv_file'])
+            doc.table_folder = TableFolder(self.client, self.bucket, root)
         if manifest.get('has_profile'):
             doc.profile = self._read_json(root + 'semantic_profile.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
         return doc
+
+    def _remove_outputs(self, root):
+        """Manifest first, so a half-removed document never appears complete; then the rest of its folder."""
+        self.client.delete_object(Bucket=self.bucket, Key=root + 'manifest.json')
+        pages = self.client.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=root)
+        for key in [obj['Key'] for page in pages for obj in page.get('Contents', [])]:
+            self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def delete(self, filename):
+        """Remove a saved document (by filename or manifest key): its preprocessed folder, then its original.
+
+        It leaves list_documents as soon as its manifest is removed. Deleting a missing document does nothing.
+        """
+        if self.read_only:
+            raise PermissionError("This document store is read-only")
+        root = self._root(self.manifest_key(filename))
+        self._remove_outputs(root)
+        self.client.delete_object(Bucket=self.bucket, Key=self._raw_key(root.split('/')[-2]))
 
     def save_profile(self, manifest_key, profile):
         """Store a generated or reviewed profile for an already saved document."""

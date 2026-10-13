@@ -66,7 +66,7 @@ For each case record model, selected filenames, answer, tools, evidence location
 python -m pytest development/tests/test_robustness.py -q
 ```
 
-The tests use real parsers, the upload portal, local persistence and an in-memory implementation of the S3 object contract. Model replies are scripted to verify warning propagation and evidence plumbing. They do **not** establish that a live model will reason correctly, that AWS permissions are valid, or that the VDI browser upload transport works.
+The tests use real parsers, the upload portal, local persistence and an in-memory stand-in for the S3 client. Model replies are scripted to verify warning propagation and evidence plumbing. They do **not** establish that a live model will reason correctly, that AWS permissions are valid, or that the VDI browser upload transport works.
 
 For live Bedrock Q&A evaluation after configuring AWS access:
 

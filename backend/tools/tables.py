@@ -83,13 +83,10 @@ def _query_many(sheet_names, params, load, sheets):
 def execute_table_tool(
     tool_name: str,
     tool_input: dict,
-    s3_client,
-    s3_bucket: str,
-    s3_prefix: str,
-    plan_domain: str,
-    filename: str,
+    folder,
     metadata: dict,
 ) -> dict:
+    """Run one table operation on a document's sheets. folder reads each sheet's CSV (backend/storage/tables.py)."""
     sheet_name = tool_input.get("sheet_name")
     sheets = metadata.get("sheets", {})
 
@@ -98,7 +95,7 @@ def execute_table_tool(
         if not isinstance(sheet_names, list) or not all(isinstance(n, str) for n in sheet_names):
             return {"error": 'sheet_names must be a list of sheet names, or ["*"] for all data sheets.'}
         def load(name):
-            return load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename, name, sheet_meta=sheets[name])
+            return load_table(folder, sheets[name])
         result = _query_many(sheet_names, {k: v for k, v in tool_input.items() if k not in {'sheet_names', 'sheet_name'}},
                              load, sheets)
         return sanitize_result(result)
@@ -107,8 +104,7 @@ def execute_table_tool(
         return {"error": "Provide an exact sheet_name from list_sheets."}
 
     if tool_name == "query_table":
-        df = _load_for_query(lambda name: load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename,
-                                                     name, sheet_meta=sheets[name]), sheet_name, sheets[sheet_name])
+        df = _load_for_query(lambda name: load_table(folder, sheets[name]), sheet_name, sheets[sheet_name])
         result = query_table(df, {k:v for k,v in tool_input.items() if k != 'sheet_name'})
         indices = result.pop('contributing_row_indices') if result['aggregated'] else result['result_row_indices']
         result.pop('result_row_indices', None)
@@ -132,8 +128,7 @@ def execute_table_tool(
         if left_name not in sheets or right_name not in sheets:
             return {'error': 'left_sheet and right_sheet must be exact names from the index.'}
         def load(name):
-            return load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename,
-                            name, sheet_meta=sheets[name])
+            return load_table(folder, sheets[name])
         left_frame, right_frame = load(left_name), load(right_name)
         result = join_tables(left_frame, right_frame,
                              {k:v for k,v in tool_input.items() if k not in {'left_sheet','right_sheet'}})
@@ -184,8 +179,7 @@ def execute_table_tool(
         offset = max(0, int(tool_input.get("offset", 0)))
         limit = max(1, min(100, int(tool_input.get("limit", 50))))
         smeta = sheets[sheet_name]
-        df = load_table(s3_client, s3_bucket, s3_prefix, plan_domain, filename,
-                      sheet_name, sheet_meta=smeta)
+        df = load_table(folder, smeta)
         if smeta.get("sheet_type") == "metadata" and {"source_row", "source_column", "text"} <= set(df.columns):
             # Narrative sheets read as one line per sheet row, with embedded table headers applied.
             lines = [{"source_row": number, "text": text} for number, text in narrative_rows(df.rows)]
@@ -225,10 +219,7 @@ def execute_table_tool(
                 continue
 
             try:
-                df = load_table(
-                    s3_client, s3_bucket, s3_prefix,
-                    plan_domain, filename, name, sheet_meta=smeta
-                )
+                df = load_table(folder, smeta)
                 needle = term.casefold()
                 searched = [c for c in cols_to_search if c in df.columns]
                 matched = [i for i, row in enumerate(df.rows)

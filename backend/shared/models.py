@@ -9,7 +9,7 @@ class Document:
     kind: str
     blocks: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    table_inputs: dict | None = None
+    table_folder: object | None = None  # backend.storage.tables: TableFolder or MemoryTableFolder
     table_metadata: dict | None = None
 
     storage_ref: dict | None = None

@@ -22,14 +22,10 @@ def test_persistent_table_roundtrip(tmp_path):
     reader = LocalDocumentStore(tmp_path, read_only=True)
     loaded = reader.load(doc.storage_ref['manifest_key'])
     from backend.storage.tables import load_table
-    # Read the persisted CSV via the same object interface consumed by table tools.
-    inputs = loaded.table_inputs
     sheet = next(iter(loaded.table_metadata['sheets'].values()))
-    key = 'documents/preprocessed/claims.csv/' + sheet['csv_file']
-    with inputs['s3_client'].get_object(Bucket='local', Key=key)['Body'] as body:
-        assert b'0012' in body.read()
+    assert (tmp_path / 'documents/preprocessed/claims.csv' / sheet['csv_file']).read_bytes().count(b'0012') == 1
     assert loaded.table_metadata == doc.table_metadata
-    frame = load_table(**inputs, sheet_meta=sheet)
+    frame = load_table(loaded.table_folder, sheet)
     assert sum(frame.column("Amount")) == 320
     assert frame.rows[0]["Claim"] == "0012"
 
@@ -49,3 +45,19 @@ def test_failed_replacement_not_listed(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         ingest_document('policy.txt', b'New', store=store)
     assert LocalDocumentStore(tmp_path).list_documents() == []
+
+
+def test_delete_removes_the_document_and_its_original(tmp_path):
+    store = LocalDocumentStore(tmp_path)
+    ingest_document('claims.csv', b'Claim,Amount\n0012,220\n', store=store)
+    ingest_document('keep.txt', b'Other', store=store)
+    store.delete('claims.csv')
+    assert [d['filename'] for d in store.list_documents()] == ['keep.txt']
+    assert not [p for p in (tmp_path / 'documents/preprocessed/claims.csv').rglob('*') if p.is_file()]
+    assert not (tmp_path / 'documents/raw/claims.csv').exists()
+    assert (tmp_path / 'documents/raw/keep.txt').exists()
+    store.delete('claims.csv')  # already gone: nothing to do
+    with pytest.raises(PermissionError):
+        LocalDocumentStore(tmp_path, read_only=True).delete('keep.txt')
+    with pytest.raises(ValueError):
+        store.delete('../keep.txt')

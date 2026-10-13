@@ -1,6 +1,6 @@
 # Health Insurance Document Agent
 
-`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it. Existing S3 preprocessing paths remain supported.
+`health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
 
 ## Project layout
 
@@ -36,8 +36,8 @@ data/            Local documents and shared library (ignored by Git)
 
 `backend/preprocessing/documents.py` creates document records; `backend/retrieval/search.py` searches them.
 The shared `Document` record lives in `backend/shared/models.py`. Preprocessing and storage do not
-import the agent runtime. `backend/storage/tables.py` loads the same preprocessed CSV contract through
-either a real S3 client or the local adapter. This preserves the AWS object layout.
+import the agent runtime. `backend/storage/tables.py` reads a spreadsheet's per-sheet CSVs from its saved
+folder (S3 or the local library) or, before saving, from memory.
 
 Dependencies and local configuration stay at the root (`requirements*.txt`, `.env.example`,
 `.env`, and `.streamlit/`). `.venv/`, `__pycache__/`, and `.pytest_cache/` are managed
@@ -168,36 +168,26 @@ AWS references: [Maverick](https://docs.aws.amazon.com/bedrock/latest/userguide/
 - `backend/agents/document_agent.py`: the sole LangGraph workflow, with native tools, bounded retries, streaming, selected-source restrictions, and evidence.
 - `backend/agents/llm.py`: Bedrock Converse wrapper with normal SDK profile/role credentials, configurable region, timeouts, and retries.
 - `backend/config/settings.py`: Llama and Claude model IDs and environment-based inference settings.
-- `backend/storage/local.py`: in-memory `get_object` adapter and metadata generation; no AWS calls.
+- `backend/storage/local.py`: opens a spreadsheet export directory (see "Messy workbook development"); no AWS calls.
 - `development/cli/run_local.py`: CLI with optional model-call traces and token totals. Trace files contain input data and are ignored by Git.
 - `development/scripts/make_samples.py`: deterministic sample files.
 - `development/tests/`: offline regression tests. Agent tests use scripted LLM responses with the real graph and tools; they do not measure answer quality.
 
-For existing AWS preprocessing outputs, load a document and call the sole agent:
+To call the agent directly, load saved documents and pass them in:
 
 ```python
-from backend.preprocessing.documents import document_from_table_inputs
 from backend.agents.document_agent import run_document_agent
+from backend.storage.s3 import configured_store
 
-# s3_client is your existing configured S3 client.
-doc = document_from_table_inputs(
-    s3_client=s3_client,
-    s3_bucket="your-bucket",
-    s3_prefix="your-prefix/",
-    plan_domain="your-domain",
-    filename="your-workbook.xlsx",
-)
+doc = configured_store().for_group("aol.com").load("your-workbook.xlsx")
 result = run_document_agent({doc.id: doc}, [doc.id], "What is the total known billed amount?")
 print(result["answer"])
 ```
 
-`document_from_table_inputs()` reads the existing CSV/metadata contract through either a
-local adapter or S3. It adds searchable text and table metadata without running another agent.
-For saved multi-file libraries, use `store.load(manifest_key)` and pass the selected document
-records to the same agent. `run_document_agent_stream()` streams sanitized node progress and
-a final answer from this graph.
+`run_document_agent_stream()` streams sanitized node progress and a final answer from the same graph. Production
+callers use `ask_question` instead, which validates the request and writes the audit record and trace (see "Entry point").
 
-Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash. Existing preprocessing must provide `_metadata.json` plus each sheet's CSV at `{prefix}{domain}/preprocessed/{filename}/`; for CSV inputs the object basename is the original CSV filename. The new backend/preprocessing/tables.py exports that contract locally; it does not upload to S3 or validate another preprocessing pipeline.
+Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash.
 
 ## Limits of this development harness
 
@@ -224,7 +214,7 @@ Before each push, inspect `git status --short` and `git diff --cached`. Add any 
 
 The [insurance fixtures](development/fixtures/README.md) cover narrative sheets, cross-system claim attribute mappings, duplicates, draft mappings, missing values, and leading-zero IDs. Run `development/scripts/make_samples.py` to generate the workbook and CSV under ignored `data/`; tests create independent temporary copies.
 
-`backend/preprocessing/tables.py` exports each sheet to CSV plus metadata with types, counts, frequent values, source row positions, and parsing warnings. `backend/storage/local.py` uses it automatically, or `development/cli/run_local.py --preprocessed` loads a previously exported directory. `read_sheet` provides paginated access to narrative content and full table rows; search now includes metadata sheets. `development/evaluation/tables.py` runs known-answer questions through a selected model and saves results for human review under `development/runs/`.
+`backend/preprocessing/tables.py` converts each sheet to CSV and describes it with types, counts, frequent values, source row positions, and parsing warnings. `ingest_document` uses it for every spreadsheet. To inspect or hand-edit that output, export it with `python -m backend.preprocessing.tables <file> --output <dir>` (one CSV per sheet plus `sheets.json`), then load the directory with `development/cli/run_local.py <dir> "<question>" --preprocessed`. `read_sheet` provides paginated access to narrative content and full table rows; search now includes metadata sheets. `development/evaluation/tables.py` runs known-answer questions through a selected model and saves results for human review under `development/runs/`.
 
 
 ## Persistent preprocessing in S3
@@ -269,21 +259,39 @@ stored by their full filename, including extension:
     claims.xlsx/
       extracted.json
       manifest.json
-      _metadata.json
       <sheet>.csv
 ```
 
-`extracted.json` preserves text blocks, source locations, warnings, and table metadata. The manifest is written last. Re-uploading the same filename replaces its raw file and preprocessed outputs; use distinct filenames to retain separate documents. The previous manifest and outputs are removed before replacement so a failed upload cannot be opened as complete. A failed replacement requires re-uploading the source; this is not an atomic transaction or version-history system. Concurrent writes to the same filename are not supported. Bucket versioning may be enabled separately if recovery history is required.
+`extracted.json` preserves text blocks, source locations, warnings, and the sheet metadata (each sheet's columns, types, header and source rows, and the name of its CSV). The manifest is written last. Re-uploading the same filename replaces its raw file and preprocessed outputs; use distinct filenames to retain separate documents. The previous manifest and outputs are removed before replacement so a failed upload cannot be opened as complete. A failed replacement requires re-uploading the source; this is not an atomic transaction or version-history system. Concurrent writes to the same filename are not supported. Bucket versioning may be enabled separately if recovery history is required.
 
-Table inputs use `s3_prefix=<prefix base><group name>/`, `plan_domain=documents` (the parent of the preprocessed folder), and `filename=<filename>`, preserving the existing preprocessing reading contract. Saved documents reopen without re-extraction; table queries read CSVs directly from S3.
+Saved documents reopen without re-extraction; table queries read each sheet's CSV directly from the document's preprocessed folder.
 
-The configured identity needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the chosen object prefix, `s3:ListBucket` restricted to that prefix for the saved-file picker, and `s3:AbortMultipartUpload` for transfer cleanup. A KMS-encrypted bucket/key may also require `kms:GenerateDataKey` and `kms:Decrypt` plus an appropriate key policy. This code does not create buckets, modify policies, add public access, or offer a delete-file UI. Replacement does remove prior preprocessed objects for that filename.
+The configured identity needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the chosen object prefix, `s3:ListBucket` restricted to that prefix for the saved-file picker, and `s3:AbortMultipartUpload` for transfer cleanup. A KMS-encrypted bucket/key may also require `kms:GenerateDataKey` and `kms:Decrypt` plus an appropriate key policy. This code does not create buckets, modify policies, or add public access.
 
-Programmatic usage: pass `store=configured_store()` to `backend.preprocessing.documents.ingest_document(name, content_bytes, store=store)`. Reopen it with `store.load('<filename>')` (the full `storage_ref['manifest_key']` also works); `store.for_group('<group>')` scopes the store to another group. Existing calls without a store remain local.
+### Backend steps for a document portal
+
+Everyone in a group sees all of that group's documents. A portal scopes the store to the signed-in user's group and
+calls these steps; none of them import Streamlit or the agent:
+
+```python
+from backend.preprocessing.documents import ingest_document
+from backend.storage.s3 import configured_store
+
+store = configured_store().for_group(group_name)            # the user's group, e.g. 'aol.com'
+doc = ingest_document(filename, content_bytes, store=store)   # extract, then save (replaces the same filename)
+store.list_documents()                                        # manifests of the group's saved documents
+store.load(filename)                                          # reopen one without re-extraction
+store.delete(filename)                                        # remove its preprocessed folder and original
+```
+
+`ingest_document` also takes `enrich=make_enricher()` (backend/agents/enrichment.py) to add a semantic profile,
+and `store.save_profile(manifest_key, profile)` stores a reviewed one. `load` and `delete` accept a filename or the
+full `storage_ref['manifest_key']`. `delete` removes the manifest first, so the document leaves the list at once;
+deleting a document that is already gone does nothing. Without a store, `ingest_document` only extracts.
 
 For development, set `DOCUMENTS_STORAGE=local` and restart the app. You can leave the bucket and prefix configured; local mode ignores them. AWS integrations must retain local/offline alternatives for development and tests. Bedrock answers still require AWS; preprocessing and offline tests do not.
 
-The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` shares the manifest contract between S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout under `DOCUMENTS_LOCAL_DIR`, inside a `<group name>/` folder when `DOCUMENTS_GROUP_NAME` is set (the S3 prefix base is not used locally). Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
+The upload portal calls `ingest_document(..., store=store)`; a future portal can reuse this backend/preprocessing/storage boundary without importing Streamlit or the agent. `backend/storage/documents.py` implements the layout for both S3 and `backend/storage/filesystem.py`. Local files use the same `documents/raw/<filename>` and `documents/preprocessed/<filename>/` layout under `DOCUMENTS_LOCAL_DIR`, inside a `<group name>/` folder when `DOCUMENTS_GROUP_NAME` is set (the S3 prefix base is not used locally). Chat history remains session-only. Selected sources reload on each interaction; source-content changes clear prior chat. Avoid replacing a selected document while a question is running, since table files are read lazily and storage replacement is not transactional.
 
 ## LangGraph workflows
 

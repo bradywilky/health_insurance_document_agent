@@ -20,7 +20,7 @@ def pack(tmp_path_factory):
     return create_samples(tmp_path_factory.mktemp('robustness')/'pack')
 
 
-@pytest.fixture(params=['local', 's3-contract'])
+@pytest.fixture(params=['local', 's3'])
 def library(request, tmp_path):
     return (LocalDocumentStore(tmp_path) if request.param == 'local'
             else S3DocumentStore(MemoryS3(), 'test-bucket', 'robustness/'))

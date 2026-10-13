@@ -24,9 +24,8 @@ def main():
     os.environ['TABLES_MODEL'] = args.model
     if os.getenv('BEDROCK_MODEL_ID'):
         raise ValueError('Remove BEDROCK_MODEL_ID override before comparing models.')
-    from backend.storage.local import prepare_local_file
     from backend.agents.document_agent import run_document_agent
-    from backend.preprocessing.documents import document_from_table_inputs
+    from backend.preprocessing.documents import ingest_document
     from development.observability import capture
     capture.enable(content=bool(args.traces))
     questions = json.loads(args.questions.read_text(encoding='utf-8'))
@@ -35,7 +34,7 @@ def main():
         if unknown:
             raise ValueError(f'Unknown cases: {sorted(unknown)}')
         questions = [q for q in questions if q['id'] in args.case]
-    doc = document_from_table_inputs(**prepare_local_file(args.file))
+    doc = ingest_document(args.file.name, args.file.read_bytes())
     if args.enrich:
         from backend.agents.enrichment import make_enricher
         from development.evaluation.documents import save_profiles

@@ -1,4 +1,7 @@
-"""Deterministic local preprocessing into the existing per-sheet CSV contract."""
+"""Deterministic spreadsheet preprocessing: one normalized CSV per sheet, plus metadata describing each sheet.
+
+Run directly to export a file for inspection: <output>/<sheet>.csv and <output>/sheets.json.
+"""
 import argparse
 import csv
 import io
@@ -9,6 +12,8 @@ from pathlib import Path
 import pandas as pd
 
 from backend.preprocessing.profiling import column_quality
+
+SHEETS_FILE = "sheets.json"  # metadata file in an exported directory
 
 
 def _present(value):
@@ -124,31 +129,39 @@ def normalize_sheet(name, raw, override=None):
     return frame, meta
 
 
-def preprocess_file(path, *, encoding="utf-8-sig", delimiter=",", overrides=None):
-    path = Path(path).expanduser().resolve(strict=True)
-    if path.suffix.lower() == ".csv":
-        with path.open(encoding=encoding, newline="") as stream:
-            rows = list(csv.reader(stream, delimiter=delimiter))
+def preprocess_table(name, content, *, encoding="utf-8-sig", delimiter=",", overrides=None):
+    """Normalize a CSV or workbook into one CSV per sheet.
+
+    Returns (files, metadata): files maps each sheet's CSV filename to its bytes; metadata describes every sheet
+    (type, columns, header and source rows, warnings) and names its CSV in csv_file.
+    """
+    suffix = Path(name).suffix.lower()
+    if suffix == ".csv":
+        rows = list(csv.reader(io.StringIO(content.decode(encoding), newline=""), delimiter=delimiter))
         raw_sheets = {"Sheet1": pd.DataFrame(rows)}
-    elif path.suffix.lower() in {".xlsx", ".xls"}:
-        raw_sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=object, keep_default_na=False)
+    elif suffix in {".xlsx", ".xls"}:
+        raw_sheets = pd.read_excel(io.BytesIO(content), sheet_name=None, header=None, dtype=object,
+                                   keep_default_na=False)
     else:
         raise ValueError("Expected .csv, .xlsx, or .xls")
     overrides = overrides or {}
     unknown = set(overrides) - set(raw_sheets)
     if unknown:
         raise ValueError(f"Override names not in workbook: {sorted(unknown)}")
-    objects, sheets = {}, {}
-    for name, raw in raw_sheets.items():
-        frame, meta = normalize_sheet(name, raw, overrides.get(name))
-        csv_name = path.name if path.suffix.lower() == ".csv" else name.replace("/", "_") + ".csv"
-        if Path(csv_name).name != csv_name or "\\" in csv_name or csv_name in objects:
-            raise ValueError(f"Unsafe or colliding sheet filename: {name}")
-        objects[csv_name] = frame.to_csv(index=False).encode("utf-8")
-        sheets[name] = {**meta, "csv_file": csv_name}
-    metadata = {"schema_version": 2, "filename": path.name, "sheets": sheets}
-    objects["_metadata.json"] = json.dumps(metadata, indent=2, allow_nan=False).encode("utf-8")
-    return objects, metadata
+    files, sheets = {}, {}
+    for sheet, raw in raw_sheets.items():
+        frame, meta = normalize_sheet(sheet, raw, overrides.get(sheet))
+        csv_name = sheet.replace("/", "_") + ".csv"
+        if Path(csv_name).name != csv_name or "\\" in csv_name or csv_name.lower() in {k.lower() for k in files}:
+            raise ValueError(f"Unsafe or colliding sheet filename: {sheet}")
+        files[csv_name] = frame.to_csv(index=False).encode("utf-8")
+        sheets[sheet] = {**meta, "csv_file": csv_name}
+    return files, {"schema_version": 2, "filename": name, "sheets": sheets}
+
+
+def preprocess_file(path, **options):
+    path = Path(path).expanduser().resolve(strict=True)
+    return preprocess_table(path.name, path.read_bytes(), **options)
 
 
 def main():
@@ -158,11 +171,12 @@ def main():
     parser.add_argument("--overrides", type=Path)
     args = parser.parse_args()
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
-    objects, metadata = preprocess_file(args.file, overrides=overrides)
+    files, metadata = preprocess_file(args.file, overrides=overrides)
     # A new directory prevents stale sheets from surviving a subsequent export.
     args.output.mkdir(parents=True, exist_ok=False)
-    for name, body in objects.items():
+    for name, body in files.items():
         (args.output / name).write_bytes(body)
+    (args.output / SHEETS_FILE).write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
     print(json.dumps({name: {k: s[k] for k in ("sheet_type", "row_count", "header_row")}
                       for name, s in metadata["sheets"].items()}, indent=2))
 

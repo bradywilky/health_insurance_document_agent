@@ -30,23 +30,21 @@ def main():
         if value:
             os.environ[name] = value
     logging.basicConfig(level=logging.WARNING)
-    from backend.storage.local import prepare_local_file, prepare_preprocessed_directory
+    from backend.preprocessing.documents import ingest_document
+    from backend.storage.local import exported_document
     from backend.agents.document_agent import run_document_agent_stream
     from backend.entrypoint import ask_question_local
     from development.observability import capture
     capture.enable(content=bool(args.trace))
-    from backend.preprocessing.documents import document_from_table_inputs
     overrides = json.loads(args.overrides.read_text()) if args.overrides else None
     if args.preprocessed and overrides:
         parser.error("Apply overrides during preprocessing, not when loading its output.")
-    inputs = (prepare_preprocessed_directory(args.file) if args.preprocessed else
-              prepare_local_file(args.file, encoding=args.encoding, delimiter=args.delimiter, overrides=overrides))
+    doc = (exported_document(args.file) if args.preprocessed else
+           ingest_document(args.file.name, args.file.read_bytes(), table_options=dict(
+               encoding=args.encoding, delimiter=args.delimiter, overrides=overrides)))
     if args.inspect:
-        for key, value in inputs["s3_client"].objects.items():
-            if key.endswith("/_metadata.json"):
-                print(json.dumps(json.loads(value), indent=2))
+        print(json.dumps(doc.table_metadata, indent=2))
         return
-    doc = document_from_table_inputs(**inputs)
     documents = {doc.id: doc}
     with capture.recording() as events:
         try:

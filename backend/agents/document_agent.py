@@ -151,7 +151,7 @@ def _unexamined(docs, evidence):
     Files with nothing extracted (for example scanned PDFs) are excluded; their warnings are already limitations.
     """
     examined = examined_documents(evidence)
-    return [d for d, doc in docs.items() if d not in examined and (doc.blocks or doc.table_inputs)]
+    return [d for d, doc in docs.items() if d not in examined and (doc.blocks or doc.table_folder)]
 
 
 def _calculation(name, params, evidence, question):
@@ -302,7 +302,7 @@ def node_tools(state: DocumentState) -> dict:
         # Guarantee the writer sees short selected documents the planner never opened.
         for doc_id in _unexamined(state['docs'], evidence):
             doc = state['docs'][doc_id]
-            if doc.table_inputs is None and len(doc.blocks) <= AUTO_READ_BLOCKS:
+            if doc.table_folder is None and len(doc.blocks) <= AUTO_READ_BLOCKS:
                 params = {'document_id': doc_id, 'offset': 0, 'limit': AUTO_READ_BLOCKS}
                 evidence.append({'id': f'E{len(evidence)+1}', 'tool': 'read_document', 'parameters': params,
                                  'auto': True, 'data': execute_document_tool('read_document', params, state['docs'])})

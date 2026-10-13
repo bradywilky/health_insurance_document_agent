@@ -3,10 +3,8 @@ from backend.shared.models import Document
 from backend.shared.rows import narrative_rows, row_location, row_text
 from hashlib import sha256
 from io import BytesIO
-import json
 from pathlib import Path
 import re
-from tempfile import TemporaryDirectory
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 200
@@ -28,7 +26,11 @@ def _add_text(doc, text, location):
                            'location':location})
 
 
-def ingest_document(name: str, content: bytes, *, store=None, enrich=None) -> Document:
+def ingest_document(name: str, content: bytes, *, store=None, enrich=None, table_options=None) -> Document:
+    """Extract a document's searchable text (and, for spreadsheets, per-sheet tables), then optionally profile and save it.
+
+    table_options  spreadsheet preprocessing options: encoding, delimiter (CSV) and sheet overrides
+    """
     name = name.replace('\\','/').rsplit('/',1)[-1]
     extension = Path(name).suffix.lower()
     if extension not in SUPPORTED:
@@ -71,12 +73,11 @@ def ingest_document(name: str, content: bytes, *, store=None, enrich=None) -> Do
                               {'table':table_number, 'row':row_number, 'section':section})
         doc.warnings.append('Word citations use paragraphs/tables, not page numbers. Headers, footers, text boxes and tracked changes are not fully extracted.')
     elif extension in {'.xlsx', '.xls', '.csv'}:
-        from backend.storage.local import prepare_local_file
-        with TemporaryDirectory(prefix='document-upload-') as directory:
-            file = Path(directory) / name
-            file.write_bytes(content)
-            doc.table_inputs = prepare_local_file(file)
-        _populate_table_document(doc)
+        from backend.preprocessing.tables import preprocess_table
+        from backend.storage.tables import MemoryTableFolder
+        files, doc.table_metadata = preprocess_table(name, content, **(table_options or {}))
+        doc.table_folder = MemoryTableFolder(files)
+        index_tables(doc)
     else:
         text = content.decode('utf-8-sig')
         for number, paragraph in enumerate(re.split(r'\n\s*\n', text), 1):
@@ -94,14 +95,11 @@ def ingest_document(name: str, content: bytes, *, store=None, enrich=None) -> Do
     return doc
 
 
-def _populate_table_document(doc):
+def index_tables(doc):
+    """Add searchable text for each sheet of doc.table_folder, described by doc.table_metadata."""
     from backend.storage.tables import load_table
-    inputs = doc.table_inputs
-    key = f"{inputs['s3_prefix']}{inputs['plan_domain']}/preprocessed/{doc.name}/_metadata.json"
-    with inputs['s3_client'].get_object(Bucket=inputs['s3_bucket'], Key=key)['Body'] as stream:
-        doc.table_metadata = json.load(stream)
     for sheet, meta in doc.table_metadata['sheets'].items():
-        frame = load_table(**doc.table_inputs, sheet_name=sheet, sheet_meta=meta)
+        frame = load_table(doc.table_folder, meta)
         if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
             # Narrative sheets are indexed in full, one block per sheet row (not per cell).
             for number, text in narrative_rows(frame.rows):
@@ -117,18 +115,3 @@ def _populate_table_document(doc):
         for row in meta.get('context_rows', []):
             _add_text(doc, ' | '.join(row['values']), {'sheet':sheet, 'row':row['source_row']})
     doc.warnings.append('Spreadsheet ingestion uses heuristic headers; inspect ambiguous layouts. Formulas need cached values. Use table tools, not text snippets, for counts and totals.')
-
-
-def document_from_table_inputs(*, s3_client, s3_bucket, s3_prefix, plan_domain, filename):
-    """Load an existing local/S3 CSV-and-metadata export into the sole agent's document model.
-
-    This reads preprocessing outputs; it does not invoke a model or save a new original.
-    """
-    inputs = dict(s3_client=s3_client, s3_bucket=s3_bucket, s3_prefix=s3_prefix,
-                  plan_domain=plan_domain, filename=filename)
-    doc = Document('', filename, Path(filename).suffix.lower().lstrip('.'), table_inputs=inputs)
-    _populate_table_document(doc)
-    fingerprint = json.dumps({'filename':filename, 'metadata':doc.table_metadata,
-                              'blocks':doc.blocks}, sort_keys=True, default=str).encode()
-    doc.id = sha256(fingerprint).hexdigest()[:16]
-    return doc
