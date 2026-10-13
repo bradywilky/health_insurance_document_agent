@@ -2,7 +2,7 @@ import copy
 import json
 import pytest
 from backend.preprocessing.documents import ingest_document
-from backend.agents.model_session import ModelSession, validate_action
+from backend.agents.turn_session import TurnSession, validate_action
 from backend.agents.document_protocol import tool_specs
 from backend.agents.document_agent import run_document_agent
 from backend.agents.llm import LLM, Usage
@@ -72,7 +72,7 @@ def test_truncated_native_response_is_not_executed():
     class Fake:
         def converse(self,*a):
             return response([{'toolUseId':'a','name':'answer','input':{}}],stop='max_tokens')
-    session=ModelSession(Fake(),'system',{},tool_specs(['selected']))
+    session=TurnSession(Fake(),'system',{},tool_specs(['selected']))
     with pytest.raises(ValueError,match='max_tokens'): session.request()
     session.feedback([],error='Retry a complete request')
     assert session.messages[-1]['content'][0]['toolResult']['toolUseId']=='a'

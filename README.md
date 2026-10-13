@@ -10,7 +10,7 @@ package imports resolve consistently; the Streamlit entry point is `apps/chat/ap
 ```text
 backend/         Reusable application backend
   entrypoint.py  ask_question: the single entry point for answering a question
-  agents/        Sole LangGraph workflow, model session (tool calls), Bedrock and evidence
+  agents/        Sole LangGraph workflow, turn session (model tool calls), Bedrock and evidence
   tools/         Document and deterministic table tools
   retrieval/     Search over extracted document blocks
   preprocessing/ Extraction and workbook-to-CSV conversion
@@ -327,7 +327,7 @@ This is an in-memory workflow, without durable checkpoints or restart/resume sup
 
 `backend/tools/documents.py` dispatches selected-document tools; `backend/tools/tables.py` dispatches the six
 shared deterministic table tools; `backend/tools/table_operations.py` implements queries and joins.
-These modules never import the agent. The agent uses `backend/agents/model_session.py` (`ModelSession`: the tool-call conversation with the model) and its validation;
+These modules never import the agent. The agent uses `backend/agents/turn_session.py` (`TurnSession`: the model conversation for one question-to-answer turn) and its validation;
 document-specific schemas remain in `backend/agents/document_protocol.py`. Shared result conversion
 lives in `backend/shared/serialization.py`. Uploading, preprocessing, and storage remain ordinary
 Python services rather than agent workflows.

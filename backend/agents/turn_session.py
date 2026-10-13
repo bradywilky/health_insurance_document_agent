@@ -1,6 +1,7 @@
-"""One running conversation with the model over native Bedrock tool calls, and tool-call validation.
+"""The model conversation for one turn (a question through to its answer), over native Bedrock tool calls, and
+tool-call validation.
 
-The research graph (document_agent.py) decides what happens next; a ModelSession only carries the conversation:
+The research graph (document_agent.py) decides what happens next; a TurnSession only carries the conversation:
 it keeps the message history, asks the model for its next tool calls, and hands back each tool's result.
 Semantic profiles (enrichment.py) use one on its own.
 """
@@ -18,7 +19,7 @@ def validate_action(action, specs):
         raise ValueError(errors[0].message[:800])
 
 
-class ModelSession:
+class TurnSession:
     """request() returns the model's next tool calls; feedback() answers every one of them; note() adds guidance."""
 
     def __init__(self, llm, system, payload, specs):

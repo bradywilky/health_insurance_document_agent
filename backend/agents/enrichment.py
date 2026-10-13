@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import json
 import re
 
-from backend.agents.model_session import ModelSession, validate_action
+from backend.agents.turn_session import TurnSession, validate_action
 
 PROFILE_VERSION = 1
 CHUNK_CHARS = 16000
@@ -124,7 +124,7 @@ def _chunks(doc):
 
 def _request(llm, doc, text, part, parts):
     payload = {'filename': doc.name, 'type': doc.kind, 'part': f'{part} of {parts}', 'text': text}
-    session = ModelSession(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
+    session = TurnSession(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
     for attempt in range(2):
         try:
             actions = session.request()

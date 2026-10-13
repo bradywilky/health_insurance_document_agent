@@ -14,7 +14,7 @@ from typing_extensions import TypedDict
 from backend.agents.document_protocol import tool_specs, has_content, examined_documents
 from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
-from backend.agents.model_session import ModelSession, validate_action
+from backend.agents.turn_session import TurnSession, validate_action
 from backend.agents import ambiguity as amb
 from backend.observability import tracing
 
@@ -98,7 +98,7 @@ class DocumentState(TypedDict, total=False):
     on_step: Callable | None
     model: str
     docs: dict
-    model_session: ModelSession
+    turn_session: TurnSession
     specs: list
     actions: list
     request_error: str | None
@@ -134,8 +134,8 @@ def node_init(state: DocumentState) -> dict:
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Native Document Research',
               model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
-    model_session = ModelSession(llm, SYSTEM+'\nUse native tools; do not write tool requests as text.', payload, specs)
-    return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'model_session': model_session,
+    turn_session = TurnSession(llm, SYSTEM+'\nUse native tools; do not write tool requests as text.', payload, specs)
+    return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
             'steps': 0, 'evidence': [], 'seen': {},
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
@@ -198,7 +198,7 @@ def node_assess(state: DocumentState) -> dict:
                 'coverage': {'examined': [], 'auto_read': [], 'unexamined': []}}}
         interpretation = decision['interpretation']
     # The planner researches the chosen reading; the writer states it.
-    state['model_session'].messages[0]['content'].append({'text': 'Answer this reading of the question: '
+    state['turn_session'].messages[0]['content'].append({'text': 'Answer this reading of the question: '
                                                     + json.dumps(interpretation)})
     return {'stats': stats, 'interpretation': interpretation}
 
@@ -209,7 +209,7 @@ def route_after_assess(state: DocumentState) -> str:
 
 def node_plan(state: DocumentState) -> dict:
     try:
-        actions = state['model_session'].request()
+        actions = state['turn_session'].request()
         failure = None
     except (ValueError, KeyError, TypeError) as exc:
         actions, failure = [], str(exc)
@@ -288,7 +288,7 @@ def node_tools(state: DocumentState) -> dict:
         except (ValueError, KeyError, TypeError) as exc:
             failure = str(exc)
             results.append({'error': failure})
-    state['model_session'].feedback(results, error=failure)
+    state['turn_session'].feedback(results, error=failure)
     if failure:
         stats['validation_errors'] += 1
         if stats['repair_attempts'] >= MAX_REPAIRS:
@@ -365,7 +365,7 @@ def node_synthesize(state: DocumentState) -> dict:
     if amounts and not state['calculation_prompted'] and state['steps'] < MAX_STEPS:
         # The writer cannot run tools, so return to research once to compute the amounts it needed.
         stats['calculation_prompts'] += 1
-        state['model_session'].note('The answer writer needed amounts that no tool computed: ' + ', '.join(amounts)
+        state['turn_session'].note('The answer writer needed amounts that no tool computed: ' + ', '.join(amounts)
                               + '. Verify the applicable rates and inputs, compute each derived amount with '
                               'calculate, then call answer.')
         return {'stats': stats, 'calculation_prompted': True, 'finished': False}

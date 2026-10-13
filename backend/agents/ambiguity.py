@@ -6,7 +6,7 @@ The model lists readings through a native tool call; whether to ask is decided h
 """
 import json
 
-from backend.agents.model_session import validate_action
+from backend.agents.turn_session import validate_action
 
 MODES = ('off', 'assumptions', 'ask')
 MAX_READINGS = 4
