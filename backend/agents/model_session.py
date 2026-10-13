@@ -1,4 +1,9 @@
-"""Shared native Bedrock protocol transport and action validation."""
+"""One running conversation with the model over native Bedrock tool calls, and tool-call validation.
+
+The research graph (document_agent.py) decides what happens next; a ModelSession only carries the conversation:
+it keeps the message history, asks the model for its next tool calls, and hands back each tool's result.
+Semantic profiles (enrichment.py) use one on its own.
+"""
 import json
 from jsonschema import Draft202012Validator
 
@@ -13,7 +18,9 @@ def validate_action(action, specs):
         raise ValueError(errors[0].message[:800])
 
 
-class NativePlanner:
+class ModelSession:
+    """request() returns the model's next tool calls; feedback() answers every one of them; note() adds guidance."""
+
     def __init__(self, llm, system, payload, specs):
         self.llm, self.system = llm, system
         self.config = {'tools':specs}

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import json
 import re
 
-from backend.agents.native import NativePlanner, validate_action
+from backend.agents.model_session import ModelSession, validate_action
 
 PROFILE_VERSION = 1
 CHUNK_CHARS = 16000
@@ -124,10 +124,10 @@ def _chunks(doc):
 
 def _request(llm, doc, text, part, parts):
     payload = {'filename': doc.name, 'type': doc.kind, 'part': f'{part} of {parts}', 'text': text}
-    planner = NativePlanner(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
+    session = ModelSession(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
     for attempt in range(2):
         try:
-            actions = planner.request()
+            actions = session.request()
             if len(actions) != 1 or actions[0]['tool'] != 'record_profile':
                 raise ValueError('Call record_profile exactly once')
             validate_action(actions[0], [PROFILE_SPEC])
@@ -135,7 +135,7 @@ def _request(llm, doc, text, part, parts):
         except (ValueError, KeyError, TypeError) as exc:
             if attempt:
                 raise ValueError(f'No valid profile returned: {exc}') from None
-            planner.feedback([], error=f'Invalid record_profile call: {exc}. Call record_profile once with the schema.')
+            session.feedback([], error=f'Invalid record_profile call: {exc}. Call record_profile once with the schema.')
 
 
 def _merge(parts):

@@ -2,7 +2,7 @@ import copy
 import json
 import pytest
 from backend.preprocessing.documents import ingest_document
-from backend.agents.native import NativePlanner, validate_action
+from backend.agents.model_session import ModelSession, validate_action
 from backend.agents.document_protocol import tool_specs
 from backend.agents.document_agent import run_document_agent
 from backend.agents.llm import LLM, Usage
@@ -72,10 +72,10 @@ def test_truncated_native_response_is_not_executed():
     class Fake:
         def converse(self,*a):
             return response([{'toolUseId':'a','name':'answer','input':{}}],stop='max_tokens')
-    planner=NativePlanner(Fake(),'system',{},tool_specs(['selected']))
-    with pytest.raises(ValueError,match='max_tokens'): planner.request()
-    planner.feedback([],error='Retry a complete request')
-    assert planner.messages[-1]['content'][0]['toolResult']['toolUseId']=='a'
+    session=ModelSession(Fake(),'system',{},tool_specs(['selected']))
+    with pytest.raises(ValueError,match='max_tokens'): session.request()
+    session.feedback([],error='Retry a complete request')
+    assert session.messages[-1]['content'][0]['toolResult']['toolUseId']=='a'
 
 
 def test_llm_span_records_the_call_as_sent(monkeypatch):
