@@ -7,7 +7,7 @@ from apps.api.lambda_handler import lambda_handler
 from backend.agents import document_agent
 import inspect
 
-from backend.entrypoint import STATUS_CODES, ask_question, ask_question_local, classify
+from backend.entrypoint import STATUS_CODES, ask_question, ask_question_local
 from backend.preprocessing.documents import ingest_document
 from backend.storage.s3 import configured_store
 
@@ -121,7 +121,6 @@ def test_clarification_carries_the_original_question(monkeypatch):
 
 
 @pytest.mark.parametrize('code, status', [('ThrottlingException', 'model_unavailable'),
-                                          ('ExpiredTokenException', 'credentials_expired'),
                                           ('AccessDeniedException', 'error')])
 def test_aws_errors_are_classified(monkeypatch, code, status):
     doc = ingest_document('rates.txt', b'USD 88')
@@ -131,11 +130,6 @@ def test_aws_errors_are_classified(monkeypatch, code, status):
     response = ask_question_local('Rate?', documents=[doc])
     assert response['status'] == status and response['status_code'] == STATUS_CODES[status]
     assert response['error']['type'] == 'ClientError'
-
-
-def test_login_refresh_is_credentials_expired():
-    LoginRefreshRequired = type('LoginRefreshRequired', (Exception,), {})
-    assert classify(LoginRefreshRequired('renew')) == 'credentials_expired'
 
 
 def test_lambda_handler_maps_the_event(native_script, store, saved):

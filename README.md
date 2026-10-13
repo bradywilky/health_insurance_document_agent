@@ -630,7 +630,6 @@ response = ask_question(
 | `no_evidence` | 204 | nothing relevant was retrieved; `message` explains |
 | `invalid_request` | 400 | no question, more than 10 documents, unknown model or ambiguity mode, malformed history |
 | `documents_unavailable` | 404 | a document key could not be loaded |
-| `credentials_expired` | 503 | AWS credentials are missing or expired |
 | `model_unavailable` | 503 | Bedrock throttled, timed out or was unreachable after retries |
 | `error` | 500 | anything else; `error` has the type and message, and the log has the stack trace |
 

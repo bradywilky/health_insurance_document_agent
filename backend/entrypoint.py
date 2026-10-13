@@ -12,7 +12,6 @@ needs_clarification   `answer` is a clarifying question; resend the same questio
 no_evidence           nothing relevant was retrieved; `message` explains
 invalid_request       bad input (no question, too many documents, unknown model, ...); `message` explains
 documents_unavailable a saved document could not be loaded
-credentials_expired   AWS credentials are missing or expired
 model_unavailable     Bedrock throttled, timed out or was unreachable after retries
 error                 anything else; `error` holds the exception type and message
 
@@ -30,15 +29,12 @@ from backend.observability import audit, llmobs
 MAX_DOCUMENTS = 10
 MAX_QUESTION_CHARS = 4000
 STATUS_CODES = {'answered': 200, 'needs_clarification': 200, 'no_evidence': 204, 'invalid_request': 400,
-                'documents_unavailable': 404, 'credentials_expired': 503, 'model_unavailable': 503, 'error': 500}
+                'documents_unavailable': 404, 'model_unavailable': 503, 'error': 500}
 MESSAGES = {
     'no_evidence': 'I could not retrieve supporting content from the selected files. '
                    'Try a different question or inspect extraction warnings.',
-    'credentials_expired': 'AWS credentials are missing or expired. Renew them, then try again.',
     'model_unavailable': 'The model service is busy or unreachable. Try again shortly.',
 }
-_EXPIRED = {'LoginRefreshRequired', 'ExpiredToken', 'ExpiredTokenException', 'NoCredentialsError',
-            'UnauthorizedSSOTokenError', 'TokenRetrievalError', 'SSOTokenLoadError'}
 _UNAVAILABLE = {'ThrottlingException', 'ServiceUnavailableException', 'ModelNotReadyException',
                 'ModelTimeoutException', 'ReadTimeoutError', 'ConnectTimeoutError', 'EndpointConnectionError'}
 logger = logging.getLogger(__name__)
@@ -131,8 +127,6 @@ def _run(question, *, selected, load, history, session_id, clarification, model,
 def classify(exc):
     """Map an exception to a status. Botocore errors carry their AWS error code in exc.response."""
     names = {type(exc).__name__, str((getattr(exc, 'response', None) or {}).get('Error', {}).get('Code', ''))}
-    if names & _EXPIRED or 'token has expired' in str(exc).lower():
-        return 'credentials_expired'
     if names & _UNAVAILABLE:
         return 'model_unavailable'
     return 'error'
