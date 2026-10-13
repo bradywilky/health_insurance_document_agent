@@ -1368,7 +1368,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 28467, "sha256": "fc128bde580ed8727303998fee8ddd253d3cdf9cc5b94d4635c99bbd8356060d"}
+{"path": "backend/agents/document_agent.py", "characters": 28588, "sha256": "085ffae672e6b32cbb8b8e40df704f3a9137a15b8b1bba7f62d109f1411cc7a5"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1427,7 +1427,8 @@ benefit rules, authorization rules and claim-specific records. Never say a fact 
 selected source remains unread. For short relevant text files prefer read_document over narrow searches.
 For payment questions distinguish scheduled/allowed amount, member cost sharing and insurer payment.
 For utilization questions distinguish authorization balances from annual benefit balances.
-Retrieve actual passages or records before answering. An index is not evidence of document contents.
+Retrieve actual passages or records before answering. The list_documents index is not evidence of document contents;
+list_sheets is evidence of a workbook's sheets and columns, not of the values inside them.
 Use query_table for totals, not partial search snippets. Never repeat an identical request.
 Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
 and date arithmetic or comparisons with date_calculate, before calling answer.
@@ -1600,8 +1601,8 @@ def node_tools(state: DocumentState) -> dict:
                 if len(state['actions']) != 1:
                     raise ValueError('Call answer alone on the next turn after reviewing tool results.')
                 if not any(has_content(e) for e in evidence):
-                    raise ValueError('Retrieve supporting passages or records before finishing. The document '
-                                     'index is not evidence: use get_sheet_schema for column profiles, '
+                    raise ValueError('Retrieve supporting passages or records before finishing. list_documents '
+                                     'is not evidence: use list_sheets or get_sheet_schema for workbook structure, '
                                      'query_table for records, or read_document/search_documents for text.')
                 unexamined = _unexamined(state['docs'], evidence)
                 if unexamined and not coverage_prompted:
@@ -1831,7 +1832,7 @@ def run_document_agent_stream(documents, document_ids, question, *, history=None
                        ('steps', 'finished', 'stats', 'limitations') if k in update}}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_protocol.py", "characters": 4237, "sha256": "cb4aadd95df5b74b2738fc1e48702f897bbc405483761799ab2d4b74c020deb6"}
+{"path": "backend/agents/document_protocol.py", "characters": 4549, "sha256": "cdb46824ada7cb142fc5fc989fdc48b661b010c984d0cf65d939cd3f5f8bc4ea"}
 """Document tool schemas, evidence eligibility and source coverage."""
 
 SOURCE = {'type':'string', 'pattern':'^(E[0-9]+|question)$'}
@@ -1885,8 +1886,15 @@ def has_content(record):
     if record['tool']=='search_documents':
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
-        # Schemas count: they carry value counts and data-quality profiles computed over every row.
-        return record['parameters']['name'] in {'get_sheet_schema','read_sheet','query_table','join_tables'} and not data.get('table_result',{}).get('error')
+        result = data.get('table_result',{})
+        if result.get('error'):
+            return False
+        name = record['parameters']['name']
+        if name=='search_all_sheets':
+            # Hits are keyed by sheet name; a miss returns only a message and diagnostics.
+            return any(key not in {'message','_search_details'} for key in result)
+        # Sheet lists and schemas count: they describe this workbook's structure, computed from the file itself.
+        return name in {'list_sheets','get_sheet_schema','read_sheet','query_table','join_tables'}
     return False
 
 
@@ -7918,7 +7926,7 @@ def test_local_entry_point_validates_the_same_way():
     assert response['status'] == 'invalid_request' and 'at least one document' in response['message']
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_evidence.py", "characters": 2106, "sha256": "fc684aa799a2730562f16d272fea845b8d832efcf0d1b7a39644b357b9c99d0a"}
+{"path": "development/tests/test_evidence.py", "characters": 3697, "sha256": "080cbede12b9f860179e6dfd465673bf1a9e43590373675b3da5be035884cf1d"}
 from pathlib import Path
 import json
 from unittest.mock import Mock
@@ -7949,6 +7957,29 @@ def test_graph_uses_query_and_structured_evidence(insurance_workbook, native_scr
     assert record['id'] == 'E1'
     assert record['data']['table_result']['rows'] == [{'claim_count':5}]
     assert record['data']['table_result']['sources'][0]['source_rows'] == [2,3,4,5,6]
+
+
+def test_list_sheets_answers_structure_questions(insurance_workbook, native_script):
+    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    requests = native_script([
+        {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'list_sheets','parameters':{}}},
+        {'tool':'answer','parameters':{}}, 'The workbook has About, Claim Samples and other sheets.'])
+    result = agent.run_document_agent({doc.id:doc}, [doc.id], 'What sheets are in this file?')
+    assert result['status'] == 'answered' and result['protocol']['validation_errors'] == 0
+    assert result['coverage']['examined'] == [doc.name]
+    writer = json.loads(requests[-1]['messages'][0]['content'][0]['text'])
+    assert 'Claim Samples' in json.dumps(writer['evidence'])
+
+
+def test_search_all_sheets_counts_only_with_matches(insurance_workbook, native_script):
+    doc = document_from_table_inputs(**prepare_local_file(insurance_workbook))
+    search = lambda term: {'tool':'table_tool','parameters':{'document_id':doc.id,'name':'search_all_sheets',
+                                                             'parameters':{'term':term}}}
+    native_script([search('zzz-not-present'), {'tool':'answer','parameters':{}},
+                   search('DEMO-REMOTE'), {'tool':'answer','parameters':{}}, 'DEMO-REMOTE is listed.'])
+    result = agent.run_document_agent({doc.id:doc}, [doc.id], 'Is DEMO-REMOTE listed?')
+    assert result['status'] == 'answered' and result['protocol']['validation_errors'] == 1
+    assert 'Service Codes' in result['evidence'][1]['data']['table_result']
 
 
 def test_duplicate_request_reuses_evidence(monkeypatch,insurance_workbook,native_script):
