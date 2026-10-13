@@ -114,7 +114,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 48916, "sha256": "9987157a7d05aacc97a05d9b54b18fad5803ab11af2dd2e9bf7ead896291ec53"}
+{"path": "README.md", "characters": 48932, "sha256": "fd91b1ad1272e89d34bd875afe1837d5aa99cbfc05ce0c2d8fa2e0ad340533c2"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -127,7 +127,7 @@ package imports resolve consistently; the Streamlit entry point is `apps/chat/ap
 ```text
 backend/         Reusable application backend
   entrypoint.py  ask_question: the single entry point for answering a question
-  agents/        Sole LangGraph workflow, model session (tool calls), Bedrock and evidence
+  agents/        Sole LangGraph workflow, turn session (model tool calls), Bedrock and evidence
   tools/         Document and deterministic table tools
   retrieval/     Search over extracted document blocks
   preprocessing/ Extraction and workbook-to-CSV conversion
@@ -444,7 +444,7 @@ This is an in-memory workflow, without durable checkpoints or restart/resume sup
 
 `backend/tools/documents.py` dispatches selected-document tools; `backend/tools/tables.py` dispatches the six
 shared deterministic table tools; `backend/tools/table_operations.py` implements queries and joins.
-These modules never import the agent. The agent uses `backend/agents/model_session.py` (`ModelSession`: the tool-call conversation with the model) and its validation;
+These modules never import the agent. The agent uses `backend/agents/turn_session.py` (`TurnSession`: the model conversation for one question-to-answer turn) and its validation;
 document-specific schemas remain in `backend/agents/document_protocol.py`. Shared result conversion
 lives in `backend/shared/serialization.py`. Uploading, preprocessing, and storage remain ordinary
 Python services rather than agent workflows.
@@ -1191,7 +1191,7 @@ if key:
 """Agents components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/ambiguity.py", "characters": 5815, "sha256": "93152f85bd456adf2a26c8582bf422e5522622f59e01ceb8e6e5e7a4d2ab8f12"}
+{"path": "backend/agents/ambiguity.py", "characters": 5814, "sha256": "5b24139a5fa4df9ba6538a9bd3432e5529df8ca8bdc58659f4b495c9ff072b18"}
 """Optional question-ambiguity assessment before research.
 
 Modes: "off" (answer directly), "assumptions" (answer the most likely reading and say so),
@@ -1200,7 +1200,7 @@ The model lists readings through a native tool call; whether to ask is decided h
 """
 import json
 
-from backend.agents.model_session import validate_action
+from backend.agents.turn_session import validate_action
 
 MODES = ('off', 'assumptions', 'ask')
 MAX_READINGS = 4
@@ -1347,7 +1347,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 28723, "sha256": "b48b988444148bfa7e01e7399e782736cc62a84aa856fc410382c183539a974e"}
+{"path": "backend/agents/document_agent.py", "characters": 28711, "sha256": "79ea21b1dfc0804eaf29eac0b78dc7f1bb06e7e8e48180a81baee147f03aca72"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1364,7 +1364,7 @@ from typing_extensions import TypedDict
 from backend.agents.document_protocol import tool_specs, has_content, examined_documents
 from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
-from backend.agents.model_session import ModelSession, validate_action
+from backend.agents.turn_session import TurnSession, validate_action
 from backend.agents import ambiguity as amb
 from backend.observability import tracing
 
@@ -1448,7 +1448,7 @@ class DocumentState(TypedDict, total=False):
     on_step: Callable | None
     model: str
     docs: dict
-    model_session: ModelSession
+    turn_session: TurnSession
     specs: list
     actions: list
     request_error: str | None
@@ -1484,8 +1484,8 @@ def node_init(state: DocumentState) -> dict:
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Native Document Research',
               model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
-    model_session = ModelSession(llm, SYSTEM+'\nUse native tools; do not write tool requests as text.', payload, specs)
-    return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'model_session': model_session,
+    turn_session = TurnSession(llm, SYSTEM+'\nUse native tools; do not write tool requests as text.', payload, specs)
+    return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
             'steps': 0, 'evidence': [], 'seen': {},
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
@@ -1548,7 +1548,7 @@ def node_assess(state: DocumentState) -> dict:
                 'coverage': {'examined': [], 'auto_read': [], 'unexamined': []}}}
         interpretation = decision['interpretation']
     # The planner researches the chosen reading; the writer states it.
-    state['model_session'].messages[0]['content'].append({'text': 'Answer this reading of the question: '
+    state['turn_session'].messages[0]['content'].append({'text': 'Answer this reading of the question: '
                                                     + json.dumps(interpretation)})
     return {'stats': stats, 'interpretation': interpretation}
 
@@ -1559,7 +1559,7 @@ def route_after_assess(state: DocumentState) -> str:
 
 def node_plan(state: DocumentState) -> dict:
     try:
-        actions = state['model_session'].request()
+        actions = state['turn_session'].request()
         failure = None
     except (ValueError, KeyError, TypeError) as exc:
         actions, failure = [], str(exc)
@@ -1638,7 +1638,7 @@ def node_tools(state: DocumentState) -> dict:
         except (ValueError, KeyError, TypeError) as exc:
             failure = str(exc)
             results.append({'error': failure})
-    state['model_session'].feedback(results, error=failure)
+    state['turn_session'].feedback(results, error=failure)
     if failure:
         stats['validation_errors'] += 1
         if stats['repair_attempts'] >= MAX_REPAIRS:
@@ -1715,7 +1715,7 @@ def node_synthesize(state: DocumentState) -> dict:
     if amounts and not state['calculation_prompted'] and state['steps'] < MAX_STEPS:
         # The writer cannot run tools, so return to research once to compute the amounts it needed.
         stats['calculation_prompts'] += 1
-        state['model_session'].note('The answer writer needed amounts that no tool computed: ' + ', '.join(amounts)
+        state['turn_session'].note('The answer writer needed amounts that no tool computed: ' + ', '.join(amounts)
                               + '. Verify the applicable rates and inputs, compute each derived amount with '
                               'calculate, then call answer.')
         return {'stats': stats, 'calculation_prompted': True, 'finished': False}
@@ -1891,7 +1891,7 @@ def examined_documents(evidence):
     return examined
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/enrichment.py", "characters": 13394, "sha256": "c5b7de3af44da9876d7cebaba0dc62bcd2f05db5d8d3f1b26777b33aa1aa131f"}
+{"path": "backend/agents/enrichment.py", "characters": 13391, "sha256": "7aa71f2c67bb9c5f494bb71365936e58493556bb94bcd095f6e4a13d9cc8d76e"}
 """Optional semantic profile generated once per document at upload: a document card, references to other
 documents, a glossary, column roles and status meanings.
 
@@ -1903,7 +1903,7 @@ from datetime import datetime, timezone
 import json
 import re
 
-from backend.agents.model_session import ModelSession, validate_action
+from backend.agents.turn_session import TurnSession, validate_action
 
 PROFILE_VERSION = 1
 CHUNK_CHARS = 16000
@@ -2018,7 +2018,7 @@ def _chunks(doc):
 
 def _request(llm, doc, text, part, parts):
     payload = {'filename': doc.name, 'type': doc.kind, 'part': f'{part} of {parts}', 'text': text}
-    session = ModelSession(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
+    session = TurnSession(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
     for attempt in range(2):
         try:
             actions = session.request()
@@ -2285,10 +2285,11 @@ class LLM:
         return text
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/model_session.py", "characters": 3527, "sha256": "2b50597a3372ff8da929687e964cb0fad169ee81307818ce9b85985d14bdfde0"}
-"""One running conversation with the model over native Bedrock tool calls, and tool-call validation.
+{"path": "backend/agents/turn_session.py", "characters": 3557, "sha256": "2d15d0de48535d7d126a32fe101bc48c57786994f59e7106027126206fb6e814"}
+"""The model conversation for one turn (a question through to its answer), over native Bedrock tool calls, and
+tool-call validation.
 
-The research graph (document_agent.py) decides what happens next; a ModelSession only carries the conversation:
+The research graph (document_agent.py) decides what happens next; a TurnSession only carries the conversation:
 it keeps the message history, asks the model for its next tool calls, and hands back each tool's result.
 Semantic profiles (enrichment.py) use one on its own.
 """
@@ -2306,7 +2307,7 @@ def validate_action(action, specs):
         raise ValueError(errors[0].message[:800])
 
 
-class ModelSession:
+class TurnSession:
     """request() returns the model's next tool calls; feedback() answers every one of them; note() adds guidance."""
 
     def __init__(self, llm, system, payload, specs):
@@ -7404,12 +7405,12 @@ def test_shared_tools_do_not_import_agents():
                 assert not any(alias.name.startswith('backend.agents') for alias in node.names)
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_document_protocol.py", "characters": 6250, "sha256": "925f74d68c067a617003df1066d12b703e3932d65cb6010cccb202ea69b6d25d"}
+{"path": "development/tests/test_document_protocol.py", "characters": 6247, "sha256": "944006f5d1ded071700d2fba00d7f284176b6a98f7f04ee9c2881c2f558e1f03"}
 import copy
 import json
 import pytest
 from backend.preprocessing.documents import ingest_document
-from backend.agents.model_session import ModelSession, validate_action
+from backend.agents.turn_session import TurnSession, validate_action
 from backend.agents.document_protocol import tool_specs
 from backend.agents.document_agent import run_document_agent
 from backend.agents.llm import LLM, Usage
@@ -7479,7 +7480,7 @@ def test_truncated_native_response_is_not_executed():
     class Fake:
         def converse(self,*a):
             return response([{'toolUseId':'a','name':'answer','input':{}}],stop='max_tokens')
-    session=ModelSession(Fake(),'system',{},tool_specs(['selected']))
+    session=TurnSession(Fake(),'system',{},tool_specs(['selected']))
     with pytest.raises(ValueError,match='max_tokens'): session.request()
     session.feedback([],error='Retry a complete request')
     assert session.messages[-1]['content'][0]['toolResult']['toolUseId']=='a'
