@@ -10,6 +10,7 @@ Each group (one organization's users) has its own folder; everyone in a group se
 
 The same code serves S3 and the local document library (backend/storage/filesystem.py).
 """
+from contextlib import contextmanager
 import copy
 from io import BytesIO
 import json
@@ -33,6 +34,28 @@ def _basename(name):
     if not isinstance(name, str) or not name or '/' in name or '\\' in name or name in {'.', '..'}:
         raise ValueError('Saved file name must be a basename')
     return name
+
+
+@contextmanager
+def _trace(name, **metadata):
+    """A document change is its own archived trace (backend/observability/tracing.py)."""
+    from backend.observability import tracing
+    from backend.observability.archive import configured_archive
+    with tracing.span('workflow', name, archive=configured_archive()) as current:
+        tracing.annotate(current, metadata=metadata)
+        yield current
+
+
+def _profile_change(before, after):
+    """Glossary terms added, removed, changed and confirmed by a profile save; terms only, no meanings."""
+    old = {g['term']: (g.get('meaning'), g.get('source')) for g in before.get('glossary', [])}
+    new = {g['term']: (g.get('meaning'), g.get('source')) for g in after.get('glossary', [])}
+    meta = after.get('meta', {})
+    return {'reviewed': bool(meta.get('reviewed')), 'profile_model_id': meta.get('model_id'),
+            'glossary_terms': len(new), 'terms_added': sorted(set(new) - set(old)),
+            'terms_removed': sorted(set(old) - set(new)),
+            'terms_changed': sorted(t for t in set(new) & set(old) if new[t] != old[t]),
+            'terms_confirmed': sum(1 for v in new.values() if v[1] == 'confirmed')}
 
 
 def check_group_name(group):
@@ -184,20 +207,25 @@ class ObjectDocumentStore:
         """
         if self.read_only:
             raise PermissionError("This document store is read-only")
-        root = self._root(self.manifest_key(filename))
-        self._remove_outputs(root)
-        self.client.delete_object(Bucket=self.bucket, Key=self._raw_key(root.split('/')[-2]))
+        with _trace('delete_document', filename=filename, group_name=self.group):
+            root = self._root(self.manifest_key(filename))
+            self._remove_outputs(root)
+            self.client.delete_object(Bucket=self.bucket, Key=self._raw_key(root.split('/')[-2]))
 
     def save_profile(self, manifest_key, profile):
-        """Store a generated or reviewed profile for an already saved document."""
+        """Store a generated or reviewed profile for an already saved document, replacing any earlier one."""
         if self.read_only:
             raise PermissionError("This document store is read-only")
-        root = self._root(manifest_key)
-        manifest = self._read_json(manifest_key)
-        if not isinstance(profile, dict) or not profile:
-            raise ValueError('Profile must be a nonempty object')
-        self._json(root + 'semantic_profile.json', profile)
-        self._json(manifest_key, {**manifest, 'has_profile': True})
+        with _trace('save_profile', manifest_key=manifest_key, group_name=self.group) as current:
+            root = self._root(manifest_key)
+            manifest = self._read_json(manifest_key)
+            if not isinstance(profile, dict) or not profile:
+                raise ValueError('Profile must be a nonempty object')
+            previous = self._read_json(root + 'semantic_profile.json') if manifest.get('has_profile') else {}
+            self._json(root + 'semantic_profile.json', profile)
+            self._json(manifest_key, {**manifest, 'has_profile': True})
+            from backend.observability import tracing
+            tracing.annotate(current, metadata=_profile_change(previous, profile))
 
     def list_documents(self, limit=100):
         if type(limit) is not int or limit < 1:

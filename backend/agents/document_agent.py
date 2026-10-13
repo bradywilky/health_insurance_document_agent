@@ -16,7 +16,7 @@ from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.native import NativePlanner, validate_action
 from backend.agents import ambiguity as amb
-from backend.observability import llmobs
+from backend.observability import tracing
 
 MAX_STEPS = 16
 MAX_REPAIRS = 2
@@ -257,30 +257,31 @@ def node_tools(state: DocumentState) -> dict:
                 raise ValueError('Tool execution budget reached. Finish with available evidence.')
             if state.get('on_step'):
                 state['on_step'](f"Step {state['steps']}: {name}")
-            with llmobs.span('tool', name) as tool_span:
-                llmobs.annotate(tool_span, metadata={
+            with tracing.span('tool', name) as tool_span:
+                tracing.annotate(tool_span, metadata={
                     'operation': params.get('name') if name == 'table_tool' else None,
                     'document_id': params.get('document_id'), 'document_ids': params.get('document_ids'),
                     'evidence_id': f'E{len(evidence)+1}'})
-                llmobs.annotate_content(tool_span, input_data=params)
+                tracing.annotate_content(tool_span, input_data=params)
                 if name in {'calculate', 'date_calculate'}:
                     try:
                         data = _calculation(name, params, evidence, state['question'])
                     except ValueError as exc:
                         # Bad inputs are a tool result for the planner to fix, not a protocol failure.
-                        llmobs.mark_error(tool_span, exc)
+                        tracing.mark_error(tool_span, exc)
                         results.append({'error': str(exc)})
                         continue
                 else:
                     data = execute_document_tool(name, params, state['docs'])
                 failed = data.get('error') or (data.get('table_result') or {}).get('error')
                 if failed:
-                    llmobs.mark_error(tool_span, failed)
-                llmobs.annotate(tool_span, metadata={
+                    tracing.mark_error(tool_span, failed)
+                tracing.annotate(tool_span, metadata={
                     'matches': len(data.get('matches', [])) if 'matches' in data else None,
                     'blocks': len(data.get('blocks', [])) if 'blocks' in data else None,
                     'matched_rows': (data.get('table_result') or {}).get('matched_rows')})
-            record = {'id': f'E{len(evidence)+1}', 'tool': name, 'parameters': params, 'data': data}
+                tracing.annotate_content(tool_span, output_data=data)
+            record ={'id': f'E{len(evidence)+1}', 'tool': name, 'parameters': params, 'data': data}
             seen[key] = record['id']
             evidence.append(record)
             results.append(bounded(record, max_chars=14000))
@@ -335,7 +336,7 @@ and the alternatives. If it lists none, do not mention readings or interpretatio
 
 
 def _prompt_version():
-    """Hash of every instruction and tool definition the models see; recorded in each audit record."""
+    """Hash of every instruction and tool definition the models see; recorded in each question trace."""
     from hashlib import sha256
     parts = [SYSTEM, WRITER, INTERPRETATION_RULE, amb.ASSESS_SYSTEM,
              json.dumps(amb.ASSESS_SPEC, sort_keys=True), json.dumps(tool_specs(['<document>']), sort_keys=True)]
@@ -412,12 +413,12 @@ def route_after_synthesize(state: DocumentState) -> str:
 def build_document_graph():
     """Compile the research workflow; each invocation has its own runtime state."""
     graph = StateGraph(DocumentState)
-    graph.add_node('init', llmobs.traced_node('init')(node_init))
-    graph.add_node('plan', llmobs.traced_node('plan')(node_plan))
-    graph.add_node('tools', llmobs.traced_node('tools')(node_tools))
-    graph.add_node('synthesize', llmobs.traced_node('synthesize')(node_synthesize))
+    graph.add_node('init', tracing.traced_node('init')(node_init))
+    graph.add_node('plan', tracing.traced_node('plan')(node_plan))
+    graph.add_node('tools', tracing.traced_node('tools')(node_tools))
+    graph.add_node('synthesize', tracing.traced_node('synthesize')(node_synthesize))
     graph.add_edge(START, 'init')
-    graph.add_node('assess', llmobs.traced_node('assess')(node_assess))
+    graph.add_node('assess', tracing.traced_node('assess')(node_assess))
     graph.add_edge('init', 'assess')
     graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
     graph.add_edge('plan', 'tools')

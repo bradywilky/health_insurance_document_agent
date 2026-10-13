@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -6,19 +7,15 @@ from ddtrace.llmobs import LLMObs
 from streamlit.testing.v1 import AppTest
 
 from backend.agents import document_agent
-from backend.observability import audit, llmobs
+from backend.observability import archive, tracing
 from backend.preprocessing.documents import ingest_document
 from backend.entrypoint import ask_question_local
-from backend.observability.audit import record_document_event
+from backend.storage.filesystem import LocalDocumentStore
 from development.observability import capture
+from development.tests.conftest import archived
 
 QUESTION = 'What is the member rate for plan Alpha?'
 APPS = Path(__file__).resolve().parents[2] / 'apps'
-
-
-def records(directory, tier, kind):
-    files = sorted((directory / tier / kind).glob('*.jsonl'))
-    return [json.loads(line) for f in files for line in f.read_text(encoding='utf-8').splitlines()]
 
 
 @pytest.fixture
@@ -29,35 +26,47 @@ def rates_run(native_script):
     return doc
 
 
-def test_metadata_record_has_no_question_or_answer_text(rates_run, isolated_audit):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test',
-                             session_id='s1')
-    [meta] = records(isolated_audit, 'metadata', 'questions')
-    text = json.dumps(meta)
+def root_metadata(trace):
+    [root] = [e for e in trace['spans'] if e['parent_id'] == 'undefined']
+    return root['meta']['metadata']
+
+
+def test_archived_trace_is_the_captured_trace(rates_run, isolated_archive):
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    [trace] = archived(isolated_archive, 'document_agent')
+    assert trace['trace_id'] == result['trace_id'] and trace['status'] == 'ok'
+    assert trace['spans'] == capture.trace(result['trace_id'])
+    assert trace['code_version'] == archive.code_version() and trace['schema_version'] == 1
+
+
+def test_archived_question_has_audit_fields_but_no_text(rates_run, isolated_archive):
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    [trace] = archived(isolated_archive, 'document_agent')
+    text = json.dumps(trace)
     assert 'Alpha' not in text and 'USD 88' not in text and 'member rate' not in text
-    assert meta['question_sha256'] == audit.digest(QUESTION)
-    assert meta['answer_sha256'] == audit.digest(result['answer'])
-    assert meta['request_id'] == result['request_id'] and meta['session_id'] == 's1'
-    assert meta['status'] == 'answered' and meta['error'] is None
+    meta = root_metadata(trace)
+    assert meta['question_sha256'] == archive.digest(QUESTION)
+    assert meta['answer_sha256'] == archive.digest(result['answer'])
+    assert meta['request_id'] == result['request_id'] and trace['spans'][0]['session_id'] == 's1'
+    assert meta['status'] == 'answered' and 'error' not in meta
     assert meta['prompt_version'] == document_agent.PROMPT_VERSION
     assert meta['documents'][0]['id'] == rates_run.id and meta['documents'][0]['name'] == 'rates.txt'
     assert [e['tool'] for e in meta['evidence']] == ['search_documents']
     assert meta['evidence'][0]['locations'] == ['paragraph 1']
     assert meta['totals'] == {'llm_calls': 3, 'input_tokens': 30, 'output_tokens': 15} == result['usage']
-    assert not (isolated_audit / 'content').exists()
 
 
-def test_content_tier_is_opt_in_and_separate(rates_run, isolated_audit, monkeypatch):
-    monkeypatch.setenv('AUDIT_CONTENT', 'true')
+def test_content_is_archived_only_with_trace_content(rates_run, isolated_archive, monkeypatch):
+    monkeypatch.setenv('TRACE_CONTENT', 'true')
     ask_question_local(QUESTION, documents=[rates_run], app='test')
-    [meta] = records(isolated_audit, 'metadata', 'questions')
-    [content] = records(isolated_audit, 'content', 'questions')
-    assert meta['content_recorded'] and content['request_id'] == meta['request_id']
-    assert content['question'] == QUESTION and 'USD 88' in content['answer']
-    assert 'llm_calls' not in content  # per-call prompts are in Datadog LLM Observability
+    [trace] = archived(isolated_archive, 'document_agent')
+    root = trace['spans'][0]
+    assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
+    [tool] = [e for e in trace['spans'] if capture.kind(e) == 'tool']
+    assert 'Alpha' in tool['meta']['output']['value']  # the evidence the tool returned
 
 
-def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
+def test_failed_question_is_archived(monkeypatch, isolated_archive):
     doc = ingest_document('rates.txt', b'USD 88')
     def fail(*args, **kwargs):
         raise RuntimeError('Bedrock unavailable')
@@ -65,66 +74,66 @@ def test_failed_question_is_audited_then_raised(monkeypatch, isolated_audit):
     response = ask_question_local(QUESTION, documents=[doc], app='test')
     assert response['status'] == 'error' and response['status_code'] == 500 and response['answer'] is None
     assert 'Bedrock unavailable' in response['message']
-    [meta] = records(isolated_audit, 'metadata', 'questions')
-    assert meta['status'] == 'error' and 'Bedrock unavailable' in meta['error']
+    [trace] = archived(isolated_archive, 'document_agent')
+    meta = root_metadata(trace)
+    assert trace['status'] == 'error' and meta['status'] == 'error' and 'Bedrock unavailable' in meta['error']
     assert meta['request_id'] == response['request_id']
 
 
-class BrokenSink:
-    def write(self, tier, kind, record):
+class BrokenArchive:
+    def write(self, trace):
         raise OSError('disk full')
 
 
-def test_audit_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test',
-                             sink=BrokenSink())
+def test_archive_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test', archive=BrokenArchive())
     assert result['status'] == 'answered' and 'disk full' in caplog.text
-    monkeypatch.setenv('AUDIT_REQUIRED', 'true')
-    with pytest.raises(RuntimeError, match='Audit record could not be written'):
-        audit.write(BrokenSink(), [('metadata', 'questions', {'timestamp': audit.now()})])
+    monkeypatch.setenv('TRACE_ARCHIVE_REQUIRED', 'true')
+    with pytest.raises(RuntimeError, match='Trace could not be archived'):
+        ask_question_local(QUESTION, documents=[rates_run], app='test', archive=BrokenArchive())
 
 
-def test_s3_sink_writes_one_encrypted_object_per_record():
+def test_s3_archive_writes_one_encrypted_object_per_trace():
     uploads = []
     class Client:
         def upload_fileobj(self, body, bucket, key, ExtraArgs):
             uploads.append((bucket, key, ExtraArgs, json.loads(body.read())))
-    sink = audit.S3AuditSink(Client(), 'audit-bucket', 'agent', kms_key_id='key-1')
-    record = {'timestamp': '2026-03-04T05:06:07.890+00:00', 'request_id': 'abc'}
-    sink.write('metadata', 'questions', record)
+    store = archive.S3TraceArchive(Client(), 'audit-bucket', 'agent', kms_key_id='key-1')
+    trace = {'trace_id': 'abc', 'name': 'document_agent', 'started_at': '2026-03-04T05:06:07.890+00:00',
+             'spans': []}
+    store.write(trace)
     [(bucket, key, extra, body)] = uploads
-    assert key == 'agent/audit/metadata/questions/2026/03/04/20260304T050607890+0000-abc.json'
+    assert key == 'agent/traces/document_agent/2026/03/04/20260304T050607890+0000-abc.json'
     assert extra == {'ContentType': 'application/json', 'ServerSideEncryption': 'aws:kms', 'SSEKMSKeyId': 'key-1'}
-    assert body == record
+    assert body['trace_id'] == 'abc' and body['spans'] == []
 
 
-def test_relative_audit_paths_resolve_from_project_root(monkeypatch, tmp_path):
+def test_relative_archive_paths_resolve_from_project_root(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    root = Path(audit.__file__).resolve().parents[2]
-    assert audit.LocalAuditSink('data/audit').directory == root / 'data' / 'audit'
-    assert audit.LocalAuditSink(tmp_path / 'x').directory == tmp_path / 'x'
+    root = Path(archive.__file__).resolve().parents[2]
+    assert archive.LocalTraceArchive('data/traces').directory == root / 'data' / 'traces'
+    assert archive.LocalTraceArchive(tmp_path / 'x').directory == tmp_path / 'x'
 
 
-def test_audit_storage_modes(monkeypatch):
-    monkeypatch.setenv('AUDIT_STORAGE', 'off')
-    assert isinstance(audit.configured_audit_sink(), audit.NullAuditSink)
-    monkeypatch.setenv('AUDIT_STORAGE', 's3')
-    monkeypatch.delenv('AUDIT_S3_BUCKET', raising=False)
+def test_archive_modes(monkeypatch):
+    monkeypatch.setenv('TRACE_ARCHIVE', 'off')
+    assert isinstance(archive.configured_archive(), archive.NullTraceArchive)
+    monkeypatch.setenv('TRACE_ARCHIVE', 's3')
+    monkeypatch.delenv('TRACE_ARCHIVE_S3_BUCKET', raising=False)
     monkeypatch.delenv('DOCUMENTS_S3_BUCKET', raising=False)
     with pytest.raises(ValueError, match='BUCKET'):
-        audit.configured_audit_sink()
-    monkeypatch.setenv('AUDIT_STORAGE', 'database')
+        archive.configured_archive()
+    monkeypatch.setenv('TRACE_ARCHIVE', 'database')
     with pytest.raises(ValueError):
-        audit.configured_audit_sink()
+        archive.configured_archive()
 
 
-def test_spans_follow_the_graph_and_match_the_audit_record(rates_run, isolated_audit):
+def test_spans_follow_the_graph(rates_run):
     result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
     events = capture.trace(result['trace_id'])
     by_id = {e['span_id']: e for e in events}
     [root] = [e for e in events if capture.kind(e) == 'agent']
     assert root['name'] == 'document_agent' and root['parent_id'] == 'undefined'
-    assert records(isolated_audit, 'metadata', 'questions')[0]['trace_id'] == result['trace_id']
     assert root['session_id'] == 's1' and 'app:test' in root['tags'] and root['status'] == 'ok'
     assert root['meta']['metadata']['request_id'] == result['request_id']
     assert root['meta']['metadata']['status'] == 'answered'
@@ -173,12 +182,13 @@ def test_summary_reports_totals_largest_call_and_gaps(rates_run):
     assert [t['tool'] for t in summary['tools']] == ['search_documents']
 
 
-def test_runs_unchanged_without_datadog(rates_run, monkeypatch):
+def test_traces_are_recorded_and_archived_without_datadog(rates_run, isolated_archive, monkeypatch):
     monkeypatch.setattr(LLMObs, 'enabled', False)
-    with capture.recording() as events:
-        result = ask_question_local(QUESTION, documents=[rates_run], app='test')
-    assert result['status'] == 'answered' and result['trace_id'] is None and result['usage']['llm_calls'] == 3
-    assert events == []
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    assert result['status'] == 'answered' and result['usage']['llm_calls'] == 3
+    [trace] = archived(isolated_archive, 'document_agent')
+    assert trace['trace_id'] == result['trace_id']
+    assert len([e for e in trace['spans'] if capture.kind(e) == 'llm']) == 3
 
 
 def test_tool_errors_mark_their_span(native_script):
@@ -191,35 +201,45 @@ def test_tool_errors_mark_their_span(native_script):
     assert tool['status'] == 'error'
 
 
-def test_document_events_record_hashes_not_contents(isolated_audit):
+def test_document_changes_are_archived_with_hashes_not_contents(isolated_archive, tmp_path):
     content = b'Plan Alpha member rate is USD 88.'
-    doc = ingest_document('rates.txt', content)
-    with llmobs.span('workflow', 'ingest_document') as current:
-        record_document_event('document_uploaded', app='upload', document=doc, content=content,
-                              details={'profile_generated': False})
-        trace_id = llmobs.trace_id_of(current)
-    [event] = records(isolated_audit, 'metadata', 'documents')
-    assert event['trace_id'] == trace_id is not None
-    assert event['event'] == 'document_uploaded' and event['filename'] == 'rates.txt'
-    assert event['size_bytes'] == len(content) and len(event['content_sha256']) == 64
-    assert 'Alpha' not in json.dumps(event)
+    store = LocalDocumentStore(tmp_path / 'library', group='example.org')
+    doc = ingest_document('rates.txt', content, store=store)
+    store.save_profile(doc.storage_ref['manifest_key'], {'glossary': [
+        {'term': 'PMPM', 'meaning': 'per member per month', 'source': 'confirmed'}], 'meta': {'reviewed': True}})
+    store.delete('rates.txt')
+    with pytest.raises(ValueError):
+        ingest_document('rates.exe', content, store=store)
+
+    first, failed = archived(isolated_archive, 'ingest_document')
+    meta = root_metadata(first)
+    assert meta['filename'] == 'rates.txt' and meta['group_name'] == 'example.org' and meta['saved']
+    assert meta['bytes'] == len(content) and meta['content_sha256'] == hashlib.sha256(content).hexdigest()
+    assert meta['document']['id'] == doc.id
+    assert failed['status'] == 'error' and 'Unsupported file type' in failed['spans'][0]['meta']['error.message']
+    [profile] = archived(isolated_archive, 'save_profile')
+    assert root_metadata(profile)['terms_added'] == ['PMPM'] and root_metadata(profile)['terms_confirmed'] == 1
+    [deleted] = archived(isolated_archive, 'delete_document')
+    assert root_metadata(deleted) == {'filename': 'rates.txt', 'group_name': 'example.org'}
+    text = json.dumps([first, profile, deleted])
+    assert 'Alpha' not in text and 'per member per month' not in text
 
 
 def test_versions_are_stable_identifiers(monkeypatch):
     assert document_agent.PROMPT_VERSION.startswith('p-') and len(document_agent.PROMPT_VERSION) == 14
-    assert audit.code_version().startswith('src-')
+    assert archive.code_version().startswith('src-')
     monkeypatch.setenv('APP_VERSION', 'abc123')
-    assert audit.code_version() == 'abc123'
+    assert archive.code_version() == 'abc123'
 
 
-def test_chat_and_upload_apps_write_audit_records(monkeypatch, tmp_path, isolated_audit):
+def test_chat_and_upload_apps_archive_their_traces(monkeypatch, tmp_path, isolated_archive):
     monkeypatch.setenv('DOCUMENTS_STORAGE', 'local')
     monkeypatch.setenv('DOCUMENTS_LOCAL_DIR', str(tmp_path / 'library'))
     portal = AppTest.from_file(str(APPS / 'upload' / 'app.py')).run(timeout=20)
     next(b for b in portal.button if b.label == 'Load Bingle-Dingle examples').click().run(timeout=30)
     assert not portal.exception
-    uploads = records(isolated_audit, 'metadata', 'documents')
-    assert len(uploads) == 8 and {e['event'] for e in uploads} == {'document_uploaded'}
+    uploads = archived(isolated_archive, 'ingest_document')
+    assert len(uploads) == 8 and {t['status'] for t in uploads} == {'ok'}
 
     monkeypatch.setattr(document_agent, 'run_document_agent',
                         lambda *a, **kw: {'status': 'answered', 'answer': 'USD 88 [E1].', 'evidence': [],
@@ -228,6 +248,53 @@ def test_chat_and_upload_apps_write_audit_records(monkeypatch, tmp_path, isolate
     chat.multiselect[0].set_value([chat.multiselect[0].options[0]]).run()
     chat.chat_input[0].set_value('What is the rate?').run(timeout=20)
     assert not chat.exception
-    [meta] = records(isolated_audit, 'metadata', 'questions')
-    assert meta['app'] == 'chat' and meta['session_id'] == chat.session_state['session_id']
-    assert any(meta['request_id'][:12] in c.value for c in chat.caption)
+    [question] = archived(isolated_archive, 'document_agent')
+    root = question['spans'][0]
+    assert 'app:chat' in root['tags'] and root['session_id'] == chat.session_state['session_id']
+    assert any(root['meta']['metadata']['request_id'][:12] in c.value for c in chat.caption)
+
+
+class FakeDatadog:
+    """Stands in for ddtrace's LLMObs: records what the tracing helpers forward."""
+    enabled = True
+
+    def __init__(self):
+        self.spans, self.annotations = [], []
+
+    def _start(self, kind):
+        from contextlib import contextmanager
+        @contextmanager
+        def start(name, **options):
+            current = type('DatadogSpan', (), {'error': 0, 'set_tag': lambda self, k, v: None})()
+            current.ids = {'span_id': f'dd{len(self.spans)}', 'trace_id': 'dd-trace'}
+            self.spans.append((kind, name, options))
+            yield current
+        return start
+
+    def __getattr__(self, kind):
+        return self._start(kind)
+
+    def annotate(self, span, **fields):
+        self.annotations.append((span.ids['span_id'], fields))
+
+    def export_span(self, span):
+        return span.ids
+
+
+def test_datadog_receives_the_same_spans_and_trace_id(rates_run, monkeypatch, isolated_archive):
+    datadog = FakeDatadog()
+    monkeypatch.setattr(tracing, 'LLMObs', datadog)
+    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    [trace] = archived(isolated_archive, 'document_agent')
+    assert result['trace_id'] == trace['trace_id'] == 'dd-trace'
+    assert [(kind, name) for kind, name, _ in datadog.spans] == [
+        (capture.kind(e), e['name']) for e in sorted(trace['spans'], key=lambda e: int(e['span_id'][2:]))]
+    assert datadog.spans[0][2] == {'session_id': 's1'}
+    for event in trace['spans']:
+        sent = {'metadata': {}, 'metrics': {}, 'tags': {}}
+        for span_id, fields in datadog.annotations:
+            if span_id == event['span_id']:
+                for key in sent:
+                    sent[key].update(fields.get(key, {}))
+        assert sent['metadata'] == event['meta']['metadata'] and sent['metrics'] == event['metrics']
+        assert [f'{k}:{v}' for k, v in sent['tags'].items()] == event['tags']

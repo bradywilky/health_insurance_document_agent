@@ -30,7 +30,25 @@ def ingest_document(name: str, content: bytes, *, store=None, enrich=None, table
     """Extract a document's searchable text (and, for spreadsheets, per-sheet tables), then optionally profile and save it.
 
     table_options  spreadsheet preprocessing options: encoding, delimiter (CSV) and sheet overrides
+
+    Runs in its own trace (ingest_document), archived when it ends; a failure is recorded on it and re-raised.
     """
+    from backend.observability import tracing
+    from backend.observability.archive import configured_archive, document_summary
+    with tracing.span('workflow', 'ingest_document', archive=configured_archive()) as current:
+        tracing.annotate(current, metadata={
+            'filename': name, 'kind': Path(name).suffix.lower(), 'bytes': len(content or b''),
+            'content_sha256': sha256(content or b'').hexdigest(), 'profile_requested': enrich is not None,
+            'saved': store is not None, 'group_name': getattr(store, 'group', None)})
+        doc = _ingest(name, content, store, enrich, table_options)
+        profile = doc.profile or {}
+        tracing.annotate(current, metadata={'document': document_summary(doc),
+                                            'profile_generated': bool(profile),
+                                            'profile_model_id': profile.get('meta', {}).get('model_id')})
+        return doc
+
+
+def _ingest(name, content, store, enrich, table_options):
     name = name.replace('\\','/').rsplit('/',1)[-1]
     extension = Path(name).suffix.lower()
     if extension not in SUPPORTED:

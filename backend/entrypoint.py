@@ -3,7 +3,7 @@
 ask_question is the production entry point (the Lambda handler calls it with a group and saved filenames).
 ask_question_local is for development callers (the Streamlit app, the command-line tool, tests): it takes
 already-loaded documents and adds a progress hook. Both validate the request, load the documents, run
-the agent, write the audit record and trace, and return the same JSON-serializable response, whose `status`
+the agent, archive the trace, and return the same JSON-serializable response, whose `status`
 tells the caller what happened:
 
 answered              `answer` is the answer; `sources` and `limitations` support it
@@ -18,13 +18,15 @@ error                 anything else; `error` holds the exception type and messag
 STATUS_CODES maps each status to an HTTP-style code for API callers.
 """
 import logging
-import time
+import uuid
 
 from backend.agents import ambiguity as amb
 from backend.agents import document_agent
 from backend.agents.llm import Usage
 from backend.config.settings import MODELS
-from backend.observability import audit, llmobs
+from backend.observability import tracing
+from backend.observability.archive import (code_version, configured_archive, digest, document_summary,
+                                           evidence_summary)
 
 MAX_DOCUMENTS = 10
 MAX_QUESTION_CHARS = 4000
@@ -49,29 +51,28 @@ class RequestError(ValueError):
 
 
 def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, clarification=None,
-                 model=None, ambiguity='off', app='api', store=None, sink=None):
+                 model=None, ambiguity='off', app='api', store=None, archive=None):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
     document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
                    <DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/
     group_name     the group folder, e.g. 'aol.com'; default DOCUMENTS_GROUP_NAME. Required for S3 storage.
     history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
-    session_id     conversation identifier, recorded in the audit record and trace
+    session_id     conversation identifier, recorded in the trace
     clarification  the reading the user chose after a needs_clarification response
     model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
     ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
-    app            caller name recorded in the audit record and trace
-    store, sink    document store and audit sink; default from the environment. A long-lived process (a warm
+    app            caller name recorded in the trace
+    store, archive document store and trace archive; default from the environment. A long-lived process (a warm
                    Lambda) can create them once and pass them to reuse their AWS clients across requests.
     """
     return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name, store),
-                history=history,
-                session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
-                sink=sink)
+                history=history, session_id=session_id, clarification=clarification, model=model,
+                ambiguity=ambiguity, app=app, archive=archive, group=group_name)
 
 
 def ask_question_local(question, *, documents, history=None, session_id=None, clarification=None, model=None,
-                       ambiguity='off', app='local', sink=None, on_step=None):
+                       ambiguity='off', app='local', archive=None, on_step=None):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
@@ -80,26 +81,29 @@ def ask_question_local(question, *, documents, history=None, session_id=None, cl
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
                 session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
-                sink=sink, on_step=on_step)
+                archive=archive, on_step=on_step)
 
 
-def _run(question, *, selected, load, history, session_id, clarification, model, ambiguity, app, sink,
-         on_step=None):
-    """Validate, load, run the agent, audit and trace. Shared by both entry points."""
-    sink = sink if sink is not None else audit.configured_audit_sink()
+def _run(question, *, selected, load, history, session_id, clarification, model, ambiguity, app, archive,
+         group=None, on_step=None):
+    """Validate, load and run the agent inside one trace, which is archived when it ends."""
     usage = Usage()
-    request_id, timestamp, start = audit.new_id(), audit.now(), time.monotonic()
     loaded, result, error, status = [], None, None, 'error'
-    with llmobs.span('agent', 'document_agent', session_id=session_id) as root:
-        trace_id = llmobs.trace_id_of(root)
-        llmobs.annotate(root, metadata={'request_id': request_id, 'ambiguity_mode': ambiguity, 'model': model},
-                        tags={'app': app})
-        llmobs.annotate_content(root, input_data={'question': question, 'clarification': clarification})
+    with tracing.span('agent', 'document_agent', session_id=session_id,
+                      archive=archive if archive is not None else configured_archive()) as root:
+        request_id = uuid.uuid4().hex
+        text = question if isinstance(question, str) else ''
+        tracing.annotate(root, metadata={
+            'request_id': request_id, 'ambiguity_mode': ambiguity, 'model': model, 'group_name': group,
+            'code_version': code_version(), 'prompt_version': document_agent.PROMPT_VERSION,
+            'question_sha256': digest(text), 'question_chars': len(text), 'clarified': bool(clarification)},
+            tags={'app': app})
+        tracing.annotate_content(root, input_data={'question': question, 'clarification': clarification})
         try:
             question, history, clarification = _validate(question, history, clarification, model, ambiguity,
                                                          selected)
             loaded = load()
-            llmobs.annotate(root, metadata={'document_ids': [d.id for d in loaded]})
+            tracing.annotate(root, metadata={'documents': [document_summary(d) for d in loaded]})
             # Module attribute, so tests can replace the agent.
             result = document_agent.run_document_agent(
                 {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, usage=usage,
@@ -110,17 +114,20 @@ def _run(question, *, selected, load, history, session_id, clarification, model,
         except Exception as exc:
             status, error = classify(exc), f'{type(exc).__name__}: {exc}'[:1000]
             logger.exception('Question %s failed', request_id)
-        llmobs.annotate(root, metadata={'status': status}, tags={'status': status})
-        llmobs.annotate_content(root, output_data=(result or {}).get('answer'))
+        result = result or {}
+        # The ambiguity assessment quotes readings of the question, so it is content, not metadata.
+        protocol = {k: v for k, v in (result.get('protocol') or {}).items() if k != 'ambiguity_assessment'}
+        tracing.annotate(root, metadata={
+            'status': status, 'error': error, 'totals': usage.totals(),
+            'answer_sha256': digest(result['answer']) if result.get('answer') else None,
+            'protocol': protocol or None, 'coverage': result.get('coverage'),
+            'limitations_count': len(result.get('limitations') or []),
+            'evidence': evidence_summary(result.get('evidence'))}, tags={'status': status})
+        tracing.annotate_content(root, output_data=result.get('answer'))
         if status not in {'answered', 'needs_clarification', 'no_evidence'}:
-            llmobs.mark_error(root, error or status)
-        response = _response(status, result, error, loaded, request_id, trace_id, session_id, question, usage)
-        audit.write(sink, audit.question_records(
-            request_id=request_id, timestamp=timestamp, app=app, session_id=session_id,
-            model=model or 'default', ambiguity=ambiguity, prompt_version=document_agent.PROMPT_VERSION,
-            documents=[audit.document_summary(d) for d in loaded], question=question,
-            clarification=clarification, result={**(result or {}), 'status': status}, usage=usage.totals(),
-            duration_ms=round((time.monotonic() - start) * 1000), error=error, trace_id=trace_id))
+            tracing.mark_error(root, error or status)
+        response = _response(status, result, error, loaded, request_id, tracing.trace_id_of(root), session_id,
+                             question, usage)
     return response
 
 

@@ -6,12 +6,6 @@ import streamlit as st
 from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
-from backend.observability import llmobs
-from backend.observability.audit import record_document_event
-
-
-def audit_event(event, **fields):
-    record_document_event(event, app='upload', **fields)
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
 st.title('Document Upload Portal')
@@ -35,21 +29,14 @@ profile_at_upload = st.checkbox(
 def save_files(files):
     for name, content in files:
         try:
-            with st.spinner(f'Processing {name}...'), llmobs.span('workflow', 'ingest_document') as current:
-                llmobs.annotate(current, metadata={'kind': Path(name).suffix.lower(), 'bytes': len(content),
-                                                   'profile_requested': profile_at_upload})
+            # ingest_document traces and archives the upload, including failures.
+            with st.spinner(f'Processing {name}...'):
                 enrich = make_enricher() if profile_at_upload else None
                 doc = ingest_document(name, content, store=store, enrich=enrich)
-                profile_meta = (doc.profile or {}).get('meta', {}) if getattr(doc, 'profile', None) else {}
-                audit_event('document_uploaded', document=doc, content=content,
-                            details={'profile_requested': profile_at_upload,
-                                     'profile_generated': bool(getattr(doc, 'profile', None)),
-                                     'profile_model_id': profile_meta.get('model_id')})
             st.success(f'Saved {doc.name}')
             for warning in doc.warnings:
                 st.warning(f'{doc.name}: {warning}')
         except Exception as exc:
-            audit_event('upload_failed', filename=name, content=content, error=f'{type(exc).__name__}: {exc}'[:1000])
             st.error(f'Could not save {name}: {type(exc).__name__}: {exc}')
 
 
@@ -88,9 +75,6 @@ if key:
             try:
                 generated = make_enricher()(doc)
                 store.save_profile(key, generated)
-                audit_event('profile_generated', document=doc, details={
-                    'manifest_key': key, 'profile_model_id': generated.get('meta', {}).get('model_id'),
-                    'glossary_terms': len(generated.get('glossary', []))})
                 st.rerun()
             except Exception as exc:
                 st.error(f'Could not generate a profile: {type(exc).__name__}: {exc}')
@@ -129,14 +113,6 @@ if key:
                                  'reviewed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}}
             try:
                 store.save_profile(key, reviewed)
-                before = {g['term']: (g['meaning'], g['source']) for g in profile.get('glossary', [])}
-                after = {g['term']: (g['meaning'], g['source']) for g in glossary}
-                audit_event('profile_reviewed', document=doc, details={
-                    'manifest_key': key,
-                    'terms_added': sorted(set(after) - set(before)),
-                    'terms_removed': sorted(set(before) - set(after)),
-                    'terms_changed': sorted(t for t in set(after) & set(before) if after[t] != before[t]),
-                    'terms_confirmed': sum(1 for v in after.values() if v[1] == 'confirmed')})
                 st.success('Saved. The chat app uses the reviewed profile after Refresh saved files.')
             except Exception as exc:
                 st.error(f'Could not save: {type(exc).__name__}: {exc}')

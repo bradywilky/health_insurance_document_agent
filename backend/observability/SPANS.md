@@ -1,11 +1,11 @@
-# LLM Observability spans
+# Trace spans
 
-Every span the application sends to Datadog LLM Observability, and every field each one carries. The helpers are
-in `llmobs.py`; see the README's **Audit and tracing** section for setup. Update this page when a span or
-annotation changes.
+Every span the application records, and every field each one carries. The same spans go to Datadog LLM
+Observability (when enabled) and to the trace archive (`archive.py`). The helpers are in `tracing.py`; see the
+README's **Audit and tracing** section for setup. Update this page when a span or annotation changes.
 
-Fields marked 🔒 are sent only with `TRACE_CONTENT=true`, because they can contain PHI. Everything else is sent
-whenever LLM Observability is enabled, so it must never hold question, answer or document text.
+Fields marked 🔒 are recorded only with `TRACE_CONTENT=true`, because they can contain PHI. Everything else is
+always recorded, so it must never hold question, answer or document text.
 
 ## Span trees
 
@@ -25,29 +25,41 @@ agent  document_agent
     └── llm  Document Answer Revision        when the answer check finds issues
 ```
 
-One trace per uploaded file (`apps/upload/app.py`, `save_files`):
+One trace per document change, each archived when it ends:
 
 ```text
-workflow  ingest_document
+workflow  ingest_document                    backend/preprocessing/documents.py, ingest_document
 └── llm  Document Enrichment                 when a semantic profile is requested
+workflow  save_profile                       backend/storage/documents.py, save_profile
+workflow  delete_document                    backend/storage/documents.py, delete
 ```
 
 Parents are not set explicitly: ddtrace makes each new span a child of the span open when it starts, so the tree
-follows the nesting of `with llmobs.span(...)` blocks at run time.
+follows the nesting of `with tracing.span(...)` blocks at run time.
 
 ## `agent` · `document_agent`
 
-The root span of each question. Started in `entrypoint._run`; its trace ID is returned in the response and written
-to the audit record.
+The root span of each question. Started in `entrypoint._run`; its trace ID is returned in the response, and the
+finished trace is archived.
 
 | Field | Type | Value |
 | --- | --- | --- |
 | `session_id` | span option | Conversation ID; Datadog groups traces by session |
-| `request_id` | metadata | Same as the audit record |
+| `request_id` | metadata | Returned in the response |
 | `ambiguity_mode` | metadata | `off`, `assumptions` or `ask` |
 | `model` | metadata | Model key; omitted when the default is used |
-| `document_ids` | metadata | Added after the documents load |
+| `group_name` | metadata | Group the documents were read from; `ask_question` only |
+| `code_version`, `prompt_version` | metadata | `APP_VERSION` or a source hash; hash of every instruction and tool definition |
+| `question_sha256`, `question_chars` | metadata | Hash and length of the question as received |
+| `clarified` | metadata | Whether the user chose a reading after `needs_clarification` |
+| `documents` | metadata | Added after the documents load: ID, name, kind, manifest key, has profile, warning count |
 | `status` | metadata | Final status (see `entrypoint.py`) |
+| `error` | metadata | Exception type and message, or the request error; absent on success |
+| `totals` | metadata | Model calls, input and output tokens for the question |
+| `answer_sha256` | metadata | Hash of the answer, when there is one |
+| `protocol` | metadata | Research statistics (steps, retries, prompts); excludes the ambiguity assessment, which quotes the question |
+| `coverage`, `limitations_count` | metadata | Files examined, auto-read and not examined; number of limitations |
+| `evidence` | metadata | Per evidence item: tool, document, operation, error flag, matched rows, page/sheet/row locations; no text |
 | `app` | tag | `chat` (chat app), `lambda` (Lambda handler); `api` and `local` are the entry-point defaults |
 | `status` | tag | Final status |
 | input 🔒 | content | `{question, clarification}` |
@@ -56,7 +68,7 @@ to the audit record.
 
 ## `workflow` · `init`, `assess`, `plan`, `tools`, `synthesize`
 
-One span per LangGraph node execution, from `llmobs.traced_node` (applied in
+One span per LangGraph node execution, from `tracing.traced_node` (applied in
 `document_agent.build_document_graph`).
 
 | Field | Type | Value |
@@ -81,7 +93,7 @@ Assessment`, `Native Document Research`, `Document Answer`, `Document Answer Rev
 | `tools_offered` | metadata | Number of tool definitions sent |
 | `tool_calls` | metadata | Names of the tools the model requested |
 | `input_tokens`, `output_tokens`, `total_tokens` | metrics | Datadog's reserved token metrics; used for cost estimates |
-| input 🔒 | content | System prompt and messages, as chat messages (`llmobs.bedrock_messages`) |
+| input 🔒 | content | System prompt and messages, as chat messages (`tracing.bedrock_messages`) |
 | output 🔒 | content | Model reply, including requested tool calls |
 | error | status | Set when the Bedrock call raises (throttling, timeout, ...) |
 
@@ -101,18 +113,41 @@ are recorded in `operation`.
 | `blocks` | metadata | Blocks read |
 | `matched_rows` | metadata | Table rows matched |
 | input 🔒 | content | Tool parameters |
+| output 🔒 | content | Tool result (the evidence) |
 | error | status | Set for invalid calculation inputs, an `error` in the tool result, or an exception |
 
 ## `workflow` · `ingest_document`
 
-The root span of each upload. Audit events written inside it record its trace ID through
-`llmobs.current_trace_id()`.
+The root span of each upload, started by `ingest_document`. A failure (unsupported type, unreadable file, failed
+save) marks it as an error with the exception message.
 
 | Field | Type | Value |
 | --- | --- | --- |
-| `kind` | metadata | File extension |
-| `bytes` | metadata | File size |
+| `filename`, `kind` | metadata | Uploaded filename and extension |
+| `bytes`, `content_sha256` | metadata | File size and hash |
 | `profile_requested` | metadata | Whether a semantic profile was requested |
+| `saved`, `group_name` | metadata | Whether a store was given, and its group |
+| `document` | metadata | The resulting document: ID, name, kind, manifest key, has profile, warning count |
+| `profile_generated`, `profile_model_id` | metadata | Whether a profile was produced, and by which model |
+
+## `workflow` · `save_profile`
+
+Started by `ObjectDocumentStore.save_profile` for a generated or reviewed profile.
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `manifest_key`, `group_name` | metadata | The document and its group |
+| `reviewed`, `profile_model_id` | metadata | Whether a person reviewed it; the model that generated it |
+| `glossary_terms` | metadata | Number of glossary terms |
+| `terms_added`, `terms_removed`, `terms_changed`, `terms_confirmed` | metadata | Glossary terms compared with the previous profile (terms only, no meanings); confirmed count |
+
+## `workflow` · `delete_document`
+
+Started by `ObjectDocumentStore.delete`.
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `filename`, `group_name` | metadata | The filename or manifest key given, and the group |
 
 ## Example trace
 
@@ -123,7 +158,7 @@ reconstruction consistent with those totals, not recorded values.
 
 ```text
 agent  document_agent                                                  5.4 s
-│  metadata  request_id: 3e00087c7927…   ambiguity_mode: off   document_ids: [802f2eedc04f707a]
+│  metadata  request_id: 3e00087c7927…   ambiguity_mode: off   documents: [{id: 802f2eedc04f707a, …}]
 │            status: answered            (model omitted: default used)
 │  tags      app: chat   status: answered
 │  🔒 input   {question: "give me some info on this file", clarification: null}
@@ -181,13 +216,14 @@ What to read from it:
 
 ## On every span
 
-`env`, `service` and `version` tags from `DD_ENV`, `DD_SERVICE` and `DD_VERSION`, plus span ID, parent ID, trace
-ID, start time and duration. Metadata, metric and tag values of `None` are dropped.
+Span ID, parent ID (`undefined` on the root), trace ID, start time, duration and status, plus `session_id` on every
+span of a question. In Datadog, also `env`, `service` and `version` tags from `DD_ENV`, `DD_SERVICE` and
+`DD_VERSION`. Metadata, metric and tag values of `None` are dropped.
 
 ## Not traced as separate spans
 
 - In `node_tools`: the `answer` action, duplicate requests and coverage prompts (planner bookkeeping, not tool
   executions).
 - Automatic reads when research finishes (`read_document` calls with `auto: True`). They appear in the response
-  coverage and the audit record, not in Datadog.
+  coverage and the root span's `evidence`, not as tool spans.
 - Loading documents from storage in `_run`. Its time is part of the `agent` span.

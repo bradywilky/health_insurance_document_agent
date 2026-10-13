@@ -1,3 +1,4 @@
+import json
 import pytest
 from development.scripts.make_samples import create_samples
 
@@ -42,21 +43,27 @@ def native_script(monkeypatch):
 
 @pytest.fixture(scope='session', autouse=True)
 def llm_capture():
-    """Datadog LLM Observability spans go to the local in-memory capture, as in the development apps."""
+    """Finished traces are kept in memory, as in the development apps."""
     from development.observability import capture
     capture.enable(content=False)
     return capture
 
 
 @pytest.fixture(autouse=True)
-def isolated_audit(monkeypatch, tmp_path):
-    """Audit records from tests go to a temporary directory; prompt and response capture stays off.
+def isolated_archive(monkeypatch, tmp_path):
+    """Traces from tests are archived under a temporary directory; prompt and response capture stays off.
     Document layout settings from a local .env are cleared so saved paths match the tests."""
-    monkeypatch.setenv('AUDIT_STORAGE', 'local')
-    monkeypatch.setenv('AUDIT_LOCAL_DIR', str(tmp_path / 'audit'))
-    for name in ['AUDIT_CONTENT', 'AUDIT_REQUIRED',
+    monkeypatch.setenv('TRACE_ARCHIVE', 'local')
+    monkeypatch.setenv('TRACE_ARCHIVE_LOCAL_DIR', str(tmp_path / 'archive'))
+    for name in ['TRACE_ARCHIVE_REQUIRED',
                  'DOCUMENTS_GROUP_NAME', 'DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_PREFIX_PPDOCS']:
         monkeypatch.delenv(name, raising=False)
     # setenv, not delenv, so the value is restored even after an app under test changes it.
     monkeypatch.setenv('TRACE_CONTENT', 'false')
-    return tmp_path / 'audit'
+    return tmp_path / 'archive'
+
+
+def archived(directory, name):
+    """Archived traces whose root span is `name`, oldest first."""
+    files = sorted((directory / name).rglob('*.json'))
+    return [json.loads(f.read_text(encoding='utf-8')) for f in files]

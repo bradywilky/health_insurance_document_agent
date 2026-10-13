@@ -4,14 +4,14 @@ from dataclasses import dataclass
 
 import boto3
 
-from backend.observability import llmobs
+from backend.observability import tracing
 
 
 @dataclass
 class Usage:
-    """Model calls and tokens for one question, returned in the response and the audit record.
+    """Model calls and tokens for one question, returned in the response and the trace.
 
-    Per-call detail (prompts, responses, timings) goes to Datadog LLM Observability instead."""
+    Per-call detail (prompts, responses, timings) is in the llm spans of the trace instead."""
     llm_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -56,20 +56,20 @@ class LLM:
         if tool_config is not None:
             request['toolConfig'] = tool_config
         # Prompt and response text only when TRACE_CONTENT=true.
-        with llmobs.span('llm', self.tool_name or 'chat', model_name=self.model_id,
-                         model_provider=llmobs.MODEL_PROVIDER) as current:
+        with tracing.span('llm', self.tool_name or 'chat', model_name=self.model_id,
+                         model_provider=tracing.MODEL_PROVIDER) as current:
             response = self._client.converse(**request)
             usage = response.get('usage', {})
             message = response['output']['message']
-            llmobs.annotate(current, metadata={
+            tracing.annotate(current, metadata={
                 'agent': self.agent_name, 'stop_reason': response.get('stopReason'),
                 'max_tokens': (self.params or {}).get('maxTokens'),
                 'tools_offered': len((tool_config or {}).get('tools', [])),
                 'tool_calls': [b['toolUse']['name'] for b in message.get('content', []) if 'toolUse' in b]},
                 metrics={'input_tokens': usage.get('inputTokens'), 'output_tokens': usage.get('outputTokens'),
                          'total_tokens': usage.get('inputTokens', 0) + usage.get('outputTokens', 0)})
-            llmobs.annotate_content(current, input_data=llmobs.bedrock_messages(messages, system),
-                                    output_data=llmobs.bedrock_messages([message]))
+            tracing.annotate_content(current, input_data=tracing.bedrock_messages(messages, system),
+                                    output_data=tracing.bedrock_messages([message]))
         if self.usage_meter is not None:
             self.usage_meter.add(usage)
         return response

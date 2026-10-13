@@ -17,7 +17,7 @@ backend/         Reusable application backend
   storage/       Local/S3 persistence and table loading
   shared/        Document model, metadata summaries and serialization
   config/        Model settings
-  observability/ Audit records and Datadog LLM Observability spans
+  observability/ Traces: Datadog LLM Observability and the trace archive (audit record)
 apps/            Replaceable Streamlit interfaces
   api/           AWS Lambda handler that calls ask_question
   chat/app.py    Saved-document selection and questions (port 8501)
@@ -25,7 +25,7 @@ apps/            Replaceable Streamlit interfaces
 development/     Utilities and tests, not required by the backend
   cli/           Single-file command-line runner
   evaluation/    Live model evaluations
-  observability/ Local in-memory stand-in for Datadog LLM Observability
+  observability/ Recent traces kept in memory for the apps, CLI and tests
   scripts/       Sample-data generator
   tests/         Offline regression tests
   fixtures/      Reviewed test documents and expected answers
@@ -45,7 +45,7 @@ dependency/cache folders, not application code.
 
 Integrations call `backend.entrypoint.ask_question`; local tools call `ask_question_local` (see "Entry point"
 below). The LangGraph workflow in
-`backend.agents.document_agent` is an internal detail that does not validate requests or write audit records.
+`backend.agents.document_agent` is an internal detail that does not validate requests or archive traces.
 
 ## Multi-file chat prototype
 
@@ -185,7 +185,7 @@ print(result["answer"])
 ```
 
 `run_document_agent_stream()` streams sanitized node progress and a final answer from the same graph. Production
-callers use `ask_question` instead, which validates the request and writes the audit record and trace (see "Entry point").
+callers use `ask_question` instead, which validates the request and archives the trace (see "Entry point").
 
 Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the personal `.env` into AWS. The S3 prefix must include its trailing slash.
 
@@ -508,56 +508,54 @@ and measure on your own questions. `--enrich` on `development.evaluation.documen
 
 ## Audit and tracing
 
-Two separate records answer different questions. The **audit record** is the system of record for who asked
-what, of which documents, with which model and prompts, and what came back. **Traces** show how a run behaved:
-each graph step, Bedrock call and tool execution with its latency, tokens and errors, in Datadog LLM
-Observability. Both carry the same
-`trace_id`, and the chat app shows the first 12 characters of the `request_id` under every answer.
+Every question and every document change (upload, profile save, delete) is one **trace**: a tree of spans for
+each graph step, Bedrock call and tool execution, with latency, tokens and errors. The same trace goes to two
+places:
 
-`ask_question` writes one audit record for every request, including invalid requests and failures.
+- **Datadog LLM Observability**, for dashboards, latency and cost, when the Datadog layers enable it.
+- **The trace archive** (`backend/observability/archive.py`), one JSON object per trace in S3 or local files. This
+  is the audit record: readable without Datadog, and written even when Datadog is not enabled.
 
-### Audit records (`backend/observability/audit.py`)
-
-| Tier | Written | Contains |
-| --- | --- | --- |
-| `metadata/questions` | always | request and session IDs, app, code and prompt versions, model, ambiguity mode, documents (ID, name, kind, storage key), SHA-256 of question and answer, status, protocol stats, coverage, evidence summary (tool, document, page/sheet/row locations, no text), totals (model calls, input and output tokens), duration, error, `trace_id` |
-| `metadata/documents` | always | `document_uploaded`, `upload_failed`, `profile_generated`, `profile_reviewed` (terms added, removed, changed, confirmed), with file SHA-256 and size |
-| `content/questions` | `AUDIT_CONTENT=true` | question, clarification, answer, interpretation and evidence |
-
-The content tier can contain PHI. Store it under its own prefix with a separate KMS key, tighter IAM access,
-and its own retention; the metadata tier can be kept longer and shared with reviewers. Hashes let a reviewer
-confirm that a question or answer matches the record without the metadata tier holding the text.
-
-`AUDIT_STORAGE=local` (default) appends JSON lines to `data/audit/{tier}/{kind}/YYYY-MM-DD.jsonl`.
-`AUDIT_STORAGE=s3` writes one object per record to
-`{AUDIT_S3_PREFIX}audit/{tier}/{kind}/YYYY/MM/DD/{timestamp}-{id}.json`, never rewritten, so S3 Object Lock and
-per-tier lifecycle rules apply cleanly; Athena can query either tier. A failed write logs a warning, or fails
-the request when `AUDIT_REQUIRED=true`.
-
-`prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
-`APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
-
-### Traces: Datadog LLM Observability (`backend/observability/llmobs.py`)
-
-Every question is one trace in Datadog LLM Observability:
+Both are fed from the same helpers (`backend/observability/tracing.py`), so they hold the same spans, metadata,
+metrics and content, and share the `trace_id`. The chat app shows the first 12 characters of the `request_id`
+under every answer.
 
 ```text
-agent     document_agent          session, request ID, model, ambiguity mode, document IDs, status
+agent     document_agent          request and session IDs, app, group, code and prompt versions, model,
+                                  ambiguity mode, documents, question/answer SHA-256, status, error, totals,
+                                  protocol stats, coverage, evidence summary (tool, document, locations; no text)
   workflow  init | assess | plan | tools | synthesize
     llm       <step name>           model, input/output tokens, stop reason, tool calls requested, latency
     tool      <tool name>           evidence ID, document IDs, match/row counts; error status
-workflow  ingest_document         (upload portal) file kind, size, profile requested
+workflow  ingest_document         filename, group, size, SHA-256, profile requested; the saved document; any error
+workflow  save_profile            manifest key, group, glossary terms added, removed, changed and confirmed
+workflow  delete_document         filename, group
 ```
 
 [`backend/observability/SPANS.md`](backend/observability/SPANS.md) lists every span and each field it records.
 
-Datadog shows each question's model calls with tokens, latency, cost estimates and errors, and an audit record's
-`trace_id` finds its trace. Prompts, responses, the question, the answer and tool parameters are sent only with
-`TRACE_CONTENT=true`. They can contain PHI: confirm the Datadog agreement covers PHI (or use Datadog's Sensitive
-Data Scanner) before turning it on in a shared environment. When LLM Observability is not enabled the helpers are
-no-ops, so the application runs unchanged without Datadog.
+Prompts, responses, the question, the answer, and tool parameters and results are recorded only with
+`TRACE_CONTENT=true`, in Datadog and the archive alike. They can contain PHI: confirm the Datadog agreement covers
+PHI (or use Datadog's Sensitive Data Scanner), and store the archive under a restricted prefix with its own KMS key
+and retention, before turning it on in a shared environment. Hashes let a reviewer confirm that a question or
+answer matches a trace without it holding the text.
 
-#### AWS Lambda
+### Trace archive
+
+`TRACE_ARCHIVE=local` (default) writes `data/traces/{root span}/YYYY/MM/DD/{timestamp}-{trace_id}.json`.
+`TRACE_ARCHIVE=s3` writes the same names under `{TRACE_ARCHIVE_S3_PREFIX}traces/` in `TRACE_ARCHIVE_S3_BUCKET` (defaults:
+the document bucket and prefix base). Objects are never rewritten, so S3 Object Lock and lifecycle rules apply
+cleanly, and Athena can query them. A failed write logs a warning, or fails the request when
+`TRACE_ARCHIVE_REQUIRED=true`. `TRACE_ARCHIVE=off` disables it.
+
+Each archived trace is `{schema_version, code_version, trace_id, name, kind, started_at, duration_ms, status,
+spans}`; `spans` are Datadog LLM Observability span events (`meta.metadata`, `metrics`, `tags`, `meta.input`,
+`meta.output`, `parent_id`, `start_ns`, `duration`, `status`).
+
+`prompt_version` is a hash of every instruction and tool definition the models see, and `code_version` is
+`APP_VERSION` or a hash of the backend source, so any answer can be tied to the exact prompts and code.
+
+### Datadog in AWS Lambda
 
 Instrument the function the same way as other Datadog-monitored Lambdas:
 
@@ -580,25 +578,25 @@ Instrument the function the same way as other Datadog-monitored Lambdas:
 a second time; the application's own `llm` spans carry the step names. It also removes AWS SDK spans (S3 reads) from
 APM. Check the variable names against the Datadog documentation for the layer version you deploy.
 
-#### Local development (`development/observability/`)
+When Datadog is enabled, the `trace_id` and span IDs are Datadog's, so an archived trace opens directly in Datadog.
 
-The chat app, the command-line tool, the evaluations and the tests capture the same span events in memory
-instead of sending them to Datadog: `capture.enable()` starts LLM Observability locally and replaces its span writer.
-No Datadog account, agent or network access is needed, and prompt and response text is always captured locally.
+### Local development (`development/observability/`)
+
+The chat app, the command-line tool, the evaluations and the tests also keep recent traces in memory
+(`capture.enable()`), with no Datadog account, agent or network access. The chat app and the CLI record prompt and
+response text locally (so the local archive under `data/traces` holds it too); the tests do not.
 
 - The chat app shows a **Model calls** panel under each answer: call count, input and output tokens, the largest
   call, time in the model, a timeline of every call (start, gap since the previous call, duration, tokens, stop
   reason, tools requested) and tool executions, and the full prompt and response of any call you pick.
 - `run_local --trace <file>` and the evaluations' `--traces` save the same per-question summary as JSON.
 
-To send local runs to Datadog instead, set `DD_LLMOBS_ENABLED=true`, `DD_API_KEY`, `DD_SITE` and
-`DD_LLMOBS_AGENTLESS_ENABLED=true`, and launch with `ddtrace-run`; the chat app then skips the local capture.
-
-The capture relies on a ddtrace internal, so `requirements.txt` pins the ddtrace minor version and the tests fail if
-an upgrade breaks it.
+To also send local runs to Datadog, set `DD_LLMOBS_ENABLED=true`, `DD_API_KEY`, `DD_SITE` and
+`DD_LLMOBS_AGENTLESS_ENABLED=true`, and launch with `ddtrace-run`; `TRACE_CONTENT` then decides whether text is
+recorded.
 
 Alongside these, turn on Bedrock model invocation logging (to an encrypted, restricted bucket; it holds full
-prompts) and CloudTrail data events for the document and audit buckets. Those record calls the application
+prompts) and CloudTrail data events for the document and trace archive buckets. Those record calls the application
 cannot misreport.
 
 ## Entry point
@@ -612,7 +610,7 @@ cannot misreport.
   tests. It takes already-loaded `documents` (for example a local file that was never saved) and adds
   `on_step` (progress display).
 
-Both validate the request, load the documents, run the agent, write the audit record and trace, and return a
+Both validate the request, load the documents, run the agent, archive the trace, and return a
 JSON-serializable response. They do not raise; the outcome is in `status`.
 
 ```python
@@ -626,8 +624,8 @@ response = ask_question(
     session_id="abc123",
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
-    app="my-service",            # recorded in the audit record
-    store=store, sink=sink,      # optional; reuse across requests in a long-lived process
+    app="my-service",            # recorded in the trace
+    store=store, archive=archive,  # optional; reuse across requests in a long-lived process
 )
 ```
 
@@ -641,7 +639,7 @@ response = ask_question(
 | `model_unavailable` | 503 | Bedrock throttled, timed out or was unreachable after retries |
 | `error` | 500 | anything else; `error` has the type and message, and the log has the stack trace |
 
-Other fields: `request_id` and `trace_id` (match the audit record and trace), `session_id`, `documents` (ID, name,
+Other fields: `request_id` and `trace_id` (match the archived and Datadog trace), `session_id`, `documents` (ID, name,
 kind, key, extraction warnings), `sources` (each evidence item with its passages, file and location, table
 result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
 `usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
@@ -652,7 +650,7 @@ never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `in
 
 The Lambda event is `{"question", "session_id", "group_name", "document_filenames", "chat_history", "clarification",
 "args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
-identifiers, because questions and history can contain PHI. It creates the document store and audit sink on the
+identifiers, because questions and history can contain PHI. It creates the document store and trace archive on the
 first request and reuses them while the Lambda stays warm.
 
 ## Future features

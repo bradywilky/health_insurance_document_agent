@@ -10,10 +10,9 @@ from backend.config.settings import MODELS
 from development.observability import capture
 from development.observability.streamlit_view import show_llm_calls
 
-# Capture model calls locally unless this process sends them to Datadog (DD_LLMOBS_ENABLED=true).
-LOCAL_CAPTURE = os.getenv('DD_LLMOBS_ENABLED', '').strip().lower() not in {'1', 'true'}
-if LOCAL_CAPTURE:
-    capture.enable()
+# Keep each answer's trace for the Model calls panel. Prompts and responses are recorded too, unless this process
+# also sends traces to Datadog (DD_LLMOBS_ENABLED=true); then TRACE_CONTENT decides, as in production.
+capture.enable(content=os.getenv('DD_LLMOBS_ENABLED', '').strip().lower() not in {'1', 'true'})
 
 AMBIGUITY_MODES = {'Off: answer directly': 'off', 'State assumptions': 'assumptions',
                    'Ask when ambiguous': 'ask'}
@@ -146,7 +145,7 @@ def ask(question, clarification=None):
                                 clarification=clarification, model=model, ambiguity=ambiguity, app='chat',
                                 on_step=lambda _:status.caption('Checking the selected sources…'))
         status.empty()
-        if LOCAL_CAPTURE and response['trace_id']:
+        if response['trace_id']:
             response['llm_trace'] = capture.summarize(capture.trace(response['trace_id']))
         if response['status'] in {'answered', 'needs_clarification'}:
             st.markdown(response['answer'])

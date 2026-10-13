@@ -1,8 +1,7 @@
-"""Local stand-in for Datadog LLM Observability: keeps the span events Datadog would receive, in memory.
+"""Keeps recent traces in memory for the Streamlit chat app, the command-line tool, evaluations and tests.
 
-Production code only talks to Datadog (backend/observability/llmobs.py). For the Streamlit chat app, the
-command-line tool, evaluations and tests, enable() starts ddtrace's LLM Observability locally and replaces its span
-writer with an in-memory one, so the same events are captured with no Datadog account, agent or network calls.
+backend/observability/tracing.py records every span whether or not Datadog is enabled; enable() adds a listener
+that keeps each finished trace here, so a run can be inspected with no Datadog account or network calls.
 
     capture.enable()
     response = ask_question_local(...)
@@ -10,68 +9,47 @@ writer with an in-memory one, so the same events are captured with no Datadog ac
 
     with capture.recording() as events:      # code that has no trace_id, e.g. run_document_agent
         run_document_agent(...)
-
-This replaces a private ddtrace attribute (the span writer). requirements.txt pins the ddtrace minor version, and
-development/tests/test_observability.py fails if a ddtrace upgrade breaks the swap.
 """
 from collections import OrderedDict
 from contextlib import contextmanager
 import os
 import threading
 
-ML_APP = 'health-insurance-document-agent-local'
+from backend.observability import tracing
+
 MAX_TRACES = 200
 _traces = OrderedDict()
 _recorders = []
 _lock = threading.Lock()
 
 
-class _Writer:
-    """Takes the place of ddtrace's LLMObsSpanWriter: keeps events instead of sending them."""
-
-    def enqueue(self, event):
-        with _lock:
-            _traces.setdefault(event['trace_id'], []).append(event)
-            _traces.move_to_end(event['trace_id'])
-            while len(_traces) > MAX_TRACES:
-                _traces.popitem(last=False)
-            for events in _recorders:
-                events.append(event)
-
-    def recreate(self):
-        return self
-
-    def __getattr__(self, name):
-        # start, stop, periodic, flush_queue and the rest of the writer interface have nothing to do here.
-        return lambda *args, **kwargs: None
+def _keep(trace):
+    with _lock:
+        _traces[trace['trace_id']] = trace['spans']
+        _traces.move_to_end(trace['trace_id'])
+        while len(_traces) > MAX_TRACES:
+            _traces.popitem(last=False)
+        for events in _recorders:
+            events.extend(trace['spans'])
 
 
 def enable(content=True):
-    """Capture LLM Observability events locally. content=True also captures prompts and responses
-    (TRACE_CONTENT=true). Safe to call repeatedly."""
-    from ddtrace.llmobs import LLMObs
-    from ddtrace.trace import tracer
+    """Keep finished traces in memory. content=True also records prompts and responses (TRACE_CONTENT=true).
+    Safe to call repeatedly."""
     if content:
         os.environ['TRACE_CONTENT'] = 'true'
-    if not LLMObs.enabled:
-        tracer.enabled = False  # nothing is sent to a Datadog agent locally
-        LLMObs.enable(agent_service=ML_APP, agentless_enabled=False, integrations_enabled=False)
-    if not LLMObs.enabled:
-        raise RuntimeError('LLM Observability could not be enabled (is DD_LLMOBS_ENABLED=false?)')
-    writer = _Writer()
-    LLMObs._instance._llmobs_span_writer = writer
-    LLMObs._instance.tracer._span_aggregator.llmobs_processor._llmobs_span_writer = writer
+    tracing.add_listener(_keep)
 
 
 def trace(trace_id):
-    """Every captured span event of one trace (one question), oldest first."""
+    """Every span event of one trace (one question), oldest first."""
     with _lock:
         return sorted(_traces.get(trace_id, []), key=lambda e: e['start_ns'])
 
 
 @contextmanager
 def recording():
-    """Collect the events captured while the block runs. Assumes nothing else runs questions meanwhile."""
+    """Collect the spans of traces that finish while the block runs. Assumes nothing else runs meanwhile."""
     events = []
     with _lock:
         _recorders.append(events)

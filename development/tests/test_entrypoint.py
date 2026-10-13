@@ -1,6 +1,8 @@
 import json
 
 import pytest
+
+from development.tests.conftest import archived
 from botocore.exceptions import ClientError
 
 from apps.api.lambda_handler import lambda_handler
@@ -52,13 +54,15 @@ def test_answer_from_saved_filenames(native_script, store, saved):
     ({'history': [{'role': 'system', 'content': 'x'}]}, 'history items'),
     ({'document_filenames': ['']}, 'nonempty strings'),
 ])
-def test_invalid_requests_are_reported_and_audited(kwargs, message, isolated_audit):
+def test_invalid_requests_are_reported_and_archived(kwargs, message, isolated_archive):
     request = {'question': 'Rate?', 'document_filenames': ['k'], **kwargs}
     response = ask_question(request.pop('question'), app='test', **request)
     assert response['status'] == 'invalid_request' and response['status_code'] == 400
     assert message in response['message'] and response['answer'] is None
-    lines = (next((isolated_audit / 'metadata' / 'questions').glob('*.jsonl'))).read_text().splitlines()
-    assert json.loads(lines[-1])['status'] == 'invalid_request'
+    [trace] = archived(isolated_archive, 'document_agent')
+    root = trace['spans'][0]
+    assert root['meta']['metadata']['status'] == 'invalid_request' and trace['status'] == 'error'
+    assert root['meta']['metadata']['request_id'] == response['request_id']
 
 
 @pytest.mark.parametrize('key', ['rates.txt', 'documents/preprocessed/rates.txt/manifest.json'])
@@ -140,14 +144,14 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
     assert lambda_handler({'document_filenames': [saved]}, None)['status_code'] == 400
-    assert module.clients.cache_info().misses == 1  # store and audit sink created once
+    assert module.clients.cache_info().misses == 1  # store and trace archive created once
     module.clients.cache_clear()
 
 
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
     assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'clarification', 'model',
-                          'ambiguity', 'app', 'store', 'sink'}
+                          'ambiguity', 'app', 'store', 'archive'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 
