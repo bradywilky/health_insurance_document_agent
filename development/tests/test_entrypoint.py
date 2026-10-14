@@ -91,10 +91,11 @@ def test_invalid_group_name(store, group):
     assert response['status'] == 'invalid_request' and 'group_name' in response['message']
 
 
-def test_s3_requires_a_group_name():
+def test_s3_requires_a_group_name(monkeypatch):
     from development.tests.test_s3_documents import MemoryS3
     from backend.storage.s3 import S3DocumentStore
-    response = ask_question('Rate?', document_filenames=['rates.txt'], store=S3DocumentStore(MemoryS3(), 'b'))
+    monkeypatch.setattr('backend.entrypoint.configured_store', lambda **kwargs: S3DocumentStore(MemoryS3(), 'b'))
+    response = ask_question('Rate?', document_filenames=['rates.txt'])
     assert response['status'] == 'invalid_request' and 'group_name is required' in response['message']
 
 
@@ -137,22 +138,19 @@ def test_aws_errors_are_classified(monkeypatch, code, status):
 
 
 def test_lambda_handler_maps_the_event(native_script, store, saved):
-    from apps.api import lambda_handler as module
-    module.clients.cache_clear()
     answered(native_script, store.load(saved).id)
     response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'user_id': 'u-1042',
                                'document_filenames': [saved],
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
     assert lambda_handler({'document_filenames': [saved]}, None)['status_code'] == 400
-    assert module.clients.cache_info().misses == 1  # store and trace archive created once
-    module.clients.cache_clear()
+    assert configured_store(read_only=True) is configured_store(read_only=True)  # reused across requests
 
 
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
     assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'user_id',
-                          'clarification', 'model', 'ambiguity', 'app_id', 'store', 'archive'}
+                          'clarification', 'model', 'ambiguity', 'app_id'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 

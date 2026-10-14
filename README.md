@@ -626,7 +626,6 @@ response = ask_question(
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
     app_id="my-service",         # which application called; a Datadog tag
-    store=store, archive=archive,  # optional; reuse across requests in a long-lived process
 )
 ```
 
@@ -651,8 +650,8 @@ never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `in
 
 The Lambda event is `{"question", "session_id", "user_id", "group_name", "document_filenames", "chat_history",
 "clarification", "args": {"model", "ambiguity", "app_id"}}`, and the handler returns the response unchanged. It logs only
-identifiers, because questions and history can contain PHI. It creates the document store and trace archive on the
-first request and reuses them while the Lambda stays warm.
+identifiers, because questions and history can contain PHI. The document store and trace archive come from the
+environment; each is created on the first request and reused while the Lambda stays warm.
 
 ## Future features
 

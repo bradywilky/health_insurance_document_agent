@@ -60,6 +60,11 @@ def isolated_archive(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     # setenv, not delenv, so the value is restored even after an app under test changes it.
     monkeypatch.setenv('TRACE_CONTENT', 'false')
+    # The configured store and archive are reused while settings match; start each test without them.
+    from backend.observability import archive
+    from backend.storage import s3
+    archive._archive.cache_clear()
+    s3._store.cache_clear()
     return tmp_path / 'archive'
 
 

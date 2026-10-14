@@ -86,11 +86,12 @@ class BrokenArchive:
 
 
 def test_archive_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
+    monkeypatch.setattr('backend.entrypoint.configured_archive', BrokenArchive)
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     assert result['status'] == 'answered' and 'disk full' in caplog.text
     monkeypatch.setenv('TRACE_ARCHIVE_REQUIRED', 'true')
     with pytest.raises(RuntimeError, match='Trace could not be archived'):
-        ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
+        ask_question_local(QUESTION, documents=[rates_run], app_id='test')
 
 
 def test_s3_archive_writes_one_encrypted_object_per_trace():

@@ -25,6 +25,8 @@ from backend.agents import document_agent
 from backend.agents.llm import Usage
 from backend.config.settings import MODELS
 from backend.observability import tracing
+from backend.storage.documents import check_group_name
+from backend.storage.s3 import configured_store
 from backend.observability.archive import (code_version, configured_archive, digest, document_summary,
                                            evidence_summary)
 
@@ -51,7 +53,7 @@ class RequestError(ValueError):
 
 
 def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, user_id=None,
-                 clarification=None, model=None, ambiguity='off', app_id='api', store=None, archive=None):
+                 clarification=None, model=None, ambiguity='off', app_id='api'):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
     document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
@@ -64,16 +66,17 @@ def ask_question(question, *, document_filenames, group_name=None, history=None,
     model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
     ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
     app_id         which application called; a tag on the trace
-    store, archive document store and trace archive; default from the environment. A long-lived process (a warm
-                   Lambda) can create them once and pass them to reuse their AWS clients across requests.
+
+    Documents are read from the store the environment configures (backend/storage/s3.py), and the trace is saved
+    to the configured archive (backend/observability/archive.py); both are reused across requests.
     """
-    return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name, store),
+    return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name),
                 history=history, session_id=session_id, user_id=user_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app_id=app_id, archive=archive, group=group_name)
+                ambiguity=ambiguity, app_id=app_id, group=group_name)
 
 
 def ask_question_local(question, *, documents, history=None, session_id=None, user_id=None, clarification=None,
-                       model=None, ambiguity='off', app_id='local', archive=None, on_step=None):
+                       model=None, ambiguity='off', app_id='local', on_step=None):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
@@ -82,16 +85,16 @@ def ask_question_local(question, *, documents, history=None, session_id=None, us
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
                 session_id=session_id, user_id=user_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app_id=app_id, archive=archive, on_step=on_step)
+                ambiguity=ambiguity, app_id=app_id, on_step=on_step)
 
 
-def _run(question, *, selected, load, history, session_id, user_id, clarification, model, ambiguity, app_id, archive,
+def _run(question, *, selected, load, history, session_id, user_id, clarification, model, ambiguity, app_id,
          group=None, on_step=None):
     """Validate, load and run the agent inside one trace, which is archived when it ends."""
     usage = Usage()
     loaded, result, error, status = [], None, None, 'error'
     with tracing.span('agent', 'document_agent', session_id=session_id,
-                      archive=archive if archive is not None else configured_archive()) as root:
+                      archive=configured_archive()) as root:
         request_id = uuid.uuid4().hex
         text = question if isinstance(question, str) else ''
         tracing.annotate(root, metadata={
@@ -164,13 +167,10 @@ def _validate(question, history, clarification, model, ambiguity, selected):
     return question.strip(), turns, clarification.strip() if clarification else None
 
 
-def _load(filenames, group_name, store):
-    from backend.storage.documents import check_group_name
+def _load(filenames, group_name):
     if not all(isinstance(f, str) and f for f in filenames):
         raise RequestError('invalid_request', 'document_filenames must be nonempty strings.')
-    if store is None:
-        from backend.storage.s3 import configured_store
-        store = configured_store(read_only=True)
+    store = configured_store(read_only=True)
     if group_name is not None:
         try:
             store = store.for_group(check_group_name(group_name))
