@@ -416,6 +416,9 @@ Real exports often spell one value several ways (`Tehran`, `THR`, `tehr@n`), sto
   and `search_all_sheets` read them directly. A spreadsheet's text blocks (what `read_document` pages through)
   hold only narrative sheets and the notes around tables, so a sheet of any size never uses up the 2,000-block
   cap. Semantic profiles sample the first 15 rows of each data sheet from its CSV.
+- **Sheets with the same columns.** The sheet list (`list_sheets`) reports which data sheets have identical
+  columns (`_same_columns`) and, for near matches, the columns only one side has (`_similar_columns`), so the
+  model does not compare long column lists itself.
 
 The planner is told to check column hints, combine plausible variants with `recode` while still
 reporting the exact-match figure, and to use `group_by` for "which X" questions. The writer states

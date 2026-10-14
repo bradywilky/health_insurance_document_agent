@@ -4,7 +4,7 @@ import re
 
 from backend.config.settings import get_model_config, MODELS
 import os
-from backend.agents.evidence import bounded, compact, numeric_display_check
+from backend.agents.evidence import bounded, compact, numeric_display_check, bounded_items
 from backend.agents.llm import LLM, Usage
 from backend.tools.documents import selected_documents, execute_document_tool
 from langgraph.graph import StateGraph, START, END
@@ -57,7 +57,8 @@ selected source remains unread. For short relevant text files prefer read_docume
 For payment questions distinguish scheduled/allowed amount, member cost sharing and insurer payment.
 For utilization questions distinguish authorization balances from annual benefit balances.
 Retrieve actual passages or records before answering. The list_documents index is not evidence of document contents;
-list_sheets is evidence of a workbook's sheets and columns, not of the values inside them.
+list_sheets is evidence of a workbook's sheets and columns, not of the values inside them. Its _same_columns and
+_similar_columns already compare the data sheets' columns; use them rather than comparing column lists yourself.
 Use query_table for totals, not partial search snippets. Never repeat an identical request.
 Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
 and date arithmetic or comparisons with date_calculate, before calling answer.
@@ -353,7 +354,7 @@ def node_synthesize(state: DocumentState) -> dict:
                               'Try a different question or inspect extraction warnings.', limitations, stats,
                        status='no_evidence')
     usable = substantive + [e for e in evidence if e['tool'] in {'calculate', 'date_calculate'}]
-    payload = {'question': question, 'evidence': bounded(usable, max_chars=50000),
+    payload = {'question': question, 'evidence': bounded_items(usable, max_chars=50000),
                'limitations': limitations, 'unexamined_documents': unexamined}
     if state.get('interpretation'):
         payload['interpretation'] = state['interpretation']

@@ -80,6 +80,26 @@ def _query_many(sheet_names, params, load, sheets):
     return result
 
 
+def _column_comparison(listed):
+    """Which data sheets have the same columns, and how near matches differ, so the model need not compare
+    column lists by eye. Column order is ignored."""
+    columns = {name: s['columns'] for name, s in listed.items() if s['sheet_type'] == 'data' and s['columns']}
+    groups = {}
+    for name, names in columns.items():
+        groups.setdefault(frozenset(names), []).append(name)
+    same = [{'sheets': group, 'column_count': len(key)} for key, group in groups.items() if len(group) > 1]
+    keys = list(groups)
+    similar = []
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            shared = len(a & b)
+            if shared and shared >= 0.5 * max(len(a), len(b)):
+                similar.append({'sheets': [groups[a], groups[b]], 'shared_columns': shared,
+                                'only_in_first': sorted(a - b), 'only_in_second': sorted(b - a)})
+    return {'_same_columns': same or 'No two data sheets have the same columns.',
+            '_similar_columns': similar[:10]}
+
+
 def execute_table_tool(
     tool_name: str,
     tool_input: dict,
@@ -155,6 +175,7 @@ def execute_table_tool(
             }
             for name, s in sheets.items()
         }
+        result.update(_column_comparison(result))
 
     elif tool_name == "get_sheet_schema":
         sheet_meta = sheets.get(sheet_name)

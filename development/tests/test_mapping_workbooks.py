@@ -142,3 +142,32 @@ def test_missing_column_error_suggests_sheet_column(workbook):
     result = query(workbook, sheet_names=['Billing', 'Shipping'], group_by=['Subject Area'],
                    aggregations=[{'op': 'count_rows', 'as': 'n'}])
     assert '_sheet' in result['error'] and 'Legacy Name' in result['error']
+
+
+def test_list_sheets_reports_sheets_with_the_same_columns(tmp_path):
+    import pandas as pd
+    from backend.preprocessing.documents import ingest_document
+    from backend.tools.documents import execute_document_tool
+    wide = [f'Column {i:02}' for i in range(32)]
+    path = tmp_path / 'crosswalk.xlsx'
+    with pd.ExcelWriter(path) as writer:
+        for name, columns in [('Members', wide), ('Claims', list(reversed(wide))),
+                              ('Providers', wide[:-1] + ['Directory Flag']), ('Measures', ['ID', 'Measure'])]:
+            pd.DataFrame([[f'{name}-{c}' for c in columns]], columns=columns).to_excel(writer, sheet_name=name, index=False)
+    doc = ingest_document(path.name, path.read_bytes())
+    listed = execute_document_tool('table_tool', {'document_id': doc.id, 'name': 'list_sheets'}, {doc.id: doc})
+    result = listed['table_result']
+    assert result['_same_columns'] == [{'sheets': ['Members', 'Claims'], 'column_count': 32}]
+    [near] = result['_similar_columns']
+    assert near['sheets'] == [['Members', 'Claims'], ['Providers']] and near['shared_columns'] == 31
+    assert near['only_in_first'] == ['Column 31'] and near['only_in_second'] == ['Directory Flag']
+    assert len(result['Members']['columns']) == 32
+
+
+def test_writer_evidence_trims_only_the_largest_items():
+    from backend.agents.evidence import bounded_items, compact
+    small = {'id': 'E1', 'columns': [f'Column {i:02}' for i in range(32)]}
+    large = {'id': 'E2', 'rows': [{'text': 'x' * 900} for _ in range(100)]}
+    kept = bounded_items([small, large], max_chars=20000)
+    assert kept[0] == small and kept[1]['truncated'] is True
+    assert len(compact(kept)) <= 20000
