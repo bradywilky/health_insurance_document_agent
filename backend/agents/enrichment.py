@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import json
 import re
 
-from backend.agents.turn_session import TurnSession, ProseReply, validate_action
+from backend.agents.turn_session import TurnSession, ProseReply, TruncatedReply, validate_action
 
 PROFILE_VERSION = 1
 CHUNK_CHARS = 16000
@@ -35,6 +35,8 @@ Copy every quote EXACTLY from the text (a short span, 3-25 words); never paraphr
 - columns (spreadsheets): role of important columns: identifier, name, status, code, description, amount,
   quantity, date, flag or other, with a short note (e.g. naming conventions between columns).
 - status_values: meanings of status words used in the data, quoted from where the document explains them.
+Keep the profile compact so it fits in one reply: at most 30 glossary terms and 40 columns (the most important),
+meanings and notes under 15 words.
 Call record_profile exactly once.'''
 
 
@@ -57,14 +59,26 @@ PROFILE_SPEC = {'toolSpec': {
             'effective_dates': _items({'label': TEXT, 'value': TEXT, 'quote': TEXT}, ['label', 'value', 'quote'], 10),
             'identifiers': _items({'identifier': TEXT, 'quote': TEXT}, ['identifier', 'quote'], 10),
             'references': _items({'target': TEXT, 'relationship': {'type': 'string', 'enum': RELATIONSHIPS},
-                                  'quote': TEXT}, ['target', 'relationship', 'quote'], 20),
+                                  'quote': TEXT}, ['target', 'relationship', 'quote'], 15),
             'glossary': _items({'term': TEXT, 'meaning': TEXT,
                                 'source': {'type': 'string', 'enum': ['defined', 'inferred']}, 'quote': TEXT},
-                               ['term', 'meaning', 'source'], 40),
+                               ['term', 'meaning', 'source'], 30),
             'columns': _items({'sheet': TEXT, 'column': TEXT, 'role': {'type': 'string', 'enum': ROLES},
-                               'note': TEXT}, ['sheet', 'column', 'role'], 60),
+                               'note': TEXT}, ['sheet', 'column', 'role'], 40),
             'status_values': _items({'value': TEXT, 'meaning': TEXT, 'quote': TEXT},
-                                    ['value', 'meaning', 'quote'], 20)}}}}}
+                                    ['value', 'meaning', 'quote'], 15)}}}}}
+LIST_LIMITS = {name: field['maxItems'] for name, field in
+               PROFILE_SPEC['toolSpec']['inputSchema']['json']['properties'].items() if field.get('type') == 'array'}
+
+
+def _clip(profile):
+    """Keep the first entries of an over-long list: the model ranks by importance, and a long list is no reason to
+    lose the whole profile."""
+    if isinstance(profile, dict):
+        for name, limit in LIST_LIMITS.items():
+            if isinstance(profile.get(name), list):
+                profile[name] = profile[name][:limit]
+    return profile
 
 
 def _norm(text):
@@ -129,10 +143,19 @@ def _request(llm, doc, text, part, parts):
     for attempt in range(ATTEMPTS):
         try:
             actions = session.request()
-            if len(actions) != 1 or actions[0]['tool'] != 'record_profile':
+            if not actions or any(a['tool'] != 'record_profile' for a in actions):
                 raise ValueError('Call record_profile exactly once')
-            validate_action(actions[0], [PROFILE_SPEC])
-            return actions[0]['parameters']
+            # Several complete calls in one reply are partial profiles; they are merged like chunks.
+            for action in actions:
+                _clip(action['parameters'])
+                validate_action(action, [PROFILE_SPEC])
+            return [a['parameters'] for a in actions]
+        except TruncatedReply:
+            if attempt == ATTEMPTS - 1:
+                raise ValueError('No valid profile returned: every reply was cut off at the output limit') from None
+            session.feedback([], error='Your reply was cut off at the output limit, so it was not recorded. Call '
+                                       'record_profile once with a shorter profile: fewer glossary terms and columns, '
+                                       'meanings and notes under 15 words.')
         except ProseReply:
             # Maverick sometimes writes the profile as text; a plain nudge usually gets the tool call.
             if attempt == ATTEMPTS - 1:
@@ -232,7 +255,7 @@ def enrich(doc, llm):
     chunks, total = _chunks(doc)
     if not chunks:
         raise ValueError('No extracted text to profile')
-    parts = [_request(llm, doc, text, i, len(chunks)) for i, text in enumerate(chunks, 1)]
+    parts = [part for i, text in enumerate(chunks, 1) for part in _request(llm, doc, text, i, len(chunks))]
     profile = ground(_merge(parts), doc)
     sent = sum(len(c) for c in chunks)
     profile['meta'] = {'profile_version': PROFILE_VERSION, 'model_id': getattr(llm, 'model_id', None),

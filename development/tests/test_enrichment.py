@@ -88,6 +88,33 @@ def test_enrich_retries_then_records_metadata():
         enrich(doc, Scripted('prose', {'document_type': 'x'}, {'document_type': 'x'}))
 
 
+class Replies(Scripted):
+    """Each reply is (stop reason, [profile inputs]); several inputs become several record_profile calls."""
+
+    def converse(self, system, messages, tool_config=None):
+        self.requests.append(json.loads(json.dumps(messages)))
+        stop, inputs = self.replies.pop(0)
+        return {'stopReason': stop, 'output': {'message': {'role': 'assistant', 'content': [
+            {'toolUse': {'toolUseId': f'p{len(self.requests)}-{i}', 'name': 'record_profile', 'input': p}}
+            for i, p in enumerate(inputs)]}}}
+
+
+def test_cut_off_reply_is_retried_with_a_shorter_request():
+    doc = ingest_document('amendment.txt', AMENDMENT)
+    llm = Replies(('max_tokens', [profile(), profile()]), ('tool_use', [profile()]))
+    result = enrich(doc, llm)
+    assert result['status'] == 'executed' and 'cut off at the output limit' in json.dumps(llm.requests[1][-1])
+
+
+def test_several_complete_calls_merge_and_long_lists_are_clipped():
+    doc = ingest_document('amendment.txt', AMENDMENT)
+    pos = profile(glossary=[profile()['glossary'][0]])
+    many = profile(glossary=[{'term': f'T{i}', 'meaning': 'x', 'source': 'inferred', 'quote': ''}
+                             for i in range(50)])
+    result = enrich(doc, Replies(('tool_use', [pos, many])))
+    assert any(g['term'] == 'POS' for g in result['glossary'])
+
+
 def test_long_documents_are_chunked_and_merged():
     paragraphs = [f'Paragraph {i}: ' + 'filler text ' * 120 for i in range(40)]
     paragraphs[1] = 'Status: EXECUTED.'
