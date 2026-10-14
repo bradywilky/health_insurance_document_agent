@@ -60,6 +60,8 @@ def isolated_archive(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     # setenv, not delenv, so the value is restored even after an app under test changes it.
     monkeypatch.setenv('TRACE_CONTENT', 'false')
+    # Scripted model replies assume no reasoning step, whatever a local .env sets.
+    monkeypatch.setenv('PLANNER_REASONING', 'false')
     # The configured store and archive are reused while settings match; start each test without them.
     from backend.observability import archive
     from backend.storage import s3

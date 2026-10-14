@@ -58,6 +58,16 @@ def _profile(frame):
             for col in frame.columns]
 
 
+def _label_value_list(raw, header):
+    """A cover or 'start here' tab: two filled columns of labels and long text. Even its would-be header row pairs
+    a label with a sentence, which a real header does not."""
+    used = [c for c in raw.columns if raw[c].map(_present).any()]
+    if len(used) != 2:
+        return False
+    lengths = sorted(len(_text(v)) for v in raw[used[1]] if _present(v))
+    return len(_text(raw.iloc[header][used[1]])) > 40 and lengths[len(lengths) // 2] > 40
+
+
 def normalize_sheet(name, raw, override=None):
     override = override or {}
     raw = raw.copy().where(raw.notna(), None)
@@ -67,6 +77,8 @@ def normalize_sheet(name, raw, override=None):
     header = next((i for i in candidates if counts.iloc[i] >= max(counts.max() * .6, 2)), None)
     if header is None and len(raw.columns) == 1 and len(raw) > 1 and len(_text(raw.iloc[0, 0])) < 40:
         header = 0
+    if header is not None and _label_value_list(raw, header):
+        header = None
     kind = "metadata" if (re.search(r"about|read.?me|version|history|notes|instructions", name, re.I)
                            or header is None) else "data"
     kind = override.get("sheet_type", kind)

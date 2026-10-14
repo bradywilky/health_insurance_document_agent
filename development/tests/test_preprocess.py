@@ -86,6 +86,20 @@ def test_blank_header_column_and_duplicate_names():
     assert meta['columns'][-1]['likely_junk'] is True
 
 
+def test_label_value_cover_tab_is_narrative():
+    raw = pd.DataFrame([['Workbook', 'Example Retail Company - Multi-Sheet Data Model Overview'],
+                        ['Scope', 'Stores, products, orders and returns for the sample regions and periods'],
+                        ['IMPORTANT', 'Order counts beyond the verified samples are synthetic and illustrative only.'],
+                        ['Usage', 'Use Store ID to join Stores, Orders and Returns across the data tabs.']])
+    frame, meta = normalize_sheet('Start Here', raw)
+    assert meta['sheet_type'] == 'metadata' and 'synthetic' in ' '.join(frame['text'])
+    # A real two-column table with short headers stays a table.
+    table = pd.DataFrame([['Term', 'Definition'], ['Allowed amount', 'The maximum the plan pays for a covered '
+                          'service before member cost sharing.'], ['Copay', 'A fixed amount the member pays for a '
+                          'covered service at the time of care.']])
+    assert normalize_sheet('Glossary', table)[1]['sheet_type'] == 'data'
+
+
 def test_ragged_csv_keeps_identifiers(tmp_path):
     file = tmp_path / 'ragged.csv'
     file.write_text('Insurance export\n\nID,Value\n0012,10\n0013,0\n', encoding='utf-8')
