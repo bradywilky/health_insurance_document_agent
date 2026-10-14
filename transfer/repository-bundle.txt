@@ -2013,7 +2013,7 @@ def examined_documents(evidence):
     return examined
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/enrichment.py", "characters": 13575, "sha256": "230d6867652901d09849823e80294d95e8011ba8b14aee23949df01787ec8340"}
+{"path": "backend/agents/enrichment.py", "characters": 14092, "sha256": "3a9b59d9bd17ef2e8da876f274887c9d2c05dc61a0ba836c2f370eef28ebebe9"}
 """Optional semantic profile generated once per document at upload: a document card, references to other
 documents, a glossary, column roles and status meanings.
 
@@ -2025,12 +2025,13 @@ from datetime import datetime, timezone
 import json
 import re
 
-from backend.agents.turn_session import TurnSession, validate_action
+from backend.agents.turn_session import TurnSession, ProseReply, validate_action
 
 PROFILE_VERSION = 1
 CHUNK_CHARS = 16000
 MAX_CHUNKS = 6
 SAMPLE_ROWS = 15  # per spreadsheet data tab; narrative tabs are sent in full
+ATTEMPTS = 3  # per chunk: the first request plus two corrections
 RELATIONSHIPS = ['amends', 'supersedes', 'depends_on', 'implements', 'references']
 ROLES = ['identifier', 'name', 'status', 'code', 'description', 'amount', 'quantity', 'date', 'flag', 'other']
 
@@ -2141,15 +2142,20 @@ def _chunks(doc):
 def _request(llm, doc, text, part, parts):
     payload = {'filename': doc.name, 'type': doc.kind, 'part': f'{part} of {parts}', 'text': text}
     session = TurnSession(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
-    for attempt in range(2):
+    for attempt in range(ATTEMPTS):
         try:
             actions = session.request()
             if len(actions) != 1 or actions[0]['tool'] != 'record_profile':
                 raise ValueError('Call record_profile exactly once')
             validate_action(actions[0], [PROFILE_SPEC])
             return actions[0]['parameters']
+        except ProseReply:
+            # Maverick sometimes writes the profile as text; a plain nudge usually gets the tool call.
+            if attempt == ATTEMPTS - 1:
+                raise ValueError('No valid profile returned: the model replied with text instead of a tool call') from None
+            session.feedback([], error='Your reply was text, not a tool call. Call record_profile now with the profile.')
         except (ValueError, KeyError, TypeError) as exc:
-            if attempt:
+            if attempt == ATTEMPTS - 1:
                 raise ValueError(f'No valid profile returned: {exc}') from None
             session.feedback([], error=f'Invalid record_profile call: {exc}. Call record_profile once with the schema.')
 
@@ -7984,7 +7990,7 @@ def test_in_text_evidence_ids_are_removed(native_script):
     assert not any('citation' in w for w in result['limitations'])
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_enrichment.py", "characters": 11410, "sha256": "f2d141d8c866688236cd39afe392f116d55ba3e4296553b216b9debb92989d23"}
+{"path": "development/tests/test_enrichment.py", "characters": 11517, "sha256": "af0878ada65352c60a16d599ea18137b990244eb742db7e3cb68b961f2d087f3"}
 """Semantic profiles: grounding rules, chunk merging, repair, storage, planner hints. Model replies are scripted."""
 import json
 
@@ -8064,14 +8070,15 @@ class Scripted:
             {'toolUse': {'toolUseId': f'p{len(self.requests)}', 'name': 'record_profile', 'input': reply}}]}}}
 
 
-def test_enrich_retries_once_then_records_metadata():
+def test_enrich_retries_then_records_metadata():
     doc = ingest_document('amendment.txt', AMENDMENT)
-    llm = Scripted('Here is the profile in prose.', profile())
+    llm = Scripted('Here is the profile in prose.', 'Still prose.', profile())
     result = enrich(doc, llm)
-    assert len(llm.requests) == 2 and result['meta']['model_id'] == 'test-model'
+    assert len(llm.requests) == 3 and result['meta']['model_id'] == 'test-model'
+    assert 'Call record_profile now' in json.dumps(llm.requests[1][-1])
     assert result['meta']['coverage']['complete'] is True
     with pytest.raises(ValueError, match='No valid profile'):
-        enrich(doc, Scripted('prose', {'document_type': 'x'}))
+        enrich(doc, Scripted('prose', {'document_type': 'x'}, {'document_type': 'x'}))
 
 
 def test_long_documents_are_chunked_and_merged():
