@@ -114,7 +114,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 48932, "sha256": "fd91b1ad1272e89d34bd875afe1837d5aa99cbfc05ce0c2d8fa2e0ad340533c2"}
+{"path": "README.md", "characters": 49016, "sha256": "d63b14dba1472ab065b903db2561fb9ff3290768630f83723bfc1ec053edd08e"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -638,9 +638,9 @@ metrics and content, and share the `trace_id`. The chat app shows the first 12 c
 under every answer.
 
 ```text
-agent     document_agent          request and session IDs, app, group, code and prompt versions, model,
-                                  ambiguity mode, documents, question/answer SHA-256, status, error, totals,
-                                  protocol stats, coverage, evidence summary (tool, document, locations; no text)
+agent     document_agent          request, session, user and app IDs, group, code and prompt versions,
+                                  model, ambiguity mode, documents, question/answer SHA-256, status, error,
+                                  totals, protocol stats, coverage, evidence summary (tool, document, locations)
   workflow  init | assess | plan | tools | synthesize
     llm       <step name>           model, input/output tokens, stop reason, tool calls requested, latency
     tool      <tool name>           evidence ID, document IDs, match/row counts; error status
@@ -739,9 +739,10 @@ response = ask_question(
     document_filenames=["rates.txt", "benefit_summary.pdf"],
     history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
     session_id="abc123",
+    user_id="u-1042",            # who asked; a Datadog tag
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
-    app="my-service",            # recorded in the trace
+    app_id="my-service",         # which application called; a Datadog tag
     store=store, archive=archive,  # optional; reuse across requests in a long-lived process
 )
 ```
@@ -765,8 +766,8 @@ result or calculation, and whether it is partial), `evidence` (raw tool output),
 `<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/` in `DOCUMENTS_S3_BUCKET`, so callers
 never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `invalid_request`.
 
-The Lambda event is `{"question", "session_id", "group_name", "document_filenames", "chat_history", "clarification",
-"args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
+The Lambda event is `{"question", "session_id", "user_id", "group_name", "document_filenames", "chat_history",
+"clarification", "args": {"model", "ambiguity", "app_id"}}`, and the handler returns the response unchanged. It logs only
 identifiers, because questions and history can contain PHI. It creates the document store and trace archive on the
 first request and reuses them while the Lambda stays warm.
 
@@ -788,14 +789,15 @@ Features that work or are designed but are not in the current product requiremen
 {"path": "apps/api/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/api/lambda_handler.py", "characters": 2057, "sha256": "f4c7da8242cf96bc9134a282ac80dbf9cfaf90b0a8b8557407f2e19add85a0e8"}
+{"path": "apps/api/lambda_handler.py", "characters": 2117, "sha256": "0b9a8bb9dfe7fc89f968448a1e9af16651c1306d20fdf2dccded269d9aa0d032"}
 """AWS Lambda handler: a thin adapter from the event to backend.entrypoint.ask_question.
 
 Event:
-    {"question": "...", "session_id": "...", "group_name": "aol.com", "document_filenames": ["rates.txt", ...],
+    {"question": "...", "session_id": "...", "user_id": "...", "group_name": "aol.com",
+     "document_filenames": ["rates.txt", ...],
      "chat_history": [{"role": "user" | "assistant", "content": "..."}],
      "clarification": "<chosen reading, after a needs_clarification response>",
-     "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_name": "..."}}
+     "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_id": "..."}}
 
 Returns the ask_question response (status, status_code, answer or message, sources, limitations, request_id, ...).
 Configure storage, trace archive and model settings with the same environment variables as the apps (.env.example).
@@ -829,10 +831,11 @@ def lambda_handler(event, context):
         group_name=event.get('group_name'),
         history=event.get('chat_history') or [],
         session_id=event.get('session_id'),
+        user_id=event.get('user_id'),
         clarification=event.get('clarification'),
         model=args.get('model'),
         ambiguity=args.get('ambiguity', 'off'),
-        app=args.get('app_name') or 'lambda',
+        app_id=args.get('app_id') or 'lambda',
         store=store,
         archive=archive,
     )
@@ -843,7 +846,7 @@ def lambda_handler(event, context):
 {"path": "apps/chat/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/chat/app.py", "characters": 9762, "sha256": "8d5ef7e5f8e8aa4d217e9f2ea9e54d696880dbb87494d2a42224f9051c383a8e"}
+{"path": "apps/chat/app.py", "characters": 9765, "sha256": "e61a3d680feb7d0f6b4393e06dffc3907f60f4bc27b6eba5f69be63bfd6f5590"}
 """Saved-document selection and chat. Run: streamlit run apps/chat/app.py"""
 import os
 from dotenv import load_dotenv
@@ -988,7 +991,7 @@ def ask(question, clarification=None):
         status = st.empty()
         # The documents were loaded above for display; pass them so they are not loaded twice.
         response = ask_question_local(question, documents=docs, history=history, session_id=st.session_state.session_id,
-                                clarification=clarification, model=model, ambiguity=ambiguity, app='chat',
+                                clarification=clarification, model=model, ambiguity=ambiguity, app_id='chat',
                                 on_step=lambda _:status.caption('Checking the selected sources…'))
         status.empty()
         if response['trace_id']:
@@ -2384,7 +2387,7 @@ def get_model_config():
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/entrypoint.py", "characters": 14047, "sha256": "c970b649f51e62a7035dd77c246d55222eb586cd9f5982486c72053dced99e52"}
+{"path": "backend/entrypoint.py", "characters": 14290, "sha256": "cd225e10a20988cfc8e70f89cddcadc7d38d22345b38963b326dd70a6eb3a06c"}
 """Single entry point for document question answering.
 
 ask_question is the production entry point (the Lambda handler calls it with a group and saved filenames).
@@ -2437,29 +2440,30 @@ class RequestError(ValueError):
         self.status = status
 
 
-def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, clarification=None,
-                 model=None, ambiguity='off', app='api', store=None, archive=None):
+def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, user_id=None,
+                 clarification=None, model=None, ambiguity='off', app_id='api', store=None, archive=None):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
     document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
                    <DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/
     group_name     the group folder, e.g. 'aol.com'; default DOCUMENTS_GROUP_NAME. Required for S3 storage.
     history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
-    session_id     conversation identifier, recorded in the trace
+    session_id     conversation identifier; Datadog groups the conversation's traces by it
+    user_id        who asked, e.g. from the signed-in user's profile; a tag on the trace
     clarification  the reading the user chose after a needs_clarification response
     model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
     ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
-    app            caller name recorded in the trace
+    app_id         which application called; a tag on the trace
     store, archive document store and trace archive; default from the environment. A long-lived process (a warm
                    Lambda) can create them once and pass them to reuse their AWS clients across requests.
     """
     return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name, store),
-                history=history, session_id=session_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app=app, archive=archive, group=group_name)
+                history=history, session_id=session_id, user_id=user_id, clarification=clarification, model=model,
+                ambiguity=ambiguity, app_id=app_id, archive=archive, group=group_name)
 
 
-def ask_question_local(question, *, documents, history=None, session_id=None, clarification=None, model=None,
-                       ambiguity='off', app='local', archive=None, on_step=None):
+def ask_question_local(question, *, documents, history=None, session_id=None, user_id=None, clarification=None,
+                       model=None, ambiguity='off', app_id='local', archive=None, on_step=None):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
@@ -2467,11 +2471,11 @@ def ask_question_local(question, *, documents, history=None, session_id=None, cl
     on_step        callback after each research step, for a progress display
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
-                session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
-                archive=archive, on_step=on_step)
+                session_id=session_id, user_id=user_id, clarification=clarification, model=model,
+                ambiguity=ambiguity, app_id=app_id, archive=archive, on_step=on_step)
 
 
-def _run(question, *, selected, load, history, session_id, clarification, model, ambiguity, app, archive,
+def _run(question, *, selected, load, history, session_id, user_id, clarification, model, ambiguity, app_id, archive,
          group=None, on_step=None):
     """Validate, load and run the agent inside one trace, which is archived when it ends."""
     usage = Usage()
@@ -2484,7 +2488,7 @@ def _run(question, *, selected, load, history, session_id, clarification, model,
             'request_id': request_id, 'ambiguity_mode': ambiguity, 'model': model, 'group_name': group,
             'code_version': code_version(), 'prompt_version': document_agent.PROMPT_VERSION,
             'question_sha256': digest(text), 'question_chars': len(text), 'clarified': bool(clarification)},
-            tags={'app': app})
+            tags={'app_id': app_id, 'user_id': user_id})
         tracing.annotate_content(root, input_data={'question': question, 'clarification': clarification})
         try:
             question, history, clarification = _validate(question, history, clarification, model, ambiguity,
@@ -2624,7 +2628,7 @@ def _response(status, result, error, loaded, request_id, trace_id, session_id, q
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/SPANS.md", "characters": 12646, "sha256": "b3cfabd385596cb21ec03689ee087288153407bf35f62c0ddf5b7d38169a6cde"}
+{"path": "backend/observability/SPANS.md", "characters": 12815, "sha256": "5991c8f5a54aa6cf520f098203e821d49ce4d8d56c97422cd97bb0b02c3b6f85"}
 # Trace spans
 
 Every span the application records, and every field each one carries. The same spans go to Datadog LLM
@@ -2687,7 +2691,8 @@ finished trace is archived.
 | `protocol` | metadata | Research statistics (steps, retries, prompts); excludes the ambiguity assessment, which quotes the question |
 | `coverage`, `limitations_count` | metadata | Files examined, auto-read and not examined; number of limitations |
 | `evidence` | metadata | Per evidence item: tool, document, operation, error flag, matched rows, page/sheet/row locations; no text |
-| `app` | tag | `chat` (chat app), `lambda` (Lambda handler); `api` and `local` are the entry-point defaults |
+| `app_id` | tag | Which application called: the Lambda event's `args.app_id` (default `lambda`), `chat` (chat app), `cli`; `api` and `local` are the entry-point defaults |
+| `user_id` | tag | Who asked, from the caller (the Lambda event's `user_id`); omitted when not given |
 | `status` | tag | Final status |
 | input 🔒 | content | `{question, clarification}` |
 | output 🔒 | content | Answer text |
@@ -2787,7 +2792,7 @@ reconstruction consistent with those totals, not recorded values.
 agent  document_agent                                                  5.4 s
 │  metadata  request_id: 3e00087c7927…   ambiguity_mode: off   documents: [{id: 802f2eedc04f707a, …}]
 │            status: answered            (model omitted: default used)
-│  tags      app: chat   status: answered
+│  tags      app_id: chat   status: answered
 │  🔒 input   {question: "give me some info on this file", clarification: null}
 │  🔒 output  "The file \"Northstar_Commerce_…xlsx\" is a spreadsheet document with…"
 │
@@ -5499,7 +5504,7 @@ def execute_table_tool(
 """Cli components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/cli/run_local.py", "characters": 3480, "sha256": "ddee034c199b6ab6e81043aa0a897dac122bb28dd50c1dc0f78d345a5d3d54db"}
+{"path": "development/cli/run_local.py", "characters": 3483, "sha256": "cf91d58db40f637f3a6ced2e8f1290bd3c96c92ccf3a3d1ab14371838a0696fe"}
 """Run the document agent on local data using native Bedrock tool calls."""
 import argparse
 import json
@@ -5554,7 +5559,7 @@ def main():
                 for event in run_document_agent_stream(documents, [doc.id], args.question, model=args.model):
                     print(json.dumps(event, default=str), flush=True)
             else:
-                response = ask_question_local(args.question, documents=[doc], app="cli", model=args.model)
+                response = ask_question_local(args.question, documents=[doc], app_id="cli", model=args.model)
                 print(response["answer"] or response["message"])
                 for warning in response["limitations"]:
                     print(f"Limitation: {warning}")
@@ -7867,7 +7872,7 @@ def test_spreadsheet_profiles_sample_data_rows_and_keep_narrative():
     assert 'SHEET INDEX' in text and f'first {SAMPLE_ROWS} rows' in text
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_entrypoint.py", "characters": 8358, "sha256": "96c0d500499e18d01db68e263bb219c6c7e64c1b54f1cb7adb19ed7f75215325"}
+{"path": "development/tests/test_entrypoint.py", "characters": 8430, "sha256": "87e819a8d3a0a0d8fabc97d1e2f1decf92fd69de58595b336104771ff8cbb08a"}
 import json
 
 import pytest
@@ -7904,7 +7909,7 @@ def answered(native_script, doc_id):
 
 def test_answer_from_saved_filenames(native_script, store, saved):
     answered(native_script, store.load(saved).id)
-    response = ask_question('What is the Alpha rate?', document_filenames=['rates.txt'], session_id='s1', app='test')
+    response = ask_question('What is the Alpha rate?', document_filenames=['rates.txt'], session_id='s1', app_id='test')
     assert response['status'] == 'answered' and response['status_code'] == 200
     assert response['answer'] == 'The member rate is USD 88.' and response['message'] is None
     assert response['documents'][0]['name'] == 'rates.txt' and response['documents'][0]['key'] == saved
@@ -7926,7 +7931,7 @@ def test_answer_from_saved_filenames(native_script, store, saved):
 ])
 def test_invalid_requests_are_reported_and_archived(kwargs, message, isolated_archive):
     request = {'question': 'Rate?', 'document_filenames': ['k'], **kwargs}
-    response = ask_question(request.pop('question'), app='test', **request)
+    response = ask_question(request.pop('question'), app_id='test', **request)
     assert response['status'] == 'invalid_request' and response['status_code'] == 400
     assert message in response['message'] and response['answer'] is None
     [trace] = archived(isolated_archive, 'document_agent')
@@ -8010,7 +8015,8 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
     from apps.api import lambda_handler as module
     module.clients.cache_clear()
     answered(native_script, store.load(saved).id)
-    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_filenames': [saved],
+    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'user_id': 'u-1042',
+                               'document_filenames': [saved],
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
     assert lambda_handler({'document_filenames': [saved]}, None)['status_code'] == 400
@@ -8020,8 +8026,8 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
 
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
-    assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'clarification', 'model',
-                          'ambiguity', 'app', 'store', 'archive'}
+    assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'user_id',
+                          'clarification', 'model', 'ambiguity', 'app_id', 'store', 'archive'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 
@@ -8473,7 +8479,7 @@ def test_tie_prefers_readable_spelling_over_code():
     assert groups[0]['suggested'] == 'Tehran'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_observability.py", "characters": 15612, "sha256": "3d6039284c4d48f1ce99649143f004ab33d2f6563547a753e11f572837e734f9"}
+{"path": "development/tests/test_observability.py", "characters": 15911, "sha256": "f2bbfed41ff999c4c85bb75c125f0842cd959c96f528e1d63380181841af976d"}
 import hashlib
 import json
 from pathlib import Path
@@ -8508,7 +8514,7 @@ def root_metadata(trace):
 
 
 def test_archived_trace_is_the_captured_trace(rates_run, isolated_archive):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1')
     [trace] = archived(isolated_archive, 'document_agent')
     assert trace['trace_id'] == result['trace_id'] and trace['status'] == 'ok'
     assert trace['spans'] == capture.trace(result['trace_id'])
@@ -8516,7 +8522,7 @@ def test_archived_trace_is_the_captured_trace(rates_run, isolated_archive):
 
 
 def test_archived_question_has_audit_fields_but_no_text(rates_run, isolated_archive):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1')
     [trace] = archived(isolated_archive, 'document_agent')
     text = json.dumps(trace)
     assert 'Alpha' not in text and 'USD 88' not in text and 'member rate' not in text
@@ -8534,7 +8540,7 @@ def test_archived_question_has_audit_fields_but_no_text(rates_run, isolated_arch
 
 def test_content_is_archived_only_with_trace_content(rates_run, isolated_archive, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    ask_question_local(QUESTION, documents=[rates_run], app='test')
+    ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     [trace] = archived(isolated_archive, 'document_agent')
     root = trace['spans'][0]
     assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
@@ -8547,7 +8553,7 @@ def test_failed_question_is_archived(monkeypatch, isolated_archive):
     def fail(*args, **kwargs):
         raise RuntimeError('Bedrock unavailable')
     monkeypatch.setattr(document_agent, 'run_document_agent', fail)
-    response = ask_question_local(QUESTION, documents=[doc], app='test')
+    response = ask_question_local(QUESTION, documents=[doc], app_id='test')
     assert response['status'] == 'error' and response['status_code'] == 500 and response['answer'] is None
     assert 'Bedrock unavailable' in response['message']
     [trace] = archived(isolated_archive, 'document_agent')
@@ -8562,11 +8568,11 @@ class BrokenArchive:
 
 
 def test_archive_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', archive=BrokenArchive())
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
     assert result['status'] == 'answered' and 'disk full' in caplog.text
     monkeypatch.setenv('TRACE_ARCHIVE_REQUIRED', 'true')
     with pytest.raises(RuntimeError, match='Trace could not be archived'):
-        ask_question_local(QUESTION, documents=[rates_run], app='test', archive=BrokenArchive())
+        ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
 
 
 def test_s3_archive_writes_one_encrypted_object_per_trace():
@@ -8605,12 +8611,13 @@ def test_archive_modes(monkeypatch):
 
 
 def test_spans_follow_the_graph(rates_run):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1', user_id='u-1042')
     events = capture.trace(result['trace_id'])
     by_id = {e['span_id']: e for e in events}
     [root] = [e for e in events if capture.kind(e) == 'agent']
     assert root['name'] == 'document_agent' and root['parent_id'] == 'undefined'
-    assert root['session_id'] == 's1' and 'app:test' in root['tags'] and root['status'] == 'ok'
+    assert root['session_id'] == 's1' and root['status'] == 'ok'
+    assert {'app_id:test', 'user_id:u-1042'} <= set(root['tags'])
     assert root['meta']['metadata']['request_id'] == result['request_id']
     assert root['meta']['metadata']['status'] == 'answered'
 
@@ -8637,7 +8644,7 @@ def test_spans_follow_the_graph(rates_run):
 
 def test_trace_content_is_opt_in(rates_run, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     events = capture.trace(result['trace_id'])
     root = next(e for e in events if capture.kind(e) == 'agent')
     assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
@@ -8660,7 +8667,7 @@ def test_summary_reports_totals_largest_call_and_gaps(rates_run):
 
 def test_traces_are_recorded_and_archived_without_datadog(rates_run, isolated_archive, monkeypatch):
     monkeypatch.setattr(LLMObs, 'enabled', False)
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     assert result['status'] == 'answered' and result['usage']['llm_calls'] == 3
     [trace] = archived(isolated_archive, 'document_agent')
     assert trace['trace_id'] == result['trace_id']
@@ -8672,7 +8679,7 @@ def test_tool_errors_mark_their_span(native_script):
     # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
     native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
                    {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
-    result = ask_question_local('Rate?', documents=[doc], app='test')
+    result = ask_question_local('Rate?', documents=[doc], app_id='test')
     tool = next(e for e in capture.trace(result['trace_id']) if e['name'] == 'calculate')
     assert tool['status'] == 'error'
 
@@ -8726,7 +8733,7 @@ def test_chat_and_upload_apps_archive_their_traces(monkeypatch, tmp_path, isolat
     assert not chat.exception
     [question] = archived(isolated_archive, 'document_agent')
     root = question['spans'][0]
-    assert 'app:chat' in root['tags'] and root['session_id'] == chat.session_state['session_id']
+    assert 'app_id:chat' in root['tags'] and root['session_id'] == chat.session_state['session_id']
     assert any(root['meta']['metadata']['request_id'][:12] in c.value for c in chat.caption)
 
 
@@ -8760,9 +8767,11 @@ class FakeDatadog:
 def test_datadog_receives_the_same_spans_and_trace_id(rates_run, monkeypatch, isolated_archive):
     datadog = FakeDatadog()
     monkeypatch.setattr(tracing, 'LLMObs', datadog)
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1', user_id='u-1042')
     [trace] = archived(isolated_archive, 'document_agent')
     assert result['trace_id'] == trace['trace_id'] == 'dd-trace'
+    assert {'app_id': 'test', 'user_id': 'u-1042'}.items() <= next(
+        f['tags'] for span_id, f in datadog.annotations if span_id == trace['spans'][0]['span_id'] and 'tags' in f).items()
     assert [(kind, name) for kind, name, _ in datadog.spans] == [
         (capture.kind(e), e['name']) for e in sorted(trace['spans'], key=lambda e: int(e['span_id'][2:]))]
     assert datadog.spans[0][2] == {'session_id': 's1'}
