@@ -13,7 +13,7 @@ from development.observability import capture
     {'tool':'read_document','parameters':{'document_id':'selected','limit':True}},
     {'tool':'answer','parameters':{'answer':'invented'}},
     {'tool':'table_tool','parameters':{'document_id':'selected','name':'analyze_data','parameters':{}}},
-    {'tool':'search_documents','parameters':{'query':'rate','document_ids':[]}},
+    {'tool':'search','parameters':{'query':'rate','document_ids':['selected']}},
 ])
 def test_validation_rejects_scope_types_and_extra_fields(action):
     with pytest.raises(ValueError): validate_action(action,tool_specs(['selected']))
@@ -123,3 +123,17 @@ def test_unsupported_native_api_does_not_fall_back(monkeypatch):
     with pytest.raises(ClientError,match='not supported'):
         run_document_agent({doc.id:doc},[doc.id],'Rate?')
     assert len(calls)==1
+
+
+def test_single_document_tools_and_prompt_drop_multi_document_features():
+    from backend.agents.document_agent import system_prompt, writer_prompt
+    single = {s['toolSpec']['name']: s['toolSpec'] for s in tool_specs(['only'])}
+    several = {s['toolSpec']['name']: s['toolSpec'] for s in tool_specs(['a', 'b'])}
+    assert 'list_documents' not in single and 'list_documents' in several
+    assert 'document_ids' not in single['search']['inputSchema']['json']['properties']
+    assert 'document_ids' in several['search']['inputSchema']['json']['properties']
+    with pytest.raises(ValueError):
+        validate_action({'tool':'search','parameters':{'query':'rate','document_ids':['only']}}, tool_specs(['only']))
+    assert 'list_documents' not in system_prompt(True) and 'document_ids' not in system_prompt(True)
+    assert 'list_documents' in system_prompt(False) and 'priority among documents' in writer_prompt(False)
+    assert 'priority among documents' not in writer_prompt(True)

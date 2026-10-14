@@ -100,7 +100,7 @@ Assessment`, `Native Document Research`, `Document Answer`, `Document Answer Rev
 
 ## `tool` · one per tool execution
 
-Started in `document_agent.node_tools`. The span name is the tool name: `list_documents`, `search_documents`,
+Started in `document_agent.node_tools`. The span name is the tool name: `list_documents` (several documents only), `search`,
 `read_document`, `table_tool`, `calculate` or `date_calculate` (tool definitions in
 `backend/agents/document_protocol.py`). Table operations such as `get_sheet_schema` are not separate tools; they
 are recorded in `operation`.

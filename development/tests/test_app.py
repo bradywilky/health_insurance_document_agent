@@ -50,7 +50,7 @@ def test_chat_receives_selected_files_and_selection_change_clears_history(monkey
 
 def test_chat_shows_each_model_call_from_the_local_capture(native_script):
     doc = saved('rates.txt', b'Plan Alpha member rate is USD 88 per month.')
-    native_script([{'tool': 'search_documents', 'parameters': {'query': 'Alpha rate', 'document_ids': [doc.id]}},
+    native_script([{'tool': 'search', 'parameters': {'query': 'Alpha rate'}},
                    {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
     app = AppTest.from_file(str(APP)).run(timeout=20)
     app.multiselect[0].set_value([key(doc)]).run()

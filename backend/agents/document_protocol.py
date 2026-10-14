@@ -4,17 +4,22 @@ SOURCE = {'type':'string', 'pattern':'^(E[0-9]+|question)$'}
 
 
 def tool_specs(document_ids):
+    """Native tool definitions; a single selected document gets no listing tool or per-search document filter."""
     doc = {'type':'string', 'enum':list(document_ids)}
+    single = len(document_ids) == 1
     def spec(name, description, properties=None, required=None):
         return {'toolSpec':{'name':name, 'description':description, 'inputSchema':{'json':{
             'type':'object', 'properties':properties or {}, 'required':required or [],
             'additionalProperties':False}}}}
-    return [
-        spec('list_documents','List selected documents; this is not content evidence.'),
-        spec('search_documents','Search selected documents lexically. Empty results do not prove absence.',
-             {'query':{'type':'string','minLength':1,'maxLength':2000},
-              'limit':{'type':'integer','minimum':1,'maximum':20},
-              'document_ids':{'type':'array','items':doc,'minItems':1,'uniqueItems':True}}, ['query']),
+    search = {'query':{'type':'string','minLength':1,'maxLength':2000},
+              'limit':{'type':'integer','minimum':1,'maximum':20}}
+    if not single:
+        search['document_ids'] = {'type':'array','items':doc,'minItems':1,'uniqueItems':True}
+    scope = "the selected document's" if single else "selected documents'"
+    listing = [] if single else [spec('list_documents','List selected documents; this is not content evidence.')]
+    return listing + [
+        spec('search',f'Search {scope} text and spreadsheet rows lexically. Empty results do not prove absence.',
+             search, ['query']),
         spec('read_document','Read consecutive source blocks. Follow next_offset for more content.',
              {'document_id':doc,'offset':{'type':'integer','minimum':0},
               'limit':{'type':'integer','minimum':1,'maximum':20}}, ['document_id']),
@@ -48,7 +53,7 @@ def has_content(record):
         return False
     if record['tool']=='read_document':
         return bool(data.get('blocks'))
-    if record['tool']=='search_documents':
+    if record['tool']=='search':
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
         result = data.get('table_result',{})
@@ -69,7 +74,7 @@ def examined_documents(evidence):
     for record in evidence:
         if not has_content(record):
             continue
-        if record['tool'] == 'search_documents':
+        if record['tool'] == 'search':
             examined.update(match['document_id'] for match in record['data']['matches'])
         else:
             examined.add(record['data']['document_id'])

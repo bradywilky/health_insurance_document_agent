@@ -21,7 +21,7 @@ APPS = Path(__file__).resolve().parents[2] / 'apps'
 @pytest.fixture
 def rates_run(native_script):
     doc = ingest_document('rates.txt', b'Plan Alpha member rate is USD 88 per month.')
-    native_script([{'tool': 'search_documents', 'parameters': {'query': 'Alpha rate', 'document_ids': [doc.id]}},
+    native_script([{'tool': 'search', 'parameters': {'query': 'Alpha rate'}},
                    {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
     return doc
 
@@ -51,7 +51,7 @@ def test_archived_question_has_audit_fields_but_no_text(rates_run, isolated_arch
     assert meta['status'] == 'answered' and 'error' not in meta
     assert meta['prompt_version'] == document_agent.PROMPT_VERSION
     assert meta['documents'][0]['id'] == rates_run.id and meta['documents'][0]['name'] == 'rates.txt'
-    assert [e['tool'] for e in meta['evidence']] == ['search_documents']
+    assert [e['tool'] for e in meta['evidence']] == ['search']
     assert meta['evidence'][0]['locations'] == ['paragraph 1']
     assert meta['totals'] == {'llm_calls': 3, 'input_tokens': 30, 'output_tokens': 15} == result['usage']
 
@@ -148,13 +148,13 @@ def test_spans_follow_the_graph(rates_run):
     assert len(calls) == 3
     assert all(capture.kind(by_id[e['parent_id']]) == 'workflow' for e in calls)
     assert calls[0]['metrics'] == {'input_tokens': 10, 'output_tokens': 5, 'total_tokens': 15}
-    assert calls[0]['meta']['metadata']['tool_calls'] == ['search_documents']
+    assert calls[0]['meta']['metadata']['tool_calls'] == ['search']
     assert calls[0]['meta']['model_provider'] == 'amazon_bedrock'
     assert calls[-1]['name'] == 'Document Answer'
 
     [tool] = [e for e in events if capture.kind(e) == 'tool']
-    assert tool['name'] == 'search_documents' and by_id[tool['parent_id']]['name'] == 'tools'
-    assert tool['meta']['metadata']['document_ids'] == [rates_run.id]
+    assert tool['name'] == 'search' and by_id[tool['parent_id']]['name'] == 'tools'
+    assert 'document_ids' not in tool['meta']['metadata']  # one selected document: search takes no filter
     assert tool['meta']['metadata']['evidence_id'] == 'E1'
     # No prompt, question, answer or tool parameter text unless TRACE_CONTENT=true.
     assert not any(e['meta'].get('input') or e['meta'].get('output') for e in events)
@@ -169,7 +169,7 @@ def test_trace_content_is_opt_in(rates_run, monkeypatch):
     assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
     call = capture.summarize(events)['calls'][0]
     assert [m['role'] for m in call['input']] == ['system', 'user'] and 'Alpha' in call['input'][1]['content']
-    assert call['output'][0]['tool_calls'][0]['name'] == 'search_documents'
+    assert call['output'][0]['tool_calls'][0]['name'] == 'search'
 
 
 def test_summary_reports_totals_largest_call_and_gaps(rates_run):
@@ -181,7 +181,7 @@ def test_summary_reports_totals_largest_call_and_gaps(rates_run):
     assert [c['call'] for c in calls] == [1, 2, 3] and calls[0]['gap_ms'] is None
     assert all(c['gap_ms'] >= 0 for c in calls[1:])
     assert [c['start_ms'] for c in calls] == sorted(c['start_ms'] for c in calls)
-    assert [t['tool'] for t in summary['tools']] == ['search_documents']
+    assert [t['tool'] for t in summary['tools']] == ['search']
 
 
 def test_traces_are_recorded_and_archived_without_datadog(rates_run, isolated_archive, monkeypatch):

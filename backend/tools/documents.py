@@ -21,7 +21,7 @@ def _document(docs, params):
 def execute_document_tool(name, params, docs):
     if name == 'list_documents':
         return {'documents':[doc.summary() for doc in docs.values()]}
-    if name == 'search_documents':
+    if name == 'search':
         subset = selected_documents(docs, params['document_ids']) if 'document_ids' in params else docs
         return search_documents(subset, params['query'], limit=params.get('limit',8))
     if name == 'read_document':
@@ -35,7 +35,7 @@ def execute_document_tool(name, params, docs):
         if doc.table_folder is not None:
             # Spreadsheet blocks hold only narrative sheets and notes; data rows are in the sheets.
             result['note'] = ('Data-sheet rows are not in these blocks. Use table_tool read_sheet or query_table '
-                              'for rows, or search_documents to find values.')
+                              'for rows, or search to find values.')
         return result
     if name == 'table_tool':
         doc = _document(docs, params)

@@ -93,7 +93,7 @@ def create_samples(target):
          [[f'F{i:05}', 'TAILMARKER' if i == 2105 else f'Synthetic field {i}', 1] for i in range(1, 2106)]),
         ('Late Dictionary', [['Code', 'Meaning'], ['LATE-77', 'Late sheet definition']])])
     upload('large_crosswalk.xlsx', 'saved', ['heuristic headers'])
-    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; Crosswalk source row 2106, the last row. search_documents or a table query finds it.')
+    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; Crosswalk source row 2106, the last row. search or a table query finds it.')
     question('late-sheet', ['large_crosswalk.xlsx'], 'What does LATE-77 mean?', 'Late sheet definition; Late Dictionary row 2.')
     question('full-total', ['large_crosswalk.xlsx'], 'Count all Crosswalk records and total Units.', '2105 records and 2105 Units using query_table; never total search snippets.')
 

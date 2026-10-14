@@ -412,7 +412,7 @@ Real exports often spell one value several ways (`Tehran`, `THR`, `tehr@n`), sto
   filter excluded; text missing markers an `is_null` filter missed) and `notes` (truncated row lists;
   totals that include placeholder numbers).
 - **Large sheets.** Data-sheet rows stay in their CSVs and are not copied into text blocks:
-  `search_documents` scans every row of every data sheet from the saved CSV, and `read_sheet`, `query_table`
+  the `search` tool scans every row of every data sheet from the saved CSV, and `read_sheet`, `query_table`
   and `search_all_sheets` read them directly. A spreadsheet's text blocks (what `read_document` pages through)
   hold only narrative sheets and the notes around tables, so a sheet of any size never uses up the 2,000-block
   cap. Semantic profiles sample the first 15 rows of each data sheet from its CSV.

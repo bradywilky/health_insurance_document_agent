@@ -115,7 +115,7 @@ def _ingest(name, content, store, enrich, table_options):
 def index_tables(doc):
     """Text blocks for a spreadsheet: narrative sheets and the notes around tables.
 
-    Data-sheet rows are not copied into blocks: search_documents and the table tools read every row from the
+    Data-sheet rows are not copied into blocks: the search tool and the table tools read every row from the
     sheet's CSV, so a copy would only crowd the block limit.
     """
     from backend.storage.tables import load_table

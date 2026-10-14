@@ -29,7 +29,7 @@ def test_selected_scope_cannot_be_overridden_by_tool():
     with pytest.raises(ValueError,match='selected'):
         execute_document_tool('read_document',{'document_id':other},subset)
     with pytest.raises(ValueError,match='unavailable'):
-        execute_document_tool('search_documents',{'query':'rates','document_ids':[other]},subset)
+        execute_document_tool('search',{'query':'rates','document_ids':[other]},subset)
 
 
 def test_lexical_retrieval_has_source_locations():

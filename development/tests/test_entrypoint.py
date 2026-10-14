@@ -28,7 +28,7 @@ def saved(store):
 
 
 def answered(native_script, doc_id):
-    native_script([{'tool': 'search_documents', 'parameters': {'query': 'Alpha rate', 'document_ids': [doc_id]}},
+    native_script([{'tool': 'search', 'parameters': {'query': 'Alpha rate'}},
                    {'tool': 'answer', 'parameters': {}}, 'The member rate is USD 88 [E1].'])
 
 
