@@ -102,6 +102,12 @@ def show_evidence(response):
         st.caption(f"{protocol['repair_attempts']} corrective retries")
     for warning in response.get('limitations',[]):
         st.warning(warning)
+    if response.get('reasoning'):
+        # Only present with PLANNER_REASONING=true (backend/agents/reasoning.py).
+        with st.expander('Planner reasoning'):
+            for step in response['reasoning']:
+                st.markdown(f"**Step {step['step']}**")
+                st.text(step['plan'])
     with st.expander('Evidence used'):
         for source in response.get('sources',[]):
             st.markdown(f"**{source['id']}**")

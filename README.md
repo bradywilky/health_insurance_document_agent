@@ -659,7 +659,8 @@ response = ask_question(
 Other fields: `request_id` and `trace_id` (match the archived and Datadog trace), `session_id`, `documents` (ID, name,
 kind, key, extraction warnings), `sources` (each evidence item with its passages, file and location, table
 result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
-`usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
+`usage` (model calls and tokens), and `reasoning` (the planner's step plans with `PLANNER_REASONING`, else
+null). Displays such as the chat app's metrics are built from these fields.
 
 `document_filenames` are the filenames as uploaded (`rates.txt`). Each one is read from
 `<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/` in `DOCUMENTS_S3_BUCKET`, so callers

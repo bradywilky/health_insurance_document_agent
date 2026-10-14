@@ -233,6 +233,7 @@ def _response(status, result, error, loaded, request_id, trace_id, session_id, q
         'limitations': result.get('limitations', []), 'coverage': result.get('coverage'),
         'interpretation': interpretation, 'clarification': clarification if status == 'needs_clarification' else None,
         'protocol': result.get('protocol'), 'usage': usage.totals(),
+        'reasoning': result.get('reasoning'),
         'error': {'type': error.split(':', 1)[0], 'message': error} if error and status not in {
             'invalid_request', 'documents_unavailable'} else None,
     }
