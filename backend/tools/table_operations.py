@@ -218,7 +218,9 @@ def _filter_diagnostics(frame, filters):
             if elsewhere:
                 notes.append({'column': col, 'requested': value, 'matched_rows': 0, 'value_found_in_columns': elsewhere,
                               'message': 'This filter matched nothing in its column, but the value occurs in the '
-                                         'columns listed. Check that the query uses the right column.'})
+                                         'columns listed. Check that the query uses the right column; for a lookup, '
+                                         'filter on the column that holds it and read the other columns from the '
+                                         'matching rows.'})
         counts = _value_counts(_present(frame, col))
         if len(counts) > 1000:
             continue

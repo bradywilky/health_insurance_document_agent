@@ -134,7 +134,9 @@ def execute_table_tool(
                               'csv_record_indices': indices,
                               'row_number_basis': 'CSV indices are zero-based; source rows are one-based'}]
         result['warnings'] = sheets[sheet_name].get('warnings', [])
-        if result['matched_rows'] == 0 and tool_input.get('filters'):
+        # A value found in another column of this sheet is a wrong-column query, not a wrong-sheet one.
+        found_here = any('value_found_in_columns' in d for d in result.get('filter_diagnostics', []))
+        if result['matched_rows'] == 0 and tool_input.get('filters') and not found_here:
             needed = _referenced_columns(tool_input)
             others = [n for n, m in sheets.items() if n != sheet_name and m.get('sheet_type') == 'data'
                       and needed <= {c['name'] for c in m.get('columns', [])}]

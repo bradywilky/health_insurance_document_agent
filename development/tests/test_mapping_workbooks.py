@@ -83,6 +83,8 @@ def test_value_in_another_column_is_reported(workbook):
     result = query(workbook, sheet_name='Billing', filters=[{'column': 'Notes', 'op': 'contains', 'value': 'out of scope'}])
     assert result['matched_rows'] == 0
     assert result['filter_diagnostics'][0]['value_found_in_columns'] == {'New Name': 6, 'Cloud Name': 6}
+    # The value is in this tab, so the planner is not sent to other tabs.
+    assert not any('sheet_names' in note for note in result['notes'])
 
 
 def test_conflicting_mappings_flagged_only_for_identifier_keys(workbook):

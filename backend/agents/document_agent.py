@@ -68,6 +68,11 @@ grouping a text column, check its values. When variants plausibly name the same 
 (or an "in" list) in the same query, and also note the exact-match figure. Treat text markers such as "nan" as
 possibly missing. Read filter_diagnostics and notes in every table result and fix the query when they apply.
 For "which X" questions use group_by X with count_rows, never a partial row list.
+Lookups by meaning: when several columns name the same item differently (one column per application, system or
+version), the words in the question may match only some of them. Find the row through whichever column matches,
+or with search, then read the requested column from that row. A filter on the requested column alone is not a
+lookup: if it misses, or matches only outside the tab the user named, check the other name columns and Definition
+before answering.
 When the tab holding an item is unknown, or a question spans tabs (totals, lookups, "is X listed"), query all
 sheets at once with "sheet_names": ["*"]. Never conclude an item is absent after checking only some tabs.
 frequent_values shows status words (e.g. "Out of Scope") stored inside name columns; filter on them, not is_null.
