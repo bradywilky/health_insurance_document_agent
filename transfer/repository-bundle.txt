@@ -3691,7 +3691,7 @@ def column_quality(series):
     return notes
 
 ===== REPOSITORY FILE =====
-{"path": "backend/preprocessing/tables.py", "characters": 8521, "sha256": "c544680ee70b46c481ef1c4495744fcd122f080700e54c7a96cb704cae0b24fe"}
+{"path": "backend/preprocessing/tables.py", "characters": 9093, "sha256": "d212b68e28194ceb40a690de035dc71decd8b0329db84c3368dea34a526b8c84"}
 """Deterministic spreadsheet preprocessing: one normalized CSV per sheet, plus metadata describing each sheet.
 
 Run directly to export a file for inspection: <output>/<sheet>.csv and <output>/sheets.json.
@@ -3752,6 +3752,16 @@ def _profile(frame):
             for col in frame.columns]
 
 
+def _label_value_list(raw, header):
+    """A cover or 'start here' tab: two filled columns of labels and long text. Even its would-be header row pairs
+    a label with a sentence, which a real header does not."""
+    used = [c for c in raw.columns if raw[c].map(_present).any()]
+    if len(used) != 2:
+        return False
+    lengths = sorted(len(_text(v)) for v in raw[used[1]] if _present(v))
+    return len(_text(raw.iloc[header][used[1]])) > 40 and lengths[len(lengths) // 2] > 40
+
+
 def normalize_sheet(name, raw, override=None):
     override = override or {}
     raw = raw.copy().where(raw.notna(), None)
@@ -3761,6 +3771,8 @@ def normalize_sheet(name, raw, override=None):
     header = next((i for i in candidates if counts.iloc[i] >= max(counts.max() * .6, 2)), None)
     if header is None and len(raw.columns) == 1 and len(raw) > 1 and len(_text(raw.iloc[0, 0])) < 40:
         header = 0
+    if header is not None and _label_value_list(raw, header):
+        header = None
     kind = "metadata" if (re.search(r"about|read.?me|version|history|notes|instructions", name, re.I)
                            or header is None) else "data"
     kind = override.get("sheet_type", kind)
@@ -6938,7 +6950,7 @@ if __name__ == '__main__':
     print(create_samples('data'))
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/conftest.py", "characters": 3044, "sha256": "007a58019d9f76be392d0d04a5f9a7f0a2746c016522f60f0e024046fcc177b3"}
+{"path": "development/tests/conftest.py", "characters": 3180, "sha256": "0200891fafd686c74315b371e93f463d99d724a7401959fa0b2223c6277c74cd"}
 import json
 import pytest
 from development.scripts.make_samples import create_samples
@@ -7001,6 +7013,8 @@ def isolated_archive(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     # setenv, not delenv, so the value is restored even after an app under test changes it.
     monkeypatch.setenv('TRACE_CONTENT', 'false')
+    # Scripted model replies assume no reasoning step, whatever a local .env sets.
+    monkeypatch.setenv('PLANNER_REASONING', 'false')
     # The configured store and archive are reused while settings match; start each test without them.
     from backend.observability import archive
     from backend.storage import s3
@@ -9120,7 +9134,7 @@ def test_datadog_receives_the_same_spans_and_trace_id(rates_run, monkeypatch, is
         assert [f'{k}:{v}' for k, v in sent['tags'].items()] == event['tags']
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_preprocess.py", "characters": 4654, "sha256": "41d697534e8e79bb2521699c595ecccb692b8e598d1d00c5c2c3a7689a4e9268"}
+{"path": "development/tests/test_preprocess.py", "characters": 5713, "sha256": "db79a775f144f7e2e1a277981d3e9ea73693bf83892458859d33b81a5caa7d63"}
 import json
 from pathlib import Path
 
@@ -9207,6 +9221,20 @@ def test_blank_header_column_and_duplicate_names():
     frame, meta = normalize_sheet('Mappings', raw)
     assert list(frame.columns) == ['ID','Notes','Notes__2','Unnamed: 4']
     assert meta['columns'][-1]['likely_junk'] is True
+
+
+def test_label_value_cover_tab_is_narrative():
+    raw = pd.DataFrame([['Workbook', 'Example Retail Company - Multi-Sheet Data Model Overview'],
+                        ['Scope', 'Stores, products, orders and returns for the sample regions and periods'],
+                        ['IMPORTANT', 'Order counts beyond the verified samples are synthetic and illustrative only.'],
+                        ['Usage', 'Use Store ID to join Stores, Orders and Returns across the data tabs.']])
+    frame, meta = normalize_sheet('Start Here', raw)
+    assert meta['sheet_type'] == 'metadata' and 'synthetic' in ' '.join(frame['text'])
+    # A real two-column table with short headers stays a table.
+    table = pd.DataFrame([['Term', 'Definition'], ['Allowed amount', 'The maximum the plan pays for a covered '
+                          'service before member cost sharing.'], ['Copay', 'A fixed amount the member pays for a '
+                          'covered service at the time of care.']])
+    assert normalize_sheet('Glossary', table)[1]['sheet_type'] == 'data'
 
 
 def test_ragged_csv_keeps_identifiers(tmp_path):
