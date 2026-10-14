@@ -114,7 +114,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 49016, "sha256": "d63b14dba1472ab065b903db2561fb9ff3290768630f83723bfc1ec053edd08e"}
+{"path": "README.md", "characters": 48950, "sha256": "c422ab8831bebba9604a08120439d6d90f525eac4335f87f17c6f93bfa262c19"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -743,7 +743,6 @@ response = ask_question(
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
     app_id="my-service",         # which application called; a Datadog tag
-    store=store, archive=archive,  # optional; reuse across requests in a long-lived process
 )
 ```
 
@@ -768,8 +767,8 @@ never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `in
 
 The Lambda event is `{"question", "session_id", "user_id", "group_name", "document_filenames", "chat_history",
 "clarification", "args": {"model", "ambiguity", "app_id"}}`, and the handler returns the response unchanged. It logs only
-identifiers, because questions and history can contain PHI. It creates the document store and trace archive on the
-first request and reuses them while the Lambda stays warm.
+identifiers, because questions and history can contain PHI. The document store and trace archive come from the
+environment; each is created on the first request and reused while the Lambda stays warm.
 
 ## Future features
 
@@ -789,7 +788,7 @@ Features that work or are designed but are not in the current product requiremen
 {"path": "apps/api/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/api/lambda_handler.py", "characters": 2117, "sha256": "0b9a8bb9dfe7fc89f968448a1e9af16651c1306d20fdf2dccded269d9aa0d032"}
+{"path": "apps/api/lambda_handler.py", "characters": 1720, "sha256": "737d8881d4665c72209ca8b71d6299636deb434b31df2e39219f137c889b8a24"}
 """AWS Lambda handler: a thin adapter from the event to backend.entrypoint.ask_question.
 
 Event:
@@ -802,21 +801,12 @@ Event:
 Returns the ask_question response (status, status_code, answer or message, sources, limitations, request_id, ...).
 Configure storage, trace archive and model settings with the same environment variables as the apps (.env.example).
 """
-import functools
 import logging
 
 from backend.entrypoint import ask_question
-from backend.observability.archive import configured_archive
-from backend.storage.s3 import configured_store
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-
-@functools.lru_cache(maxsize=1)
-def clients():
-    """Created on the first request and reused while the Lambda stays warm."""
-    return configured_store(read_only=True), configured_archive()
 
 
 def lambda_handler(event, context):
@@ -824,7 +814,6 @@ def lambda_handler(event, context):
     args = event.get('args') or {}
     # Log identifiers only: questions and history can contain PHI.
     logger.info('Request session=%s documents=%s', event.get('session_id'), len(event.get('document_filenames') or []))
-    store, archive = clients()
     response = ask_question(
         event.get('question'),
         document_filenames=event.get('document_filenames') or [],
@@ -836,8 +825,6 @@ def lambda_handler(event, context):
         model=args.get('model'),
         ambiguity=args.get('ambiguity', 'off'),
         app_id=args.get('app_id') or 'lambda',
-        store=store,
-        archive=archive,
     )
     logger.info('Response request=%s status=%s', response['request_id'], response['status'])
     return response
@@ -2387,7 +2374,7 @@ def get_model_config():
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/entrypoint.py", "characters": 14290, "sha256": "cd225e10a20988cfc8e70f89cddcadc7d38d22345b38963b326dd70a6eb3a06c"}
+{"path": "backend/entrypoint.py", "characters": 14114, "sha256": "b900013953846ea66dd107f8459b62c0f8ee6a2cebcc79c726dd8b3c5b8dc466"}
 """Single entry point for document question answering.
 
 ask_question is the production entry point (the Lambda handler calls it with a group and saved filenames).
@@ -2415,6 +2402,8 @@ from backend.agents import document_agent
 from backend.agents.llm import Usage
 from backend.config.settings import MODELS
 from backend.observability import tracing
+from backend.storage.documents import check_group_name
+from backend.storage.s3 import configured_store
 from backend.observability.archive import (code_version, configured_archive, digest, document_summary,
                                            evidence_summary)
 
@@ -2441,7 +2430,7 @@ class RequestError(ValueError):
 
 
 def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, user_id=None,
-                 clarification=None, model=None, ambiguity='off', app_id='api', store=None, archive=None):
+                 clarification=None, model=None, ambiguity='off', app_id='api'):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
     document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
@@ -2454,16 +2443,17 @@ def ask_question(question, *, document_filenames, group_name=None, history=None,
     model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
     ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
     app_id         which application called; a tag on the trace
-    store, archive document store and trace archive; default from the environment. A long-lived process (a warm
-                   Lambda) can create them once and pass them to reuse their AWS clients across requests.
+
+    Documents are read from the store the environment configures (backend/storage/s3.py), and the trace is saved
+    to the configured archive (backend/observability/archive.py); both are reused across requests.
     """
-    return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name, store),
+    return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name),
                 history=history, session_id=session_id, user_id=user_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app_id=app_id, archive=archive, group=group_name)
+                ambiguity=ambiguity, app_id=app_id, group=group_name)
 
 
 def ask_question_local(question, *, documents, history=None, session_id=None, user_id=None, clarification=None,
-                       model=None, ambiguity='off', app_id='local', archive=None, on_step=None):
+                       model=None, ambiguity='off', app_id='local', on_step=None):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
@@ -2472,16 +2462,16 @@ def ask_question_local(question, *, documents, history=None, session_id=None, us
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
                 session_id=session_id, user_id=user_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app_id=app_id, archive=archive, on_step=on_step)
+                ambiguity=ambiguity, app_id=app_id, on_step=on_step)
 
 
-def _run(question, *, selected, load, history, session_id, user_id, clarification, model, ambiguity, app_id, archive,
+def _run(question, *, selected, load, history, session_id, user_id, clarification, model, ambiguity, app_id,
          group=None, on_step=None):
     """Validate, load and run the agent inside one trace, which is archived when it ends."""
     usage = Usage()
     loaded, result, error, status = [], None, None, 'error'
     with tracing.span('agent', 'document_agent', session_id=session_id,
-                      archive=archive if archive is not None else configured_archive()) as root:
+                      archive=configured_archive()) as root:
         request_id = uuid.uuid4().hex
         text = question if isinstance(question, str) else ''
         tracing.annotate(root, metadata={
@@ -2554,13 +2544,10 @@ def _validate(question, history, clarification, model, ambiguity, selected):
     return question.strip(), turns, clarification.strip() if clarification else None
 
 
-def _load(filenames, group_name, store):
-    from backend.storage.documents import check_group_name
+def _load(filenames, group_name):
     if not all(isinstance(f, str) and f for f in filenames):
         raise RequestError('invalid_request', 'document_filenames must be nonempty strings.')
-    if store is None:
-        from backend.storage.s3 import configured_store
-        store = configured_store(read_only=True)
+    store = configured_store(read_only=True)
     if group_name is not None:
         try:
             store = store.for_group(check_group_name(group_name))
@@ -4487,8 +4474,9 @@ def exported_document(path):
     return doc
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/s3.py", "characters": 2091, "sha256": "2e0df00c31ea521b0fedb3e5843bd9eeaacb3dec197467ed7577345741efcefd"}
+{"path": "backend/storage/s3.py", "characters": 2674, "sha256": "dabc6e681690cd9df3c0f0779f1e74b45e4818f9925da46c43ce292807d7bec1"}
 """S3 adapter and local/S3 document-store configuration."""
+from functools import lru_cache
 import os
 import boto3
 from botocore.config import Config
@@ -4503,29 +4491,40 @@ class S3DocumentStore(ObjectDocumentStore):
 
 
 def configured_store(*, read_only=False):
-    """Local mode makes no AWS calls. S3 mode uses profile credentials or deployment IAM roles.
+    """The document store the environment selects. Local mode makes no AWS calls. S3 mode uses profile credentials
+    or deployment IAM roles.
 
     S3 documents live at s3://DOCUMENTS_S3_BUCKET/DOCUMENTS_S3_PREFIX_BASE<group>/DOCUMENTS_S3_PREFIX_PPDOCS/<filename>/.
     The group comes from DOCUMENTS_GROUP_NAME, or per request from ask_question(group_name=...).
+    The store and its S3 client are reused while the settings stay the same (e.g. across a warm Lambda's requests).
     """
-    mode = os.getenv('DOCUMENTS_STORAGE', 'local').strip().lower()
+    names = ('DOCUMENTS_STORAGE', 'DOCUMENTS_GROUP_NAME', 'DOCUMENTS_S3_PREFIX_PPDOCS', 'DOCUMENTS_LOCAL_DIR',
+             'DOCUMENTS_S3_BUCKET', 'DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_KMS_KEY_ID', 'AWS_PROFILE',
+             'AWS_REGION', 'AWS_DEFAULT_REGION')
+    return _store(tuple((name, os.getenv(name)) for name in names), read_only)
+
+
+@lru_cache(maxsize=8)
+def _store(settings, read_only):
+    env = dict(settings)
+    mode = (env['DOCUMENTS_STORAGE'] or 'local').strip().lower()
     if mode not in {'local', 's3'}:
         raise ValueError('DOCUMENTS_STORAGE must be local or s3')
-    group = os.getenv('DOCUMENTS_GROUP_NAME', '').strip() or None
-    preprocessed = os.getenv('DOCUMENTS_S3_PREFIX_PPDOCS', '').strip() or PREPROCESSED
+    group = (env['DOCUMENTS_GROUP_NAME'] or '').strip() or None
+    preprocessed = (env['DOCUMENTS_S3_PREFIX_PPDOCS'] or '').strip() or PREPROCESSED
     if mode == 'local':
         from backend.storage.filesystem import LocalDocumentStore
-        return LocalDocumentStore(os.getenv("DOCUMENTS_LOCAL_DIR", "data/document_library"), group=group,
+        return LocalDocumentStore(env["DOCUMENTS_LOCAL_DIR"] or "data/document_library", group=group,
                                   preprocessed=preprocessed, read_only=read_only)
-    bucket = os.getenv('DOCUMENTS_S3_BUCKET', '').strip()
+    bucket = (env['DOCUMENTS_S3_BUCKET'] or '').strip()
     if not bucket:
         raise ValueError('DOCUMENTS_S3_BUCKET is required in s3 mode')
-    session = boto3.Session(profile_name=os.getenv('AWS_PROFILE') or None,
-                            region_name=os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'us-east-1')
+    session = boto3.Session(profile_name=env['AWS_PROFILE'] or None,
+                            region_name=env['AWS_REGION'] or env['AWS_DEFAULT_REGION'] or 'us-east-1')
     client = session.client('s3', config=Config(connect_timeout=5, read_timeout=60,
         retries={'mode':'standard', 'total_max_attempts':3}))
-    return S3DocumentStore(client, bucket, os.getenv('DOCUMENTS_S3_PREFIX_BASE', PREFIX_BASE), group=group,
-                           preprocessed=preprocessed, kms_key_id=os.getenv('DOCUMENTS_S3_KMS_KEY_ID') or None,
+    return S3DocumentStore(client, bucket, env['DOCUMENTS_S3_PREFIX_BASE'] or PREFIX_BASE, group=group,
+                           preprocessed=preprocessed, kms_key_id=env['DOCUMENTS_S3_KMS_KEY_ID'] or None,
                            read_only=read_only)
 
 ===== REPOSITORY FILE =====
@@ -6671,7 +6670,7 @@ if __name__ == '__main__':
     print(create_samples('data'))
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/conftest.py", "characters": 2798, "sha256": "56e036ae3d554f50e9f67d4043999cac205c92307949a8c49dc825fdc1ac120b"}
+{"path": "development/tests/conftest.py", "characters": 3044, "sha256": "007a58019d9f76be392d0d04a5f9a7f0a2746c016522f60f0e024046fcc177b3"}
 import json
 import pytest
 from development.scripts.make_samples import create_samples
@@ -6734,6 +6733,11 @@ def isolated_archive(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     # setenv, not delenv, so the value is restored even after an app under test changes it.
     monkeypatch.setenv('TRACE_CONTENT', 'false')
+    # The configured store and archive are reused while settings match; start each test without them.
+    from backend.observability import archive
+    from backend.storage import s3
+    archive._archive.cache_clear()
+    s3._store.cache_clear()
     return tmp_path / 'archive'
 
 
@@ -7872,7 +7876,7 @@ def test_spreadsheet_profiles_sample_data_rows_and_keep_narrative():
     assert 'SHEET INDEX' in text and f'first {SAMPLE_ROWS} rows' in text
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_entrypoint.py", "characters": 8430, "sha256": "87e819a8d3a0a0d8fabc97d1e2f1decf92fd69de58595b336104771ff8cbb08a"}
+{"path": "development/tests/test_entrypoint.py", "characters": 8394, "sha256": "1d98d55067bc045c142b86d44d575cf5160d803e1c293d57a7cbb94c83d2de85"}
 import json
 
 import pytest
@@ -7966,10 +7970,11 @@ def test_invalid_group_name(store, group):
     assert response['status'] == 'invalid_request' and 'group_name' in response['message']
 
 
-def test_s3_requires_a_group_name():
+def test_s3_requires_a_group_name(monkeypatch):
     from development.tests.test_s3_documents import MemoryS3
     from backend.storage.s3 import S3DocumentStore
-    response = ask_question('Rate?', document_filenames=['rates.txt'], store=S3DocumentStore(MemoryS3(), 'b'))
+    monkeypatch.setattr('backend.entrypoint.configured_store', lambda **kwargs: S3DocumentStore(MemoryS3(), 'b'))
+    response = ask_question('Rate?', document_filenames=['rates.txt'])
     assert response['status'] == 'invalid_request' and 'group_name is required' in response['message']
 
 
@@ -8012,22 +8017,19 @@ def test_aws_errors_are_classified(monkeypatch, code, status):
 
 
 def test_lambda_handler_maps_the_event(native_script, store, saved):
-    from apps.api import lambda_handler as module
-    module.clients.cache_clear()
     answered(native_script, store.load(saved).id)
     response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'user_id': 'u-1042',
                                'document_filenames': [saved],
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
     assert lambda_handler({'document_filenames': [saved]}, None)['status_code'] == 400
-    assert module.clients.cache_info().misses == 1  # store and trace archive created once
-    module.clients.cache_clear()
+    assert configured_store(read_only=True) is configured_store(read_only=True)  # reused across requests
 
 
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
     assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'user_id',
-                          'clarification', 'model', 'ambiguity', 'app_id', 'store', 'archive'}
+                          'clarification', 'model', 'ambiguity', 'app_id'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 
@@ -8479,7 +8481,7 @@ def test_tie_prefers_readable_spelling_over_code():
     assert groups[0]['suggested'] == 'Tehran'
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_observability.py", "characters": 15911, "sha256": "f2bbfed41ff999c4c85bb75c125f0842cd959c96f528e1d63380181841af976d"}
+{"path": "development/tests/test_observability.py", "characters": 15941, "sha256": "d2f0d6301fe34df0a9d4cda8936a56a856f17addcbad953934a216306d63e6af"}
 import hashlib
 import json
 from pathlib import Path
@@ -8568,11 +8570,12 @@ class BrokenArchive:
 
 
 def test_archive_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
+    monkeypatch.setattr('backend.entrypoint.configured_archive', BrokenArchive)
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     assert result['status'] == 'answered' and 'disk full' in caplog.text
     monkeypatch.setenv('TRACE_ARCHIVE_REQUIRED', 'true')
     with pytest.raises(RuntimeError, match='Trace could not be archived'):
-        ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
+        ask_question_local(QUESTION, documents=[rates_run], app_id='test')
 
 
 def test_s3_archive_writes_one_encrypted_object_per_trace():
