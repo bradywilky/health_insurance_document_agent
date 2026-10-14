@@ -114,7 +114,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 49149, "sha256": "d9c7180febb9360a76ccc85062a13a598f1503aa27809af71f479bbc39fb9970"}
+{"path": "README.md", "characters": 49418, "sha256": "3a790c8e2c45ef6a4d7f08f89d85dd054a6f53abeb8aa71be5750eafbf3acec8"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -533,6 +533,9 @@ Real exports often spell one value several ways (`Tehran`, `THR`, `tehr@n`), sto
   and `search_all_sheets` read them directly. A spreadsheet's text blocks (what `read_document` pages through)
   hold only narrative sheets and the notes around tables, so a sheet of any size never uses up the 2,000-block
   cap. Semantic profiles sample the first 15 rows of each data sheet from its CSV.
+- **Sheets with the same columns.** The sheet list (`list_sheets`) reports which data sheets have identical
+  columns (`_same_columns`) and, for near matches, the columns only one side has (`_similar_columns`), so the
+  model does not compare long column lists itself.
 
 The planner is told to check column hints, combine plausible variants with `recode` while still
 reporting the exact-match figure, and to use `group_by` for "which X" questions. The writer states
@@ -1339,14 +1342,14 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 28711, "sha256": "79ea21b1dfc0804eaf29eac0b78dc7f1bb06e7e8e48180a81baee147f03aca72"}
+{"path": "backend/agents/document_agent.py", "characters": 28867, "sha256": "fcb4667a03f554028aa6e96578ad35856f507e973d783de41d7b8c81ddceec53"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
 
 from backend.config.settings import get_model_config, MODELS
 import os
-from backend.agents.evidence import bounded, compact, numeric_display_check
+from backend.agents.evidence import bounded, compact, numeric_display_check, bounded_items
 from backend.agents.llm import LLM, Usage
 from backend.tools.documents import selected_documents, execute_document_tool
 from langgraph.graph import StateGraph, START, END
@@ -1399,7 +1402,8 @@ selected source remains unread. For short relevant text files prefer read_docume
 For payment questions distinguish scheduled/allowed amount, member cost sharing and insurer payment.
 For utilization questions distinguish authorization balances from annual benefit balances.
 Retrieve actual passages or records before answering. The list_documents index is not evidence of document contents;
-list_sheets is evidence of a workbook's sheets and columns, not of the values inside them.
+list_sheets is evidence of a workbook's sheets and columns, not of the values inside them. Its _same_columns and
+_similar_columns already compare the data sheets' columns; use them rather than comparing column lists yourself.
 Use query_table for totals, not partial search snippets. Never repeat an identical request.
 Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
 and date arithmetic or comparisons with date_calculate, before calling answer.
@@ -1695,7 +1699,7 @@ def node_synthesize(state: DocumentState) -> dict:
                               'Try a different question or inspect extraction warnings.', limitations, stats,
                        status='no_evidence')
     usable = substantive + [e for e in evidence if e['tool'] in {'calculate', 'date_calculate'}]
-    payload = {'question': question, 'evidence': bounded(usable, max_chars=50000),
+    payload = {'question': question, 'evidence': bounded_items(usable, max_chars=50000),
                'limitations': limitations, 'unexamined_documents': unexamined}
     if state.get('interpretation'):
         payload['interpretation'] = state['interpretation']
@@ -2136,7 +2140,7 @@ def make_enricher(model=None):
     return lambda doc: enrich(doc, llm)
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/evidence.py", "characters": 2168, "sha256": "c717f7011d098e58109d271def3098244be0a5dc9e240d198fd46374d4e2a602"}
+{"path": "backend/agents/evidence.py", "characters": 3139, "sha256": "7b62cf4dee5eec7267526de2fd202fd3a1ea1105a989c7a1d797423fa9f8c431"}
 """Compact source-backed evidence and deterministic numeric display checks."""
 import json
 import re
@@ -2147,6 +2151,9 @@ def compact(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
+SHORT_LIST_CHARS = 2000  # lists of plain values this small (e.g. column names) are never cut
+
+
 def bounded(value, *, max_chars=18000):
     """Keep valid JSON and explicitly mark any payload removed from model context."""
     if len(compact(value)) <= max_chars:
@@ -2155,6 +2162,8 @@ def bounded(value, *, max_chars=18000):
         if isinstance(obj, str):
             return obj[:1200] + (' [text truncated]' if len(obj) > 1200 else '')
         if isinstance(obj, list):
+            if all(not isinstance(v, (dict, list)) for v in obj) and len(compact(obj)) <= SHORT_LIST_CHARS:
+                return obj
             return [shrink(v) for v in obj[:10]] + ([{'truncated_items': len(obj)-10}] if len(obj)>10 else [])
         if isinstance(obj, dict):
             return {k: shrink(v) for k, v in obj.items()}
@@ -2163,6 +2172,25 @@ def bounded(value, *, max_chars=18000):
     if len(compact(preview)) > max_chars:
         return {'truncated': True, 'message': 'Result exceeds context budget; query narrower columns/rows.'}
     return {'truncated': True, 'preview': preview}
+
+
+def bounded_items(items, *, max_chars):
+    """Fit a list of evidence items into max_chars by trimming only the largest ones.
+
+    Items smaller than an equal share of what remains are kept whole, so one large result cannot cause a small
+    one (such as a sheet list) to be cut."""
+    sizes = [len(compact(item)) for item in items]
+    if sum(sizes) <= max_chars:
+        return items
+    remaining, cap = max_chars, None
+    for k, size in enumerate(sorted(sizes)):
+        share = remaining // (len(sizes) - k)
+        if size > share:
+            cap = share
+            break
+        remaining -= size
+    return [item if cap is None or size <= cap else bounded(item, max_chars=cap)
+            for item, size in zip(items, sizes)]
 
 
 def numeric_display_check(answer, evidence):
@@ -5247,7 +5275,7 @@ def join_tables(left, right, params):
     return result
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/tables.py", "characters": 12769, "sha256": "4ca33c92e189cbe141d7ef46ce244cd6891203046a7f4c1f119a377345eb4dcb"}
+{"path": "backend/tools/tables.py", "characters": 13867, "sha256": "07e91bcabb684ccfa48d51c543e8be309faa7a0964ea412d0b4be141d8382480"}
 """Deterministic table tools used by the document agent; no agent imports."""
 import logging
 from backend.shared.serialization import sanitize_result
@@ -5330,6 +5358,26 @@ def _query_many(sheet_names, params, load, sheets):
     return result
 
 
+def _column_comparison(listed):
+    """Which data sheets have the same columns, and how near matches differ, so the model need not compare
+    column lists by eye. Column order is ignored."""
+    columns = {name: s['columns'] for name, s in listed.items() if s['sheet_type'] == 'data' and s['columns']}
+    groups = {}
+    for name, names in columns.items():
+        groups.setdefault(frozenset(names), []).append(name)
+    same = [{'sheets': group, 'column_count': len(key)} for key, group in groups.items() if len(group) > 1]
+    keys = list(groups)
+    similar = []
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            shared = len(a & b)
+            if shared and shared >= 0.5 * max(len(a), len(b)):
+                similar.append({'sheets': [groups[a], groups[b]], 'shared_columns': shared,
+                                'only_in_first': sorted(a - b), 'only_in_second': sorted(b - a)})
+    return {'_same_columns': same or 'No two data sheets have the same columns.',
+            '_similar_columns': similar[:10]}
+
+
 def execute_table_tool(
     tool_name: str,
     tool_input: dict,
@@ -5405,6 +5453,7 @@ def execute_table_tool(
             }
             for name, s in sheets.items()
         }
+        result.update(_column_comparison(result))
 
     elif tool_name == "get_sheet_schema":
         sheet_meta = sheets.get(sheet_name)
@@ -8178,7 +8227,7 @@ def test_delete_removes_the_document_and_its_original(tmp_path):
         store.delete('../keep.txt')
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_mapping_workbooks.py", "characters": 7657, "sha256": "a57cf0b68d792f5c85ac095320c926c4700585110f098d3440b9c7423d51bcd4"}
+{"path": "development/tests/test_mapping_workbooks.py", "characters": 9346, "sha256": "2016c00eeab80a78a93a47e6643681e0a8c7dc19add4bc0f02d5c5a295af38a8"}
 """Multi-tab attribute-mapping workbooks: cross-tab queries, status words in name columns,
 conflicting duplicate mappings, and narrative tabs with embedded tables. Synthetic data only."""
 from datetime import datetime
@@ -8323,6 +8372,35 @@ def test_missing_column_error_suggests_sheet_column(workbook):
     result = query(workbook, sheet_names=['Billing', 'Shipping'], group_by=['Subject Area'],
                    aggregations=[{'op': 'count_rows', 'as': 'n'}])
     assert '_sheet' in result['error'] and 'Legacy Name' in result['error']
+
+
+def test_list_sheets_reports_sheets_with_the_same_columns(tmp_path):
+    import pandas as pd
+    from backend.preprocessing.documents import ingest_document
+    from backend.tools.documents import execute_document_tool
+    wide = [f'Column {i:02}' for i in range(32)]
+    path = tmp_path / 'crosswalk.xlsx'
+    with pd.ExcelWriter(path) as writer:
+        for name, columns in [('Members', wide), ('Claims', list(reversed(wide))),
+                              ('Providers', wide[:-1] + ['Directory Flag']), ('Measures', ['ID', 'Measure'])]:
+            pd.DataFrame([[f'{name}-{c}' for c in columns]], columns=columns).to_excel(writer, sheet_name=name, index=False)
+    doc = ingest_document(path.name, path.read_bytes())
+    listed = execute_document_tool('table_tool', {'document_id': doc.id, 'name': 'list_sheets'}, {doc.id: doc})
+    result = listed['table_result']
+    assert result['_same_columns'] == [{'sheets': ['Members', 'Claims'], 'column_count': 32}]
+    [near] = result['_similar_columns']
+    assert near['sheets'] == [['Members', 'Claims'], ['Providers']] and near['shared_columns'] == 31
+    assert near['only_in_first'] == ['Column 31'] and near['only_in_second'] == ['Directory Flag']
+    assert len(result['Members']['columns']) == 32
+
+
+def test_writer_evidence_trims_only_the_largest_items():
+    from backend.agents.evidence import bounded_items, compact
+    small = {'id': 'E1', 'columns': [f'Column {i:02}' for i in range(32)]}
+    large = {'id': 'E2', 'rows': [{'text': 'x' * 900} for _ in range(100)]}
+    kept = bounded_items([small, large], max_chars=20000)
+    assert kept[0] == small and kept[1]['truncated'] is True
+    assert len(compact(kept)) <= 20000
 
 ===== REPOSITORY FILE =====
 {"path": "development/tests/test_messy_tables.py", "characters": 7905, "sha256": "1cdd2bf7fa5e05a56e13b1babdfed2e6fa25302e8da69d9acd960e52fa642de5"}
