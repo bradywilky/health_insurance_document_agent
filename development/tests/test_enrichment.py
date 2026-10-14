@@ -77,14 +77,15 @@ class Scripted:
             {'toolUse': {'toolUseId': f'p{len(self.requests)}', 'name': 'record_profile', 'input': reply}}]}}}
 
 
-def test_enrich_retries_once_then_records_metadata():
+def test_enrich_retries_then_records_metadata():
     doc = ingest_document('amendment.txt', AMENDMENT)
-    llm = Scripted('Here is the profile in prose.', profile())
+    llm = Scripted('Here is the profile in prose.', 'Still prose.', profile())
     result = enrich(doc, llm)
-    assert len(llm.requests) == 2 and result['meta']['model_id'] == 'test-model'
+    assert len(llm.requests) == 3 and result['meta']['model_id'] == 'test-model'
+    assert 'Call record_profile now' in json.dumps(llm.requests[1][-1])
     assert result['meta']['coverage']['complete'] is True
     with pytest.raises(ValueError, match='No valid profile'):
-        enrich(doc, Scripted('prose', {'document_type': 'x'}))
+        enrich(doc, Scripted('prose', {'document_type': 'x'}, {'document_type': 'x'}))
 
 
 def test_long_documents_are_chunked_and_merged():

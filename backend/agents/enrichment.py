@@ -9,12 +9,13 @@ from datetime import datetime, timezone
 import json
 import re
 
-from backend.agents.turn_session import TurnSession, validate_action
+from backend.agents.turn_session import TurnSession, ProseReply, validate_action
 
 PROFILE_VERSION = 1
 CHUNK_CHARS = 16000
 MAX_CHUNKS = 6
 SAMPLE_ROWS = 15  # per spreadsheet data tab; narrative tabs are sent in full
+ATTEMPTS = 3  # per chunk: the first request plus two corrections
 RELATIONSHIPS = ['amends', 'supersedes', 'depends_on', 'implements', 'references']
 ROLES = ['identifier', 'name', 'status', 'code', 'description', 'amount', 'quantity', 'date', 'flag', 'other']
 
@@ -125,15 +126,20 @@ def _chunks(doc):
 def _request(llm, doc, text, part, parts):
     payload = {'filename': doc.name, 'type': doc.kind, 'part': f'{part} of {parts}', 'text': text}
     session = TurnSession(llm, ENRICH_SYSTEM, payload, [PROFILE_SPEC])
-    for attempt in range(2):
+    for attempt in range(ATTEMPTS):
         try:
             actions = session.request()
             if len(actions) != 1 or actions[0]['tool'] != 'record_profile':
                 raise ValueError('Call record_profile exactly once')
             validate_action(actions[0], [PROFILE_SPEC])
             return actions[0]['parameters']
+        except ProseReply:
+            # Maverick sometimes writes the profile as text; a plain nudge usually gets the tool call.
+            if attempt == ATTEMPTS - 1:
+                raise ValueError('No valid profile returned: the model replied with text instead of a tool call') from None
+            session.feedback([], error='Your reply was text, not a tool call. Call record_profile now with the profile.')
         except (ValueError, KeyError, TypeError) as exc:
-            if attempt:
+            if attempt == ATTEMPTS - 1:
                 raise ValueError(f'No valid profile returned: {exc}') from None
             session.feedback([], error=f'Invalid record_profile call: {exc}. Call record_profile once with the schema.')
 
