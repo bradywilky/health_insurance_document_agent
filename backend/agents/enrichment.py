@@ -71,8 +71,8 @@ def _norm(text):
 
 
 def document_corpus(doc):
-    """Text that quotes are checked against: every block, plus sheet, column and listed value names."""
-    parts = [b['text'] for b in doc.blocks]
+    """Text that quotes are checked against: every block and sampled row, plus sheet, column and value names."""
+    parts = [b['text'] for b in _profile_blocks(doc)]
     for sheet, meta in (doc.table_metadata or {}).get('sheets', {}).items():
         parts.append(sheet)
         for column in meta.get('columns', []):
@@ -84,19 +84,18 @@ def document_corpus(doc):
 
 
 def _profile_blocks(doc):
-    """Blocks worth profiling. Spreadsheets: narrative tabs in full and a few sample rows per data tab,
-    since the sheet index already describes every column and its values."""
-    if not doc.table_metadata:
-        return doc.blocks
-    kept, per_sheet = [], {}
-    for block in doc.blocks:
-        location = block.get('location', {})
-        if 'csv_record' in location:
-            per_sheet[location.get('sheet')] = per_sheet.get(location.get('sheet'), 0) + 1
-            if per_sheet[location['sheet']] > SAMPLE_ROWS:
-                continue
-        kept.append(block)
-    return kept
+    """Blocks worth profiling. Spreadsheets: narrative tabs in full and the first rows of each data tab, read
+    from its CSV, since the sheet index already describes every column and its values."""
+    if not doc.table_metadata or not doc.table_folder:
+        return list(doc.blocks)
+    from backend.shared.rows import row_location, row_text
+    from backend.storage.tables import load_table
+    blocks = list(doc.blocks)
+    for sheet, meta in doc.table_metadata.get('sheets', {}).items():
+        if meta.get('sheet_type') == 'data':
+            for i, row in enumerate(load_table(doc.table_folder, meta).rows[:SAMPLE_ROWS]):
+                blocks.append({'text': row_text(row), 'location': row_location(sheet, meta, i, row)})
+    return blocks
 
 
 def _chunks(doc):
@@ -106,10 +105,11 @@ def _chunks(doc):
         sheets = {name: {k: v for k, v in entry.items() if k != 'semantic_profile'}
                   for name, entry in doc.summary().get('sheets', {}).items()}
         header = 'SHEET INDEX: ' + json.dumps(sheets, default=str) + '\n\n'
-        if any('csv_record' in b.get('location', {}) for b in doc.blocks):
-            header += f'(Data tabs show their first {SAMPLE_ROWS} rows only.)\n'
+    blocks = _profile_blocks(doc)
+    if any('csv_record' in b.get('location', {}) for b in blocks):
+        header += f'(Data tabs show their first {SAMPLE_ROWS} rows only.)\n'
     lines = [f"[{', '.join(f'{k} {v}' for k, v in b.get('location', {}).items())}] {b['text']}"
-             for b in _profile_blocks(doc)]
+             for b in blocks]
     chunks, current = [], header
     for line in lines:
         if len(current) + len(line) > CHUNK_CHARS and current.strip():

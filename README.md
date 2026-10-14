@@ -411,9 +411,11 @@ Real exports often spell one value several ways (`Tehran`, `THR`, `tehr@n`), sto
   filters accept numbers written as text. Results include `filter_diagnostics` (similar spellings an exact
   filter excluded; text missing markers an `is_null` filter missed) and `notes` (truncated row lists;
   totals that include placeholder numbers).
-- **Large sheets.** Data sheets keep a 200-row text preview (`TABLE_PREVIEW_ROWS`); narrative sheets are
-  indexed in full. `search_documents` scans every row of every data sheet from the saved CSV, so the
-  preview does not limit search. The 2,000-block cap now applies only to PDF, Word and text content.
+- **Large sheets.** Data-sheet rows stay in their CSVs and are not copied into text blocks:
+  `search_documents` scans every row of every data sheet from the saved CSV, and `read_sheet`, `query_table`
+  and `search_all_sheets` read them directly. A spreadsheet's text blocks (what `read_document` pages through)
+  hold only narrative sheets and the notes around tables, so a sheet of any size never uses up the 2,000-block
+  cap. Semantic profiles sample the first 15 rows of each data sheet from its CSV.
 
 The planner is told to check column hints, combine plausible variants with `recode` while still
 reporting the exact-match figure, and to use `group_by` for "which X" questions. The writer states

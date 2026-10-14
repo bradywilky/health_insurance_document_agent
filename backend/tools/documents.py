@@ -29,9 +29,14 @@ def execute_document_tool(name, params, docs):
         offset, limit = params.get('offset',0), params.get('limit',8)
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
             raise ValueError('offset must be nonnegative and limit must be 1..20')
-        return {'document_id':doc.id, 'filename':doc.name, 'blocks':doc.blocks[offset:offset+limit],
-                'next_offset':offset+limit if offset+limit<len(doc.blocks) else None,
-                'total_blocks':len(doc.blocks), 'warnings':doc.warnings}
+        result = {'document_id':doc.id, 'filename':doc.name, 'blocks':doc.blocks[offset:offset+limit],
+                  'next_offset':offset+limit if offset+limit<len(doc.blocks) else None,
+                  'total_blocks':len(doc.blocks), 'warnings':doc.warnings}
+        if doc.table_folder is not None:
+            # Spreadsheet blocks hold only narrative sheets and notes; data rows are in the sheets.
+            result['note'] = ('Data-sheet rows are not in these blocks. Use table_tool read_sheet or query_table '
+                              'for rows, or search_documents to find values.')
+        return result
     if name == 'table_tool':
         doc = _document(docs, params)
         allowed = {'list_sheets','get_sheet_schema','read_sheet','search_all_sheets','query_table','join_tables'}

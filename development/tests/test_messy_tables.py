@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from backend.agents.document_agent import run_document_agent
-from backend.preprocessing.documents import TABLE_PREVIEW_ROWS, ingest_document
+from backend.preprocessing.documents import ingest_document
 from backend.preprocessing.profiling import column_quality, variant_groups
 from backend.retrieval.search import search_documents
 from backend.tools.documents import execute_document_tool
@@ -108,20 +108,19 @@ def test_notes_flag_truncated_lists_and_placeholder_totals(frame):
     assert '-999999.0' in total['notes'][0]
 
 
-def large_csv(rows=TABLE_PREVIEW_ROWS + 300):
+def large_csv(rows=500):
     lines = ['Code,City,Amount'] + [f'C{i:04},{"Tehran" if i % 2 else "THR"},{i}' for i in range(rows)]
     lines[-1] = f'LASTROW,Boulder,{rows}'
     return ingest_document('large.csv', '\n'.join(lines).encode())
 
 
-def test_large_sheet_preview_is_labeled_and_search_reads_every_row():
+def test_data_rows_stay_in_the_csv_and_search_reads_every_row():
     doc = large_csv()
-    assert len(doc.blocks) == TABLE_PREVIEW_ROWS
-    assert any('first 200 of 500 rows' in w for w in doc.warnings)
-    assert not any('Extraction limited' in w for w in doc.warnings)
+    assert doc.blocks == []  # data rows are read from the CSV, not copied into text blocks
+    assert not any('first 200' in w or 'Extraction limited' in w or 'No searchable text' in w for w in doc.warnings)
     hit = search_documents({doc.id: doc}, 'LASTROW')['matches'][0]
     assert hit['location']['csv_record'] == 500 and hit['block_id'] == 'Sheet1!R500'
-    # Preview rows are not double counted: each row is one searchable unit.
+    # Each row is one searchable unit.
     assert search_documents({doc.id: doc}, 'THR')['total_matching_blocks'] == 250
 
 

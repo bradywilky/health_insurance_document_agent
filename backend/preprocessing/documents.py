@@ -9,7 +9,6 @@ import re
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 200
 MAX_BLOCKS = 2000
-TABLE_PREVIEW_ROWS = 200  # per data sheet; full rows stay searchable through the CSV
 SUPPORTED = {'.pdf', '.docx', '.xlsx', '.xls', '.csv', '.txt', '.md'}
 
 
@@ -100,7 +99,7 @@ def _ingest(name, content, store, enrich, table_options):
         text = content.decode('utf-8-sig')
         for number, paragraph in enumerate(re.split(r'\n\s*\n', text), 1):
             _add_text(doc, paragraph, {'paragraph':number})
-    if not doc.blocks:
+    if not doc.blocks and not doc.table_folder:
         doc.warnings.append('No searchable text was extracted from this file.')
     if enrich is not None:
         # Optional LLM semantic profile (backend/agents/enrichment.py). Sends the extracted text to the model.
@@ -114,22 +113,22 @@ def _ingest(name, content, store, enrich, table_options):
 
 
 def index_tables(doc):
-    """Add searchable text for each sheet of doc.table_folder, described by doc.table_metadata."""
+    """Text blocks for a spreadsheet: narrative sheets and the notes around tables.
+
+    Data-sheet rows are not copied into blocks: search_documents and the table tools read every row from the
+    sheet's CSV, so a copy would only crowd the block limit.
+    """
     from backend.storage.tables import load_table
     for sheet, meta in doc.table_metadata['sheets'].items():
-        frame = load_table(doc.table_folder, meta)
-        if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
-            # Narrative sheets are indexed in full, one block per sheet row (not per cell).
-            for number, text in narrative_rows(frame.rows):
-                _add_text(doc, text, {'sheet': sheet, 'row': number})
-            continue
-        # Data sheets get a text preview; search_documents and table tools read every row from the CSV.
-        preview = frame.rows if meta.get('sheet_type') == 'metadata' else frame.rows[:TABLE_PREVIEW_ROWS]
-        for i, row in enumerate(preview):
-            _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
-        if len(preview) < len(frame):
-            doc.warnings.append(f'{sheet}: text preview holds the first {len(preview)} of {len(frame)} rows. '
-                                'search_documents and table tools read all rows.')
+        if meta.get('sheet_type') == 'metadata':
+            frame = load_table(doc.table_folder, meta)
+            if {'source_row', 'source_column', 'text'} <= set(frame.columns):
+                # Narrative sheets are indexed in full, one block per sheet row (not per cell).
+                for number, text in narrative_rows(frame.rows):
+                    _add_text(doc, text, {'sheet': sheet, 'row': number})
+            else:
+                for i, row in enumerate(frame.rows):
+                    _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
         for row in meta.get('context_rows', []):
             _add_text(doc, ' | '.join(row['values']), {'sheet':sheet, 'row':row['source_row']})
     doc.warnings.append('Spreadsheet ingestion uses heuristic headers; inspect ambiguous layouts. Formulas need cached values. Use table tools, not text snippets, for counts and totals.')

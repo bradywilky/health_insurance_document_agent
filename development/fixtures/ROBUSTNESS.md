@@ -20,7 +20,7 @@ Use a separate test document library/prefix. Upload at most ten files per batch.
 
 | File | Expected upload result | What it exercises |
 | --- | --- | --- |
-| `large_crosswalk.xlsx` | Saved with 200-row text-preview and spreadsheet warnings | 2,105 records plus a later dictionary sheet; search and table tools read rows beyond the preview |
+| `large_crosswalk.xlsx` | Saved with the spreadsheet warning; no data rows copied into text blocks | 2,105 records plus a later dictionary sheet; search and table tools read every row from the CSVs |
 | `formula_caches.xlsx` | Saved with spreadsheet warning | Cached 176, missing cache, and cached zero are distinct |
 | `insurance_mappings.xlsx` | Saved with spreadsheet warning | Titles, repeated headers, duplicate headers/records, narrative sheets and source-row mapping |
 | `insurance_claims.csv` | Saved with spreadsheet warning | Leading-zero identifiers, literal NA, missing amount and zero amount |
