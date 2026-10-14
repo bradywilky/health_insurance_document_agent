@@ -116,7 +116,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 50408, "sha256": "b207590cc69f4e16bbbc7e98ba95445dff3ffc2e71a30ce013b7c495a6fa6dca"}
+{"path": "README.md", "characters": 50488, "sha256": "c4d909d4c492f52b3a078d33eb94de71dced520ca90021e64559869518baa04f"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -778,7 +778,8 @@ response = ask_question(
 Other fields: `request_id` and `trace_id` (match the archived and Datadog trace), `session_id`, `documents` (ID, name,
 kind, key, extraction warnings), `sources` (each evidence item with its passages, file and location, table
 result or calculation, and whether it is partial), `evidence` (raw tool output), `coverage`, `protocol` and
-`usage` (model calls and tokens). Displays such as the chat app's metrics are built from these fields.
+`usage` (model calls and tokens), and `reasoning` (the planner's step plans with `PLANNER_REASONING`, else
+null). Displays such as the chat app's metrics are built from these fields.
 
 `document_filenames` are the filenames as uploaded (`rates.txt`). Each one is read from
 `<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/` in `DOCUMENTS_S3_BUCKET`, so callers
@@ -852,7 +853,7 @@ def lambda_handler(event, context):
 {"path": "apps/chat/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/chat/app.py", "characters": 9765, "sha256": "e61a3d680feb7d0f6b4393e06dffc3907f60f4bc27b6eba5f69be63bfd6f5590"}
+{"path": "apps/chat/app.py", "characters": 10069, "sha256": "a406d4f9c4f586986422d3d0e45c5a03e26d0d358cc457f0279f177dfbce40ab"}
 """Saved-document selection and chat. Run: streamlit run apps/chat/app.py"""
 import os
 from dotenv import load_dotenv
@@ -957,6 +958,12 @@ def show_evidence(response):
         st.caption(f"{protocol['repair_attempts']} corrective retries")
     for warning in response.get('limitations',[]):
         st.warning(warning)
+    if response.get('reasoning'):
+        # Only present with PLANNER_REASONING=true (backend/agents/reasoning.py).
+        with st.expander('Planner reasoning'):
+            for step in response['reasoning']:
+                st.markdown(f"**Step {step['step']}**")
+                st.text(step['plan'])
     with st.expander('Evidence used'):
         for source in response.get('sources',[]):
             st.markdown(f"**{source['id']}**")
@@ -2603,7 +2610,7 @@ def get_model_config():
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/entrypoint.py", "characters": 14114, "sha256": "b900013953846ea66dd107f8459b62c0f8ee6a2cebcc79c726dd8b3c5b8dc466"}
+{"path": "backend/entrypoint.py", "characters": 14160, "sha256": "e04a860b6ccea29b513954a5662806b84d36d8e696ac270b1c692e4e803910a0"}
 """Single entry point for document question answering.
 
 ask_question is the production entry point (the Lambda handler calls it with a group and saved filenames).
@@ -2839,6 +2846,7 @@ def _response(status, result, error, loaded, request_id, trace_id, session_id, q
         'limitations': result.get('limitations', []), 'coverage': result.get('coverage'),
         'interpretation': interpretation, 'clarification': clarification if status == 'needs_clarification' else None,
         'protocol': result.get('protocol'), 'usage': usage.totals(),
+        'reasoning': result.get('reasoning'),
         'error': {'type': error.split(':', 1)[0], 'message': error} if error and status not in {
             'invalid_request', 'documents_unavailable'} else None,
     }
