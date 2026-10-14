@@ -16,7 +16,9 @@ agent  document_agent
 ├── workflow  init
 ├── workflow  assess                         always; returns at once when ambiguity is 'off'
 │   └── llm  Ambiguity Assessment            ambiguity 'assumptions' or 'ask', no clarification
-├── workflow  plan                     ┐
+├── workflow  reason                   ┐     only with PLANNER_REASONING (backend/agents/reasoning.py)
+│   └── llm  Planner Reasoning         │
+├── workflow  plan                     │
 │   └── llm  Native Document Research  │     repeated once per research step
 ├── workflow  tools                    │
 │   └── tool  <tool name> × N          ┘
@@ -67,7 +69,7 @@ finished trace is archived.
 | output 🔒 | content | Answer text |
 | error | status | Set when the status is not `answered`, `needs_clarification` or `no_evidence` |
 
-## `workflow` · `init`, `assess`, `plan`, `tools`, `synthesize`
+## `workflow` · `init`, `assess`, `reason`, `plan`, `tools`, `synthesize`
 
 One span per LangGraph node execution, from `tracing.traced_node` (applied in
 `document_agent.build_document_graph`).
@@ -82,7 +84,7 @@ One span per LangGraph node execution, from `tracing.traced_node` (applied in
 ## `llm` · one per Bedrock call
 
 Started in `LLM.converse` (`backend/agents/llm.py`). The span name is the `LLM`'s `tool_name`: `Ambiguity
-Assessment`, `Native Document Research`, `Document Answer`, `Document Answer Revision` or `Document Enrichment`.
+Assessment`, `Planner Reasoning`, `Native Document Research`, `Document Answer`, `Document Answer Revision` or `Document Enrichment`.
 
 | Field | Type | Value |
 | --- | --- | --- |

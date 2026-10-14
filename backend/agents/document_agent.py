@@ -17,6 +17,7 @@ from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.turn_session import TurnSession, ProseReply, validate_action
 from backend.agents import ambiguity as amb
+from backend.agents import reasoning
 from backend.observability import tracing
 
 MAX_STEPS = 16
@@ -143,6 +144,8 @@ class DocumentState(TypedDict, total=False):
     request_error: str | None
     prose_reply: bool
     prose_streak: int
+    reasoning: bool
+    reasoning_log: list
     steps: int
     evidence: list
     seen: dict
@@ -183,8 +186,10 @@ def node_init(state: DocumentState) -> dict:
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
             'stats': {'validation_errors': 0, 'repair_attempts': 0, 'prose_replies': 0,
                       'duplicate_requests': 0, 'coverage_prompts': 0, 'auto_reads': 0, 'calculation_prompts': 0,
-                      'answer_revisions': 0, 'ambiguity_mode': mode, 'ambiguity_decision': 'off'},
-            'ambiguity': mode, 'interpretation': None}
+                      'answer_revisions': 0, 'ambiguity_mode': mode, 'ambiguity_decision': 'off',
+                      'reasoning_steps': 0, 'reasoning_failures': 0},
+            'ambiguity': mode, 'interpretation': None,
+            'reasoning': reasoning.enabled(state.get('reasoning')), 'reasoning_log': []}
 
 
 def _unexamined(docs, evidence):
@@ -245,8 +250,35 @@ def node_assess(state: DocumentState) -> dict:
     return {'stats': stats, 'interpretation': interpretation}
 
 
+def _research(state):
+    """The next research node: the optional reasoning step, else the planner."""
+    return 'reason' if state.get('reasoning') else 'plan'
+
+
+def node_reason(state: DocumentState) -> dict:
+    """Ask the planner model, without tools, for its next step and why; hand that plan to the planner."""
+    stats, log = dict(state['stats']), list(state['reasoning_log'])
+    if state.get('on_step'):
+        state['on_step'](f"Step {state['steps'] + 1}: reasoning")
+    _, inference = get_model_config()
+    llm = LLM(agent_name='health_insurance_document_agent', tool_name='Planner Reasoning',
+              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[state['model']], params=inference,
+              usage_meter=state['usage'])
+    session = state['turn_session']
+    try:
+        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1), session.messages)
+    except (ValueError, KeyError, TypeError):
+        # Fail open: the planner runs without a plan for this step.
+        stats['reasoning_failures'] += 1
+        return {'stats': stats}
+    stats['reasoning_steps'] += 1
+    log.append({'step': state['steps'] + 1, 'plan': plan})
+    session.note(reasoning.NOTE.format(plan=plan))
+    return {'stats': stats, 'reasoning_log': log}
+
+
 def route_after_assess(state: DocumentState) -> str:
-    return END if 'result' in state else 'plan'
+    return END if 'result' in state else _research(state)
 
 
 def node_plan(state: DocumentState) -> dict:
@@ -397,7 +429,7 @@ def _prompt_version():
     parts = [system_prompt(True), system_prompt(False), writer_prompt(True), writer_prompt(False),
              INTERPRETATION_RULE, amb.ASSESS_SYSTEM, json.dumps(amb.ASSESS_SPEC, sort_keys=True),
              json.dumps(tool_specs(['<document>']), sort_keys=True),
-             json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True)]
+             json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True), reasoning.RULES, reasoning.NOTE]
     return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 
@@ -455,17 +487,20 @@ def _result(state, answer, limitations, stats, status='answered'):
     coverage = {'examined': [docs[d].name for d in docs if d in examined_documents(evidence)],
                 'auto_read': [docs[e['parameters']['document_id']].name for e in evidence if e.get('auto')],
                 'unexamined': unexamined}
-    return {'result': {'status': status, 'answer': answer, 'evidence': evidence, 'limitations': limitations,
-                       'document_ids': list(docs), 'protocol': stats, 'coverage': coverage,
-                       'interpretation': state.get('interpretation')}}
+    result = {'status': status, 'answer': answer, 'evidence': evidence, 'limitations': limitations,
+              'document_ids': list(docs), 'protocol': stats, 'coverage': coverage,
+              'interpretation': state.get('interpretation')}
+    if state.get('reasoning'):
+        result['reasoning'] = state['reasoning_log']
+    return {'result': result}
 
 
 def route_after_tools(state: DocumentState) -> str:
-    return 'synthesize' if state['finished'] else 'plan'
+    return 'synthesize' if state['finished'] else _research(state)
 
 
 def route_after_synthesize(state: DocumentState) -> str:
-    return END if 'result' in state else 'plan'
+    return END if 'result' in state else _research(state)
 
 
 def build_document_graph():
@@ -478,43 +513,51 @@ def build_document_graph():
     graph.add_edge(START, 'init')
     graph.add_node('assess', tracing.traced_node('assess')(node_assess))
     graph.add_edge('init', 'assess')
-    graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
+    graph.add_node('reason', tracing.traced_node('reason')(node_reason))
+    graph.add_conditional_edges('assess', route_after_assess, {'reason': 'reason', 'plan': 'plan', END: END})
+    graph.add_edge('reason', 'plan')
     graph.add_edge('plan', 'tools')
     graph.add_conditional_edges('tools', route_after_tools,
-                                {'plan': 'plan', 'synthesize': 'synthesize'})
-    graph.add_conditional_edges('synthesize', route_after_synthesize, {'plan': 'plan', END: END})
+                                {'reason': 'reason', 'plan': 'plan', 'synthesize': 'synthesize'})
+    graph.add_conditional_edges('synthesize', route_after_synthesize,
+                                {'reason': 'reason', 'plan': 'plan', END: END})
     return graph.compile()
 
 
 DOCUMENT_GRAPH = build_document_graph()
+RECURSION_LIMIT = MAX_STEPS * 3 + 10  # reason, plan and tools nodes per research step
 PROMPT_VERSION = _prompt_version()
 
 
 def run_document_agent(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
-                       ambiguity='off', clarification=None):
-    """Run the LangGraph workflow while preserving the document-agent API."""
+                       ambiguity='off', clarification=None, reasoning=None):
+    """Run the LangGraph workflow while preserving the document-agent API.
+
+    reasoning: True/False turns the reasoning step on or off (backend/agents/reasoning.py); None follows
+    PLANNER_REASONING."""
     state = DOCUMENT_GRAPH.invoke(
         {'documents': documents, 'document_ids': document_ids, 'question': question,
          'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
-              'ambiguity': ambiguity, 'clarification': clarification},
-        config={'recursion_limit': MAX_STEPS * 2 + 10})
+              'ambiguity': ambiguity, 'clarification': clarification, 'reasoning': reasoning},
+        config={'recursion_limit': RECURSION_LIMIT})
     return state['result']
 
 
 def run_document_agent_stream(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
-                       ambiguity='off', clarification=None):
+                       ambiguity='off', clarification=None, reasoning=None):
     """Stream progress from the same graph; omit runtime objects and raw evidence from updates."""
     inputs = {'documents': documents, 'document_ids': document_ids, 'question': question,
               'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
-              'ambiguity': ambiguity, 'clarification': clarification}
+              'ambiguity': ambiguity, 'clarification': clarification, 'reasoning': reasoning}
     for event in DOCUMENT_GRAPH.stream(inputs, stream_mode='updates',
-                                      config={'recursion_limit': MAX_STEPS * 2 + 10}):
+                                      config={'recursion_limit': RECURSION_LIMIT}):
         for node, update in event.items():
             update = update or {}  # a step that changes nothing (e.g. assess when off) streams None
             if 'result' in update:
                 result = update['result']
                 yield {'answer': result['answer'], 'limitations': result['limitations'],
-                       'protocol': result['protocol']}
+                       'protocol': result['protocol'], **({'reasoning': result['reasoning']}
+                                                          if 'reasoning' in result else {})}
             else:
                 yield {'node': node, 'update': {k: update[k] for k in
-                       ('steps', 'finished', 'stats', 'limitations') if k in update}}
+                       ('steps', 'finished', 'stats', 'limitations', 'reasoning_log') if k in update}}

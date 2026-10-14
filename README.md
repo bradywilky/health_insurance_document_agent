@@ -487,6 +487,16 @@ and ambiguity question sets). Maverick is the default; Claude Haiku/Sonnet/Opus 
 restore Scout, add `"scout": "us.meta.llama4-scout-17b-instruct-v1:0"` back to `MODELS` in
 `backend/config/settings.py`.
 
+## Planner reasoning (optional)
+
+Maverick calls tools without saying why. With `PLANNER_REASONING=true` (or `run_document_agent(...,
+reasoning=True)`), each planner call is preceded by a plain-text call to the same model, with no tools
+attached: it sees the conversation so far and states what the results show and which call to make next, and
+why. That plan is added to the tool conversation as "Your next step should be this: ...". The plans are returned
+in the result's `reasoning` (`[{step, plan}]`), counted in `protocol.reasoning_steps`, and traced as `Planner
+Reasoning` llm spans. It roughly doubles planner calls. With the setting off, research is unchanged. The step
+lives in `backend/agents/reasoning.py` plus the `reason` node in `document_agent.py`.
+
 ## Semantic profiles (optional, at upload)
 
 The upload portal's **Generate a semantic profile** option (off by default) makes one Bedrock call per
