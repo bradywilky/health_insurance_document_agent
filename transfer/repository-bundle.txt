@@ -114,7 +114,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 48950, "sha256": "c422ab8831bebba9604a08120439d6d90f525eac4335f87f17c6f93bfa262c19"}
+{"path": "README.md", "characters": 49149, "sha256": "d9c7180febb9360a76ccc85062a13a598f1503aa27809af71f479bbc39fb9970"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -528,9 +528,11 @@ Real exports often spell one value several ways (`Tehran`, `THR`, `tehr@n`), sto
   filters accept numbers written as text. Results include `filter_diagnostics` (similar spellings an exact
   filter excluded; text missing markers an `is_null` filter missed) and `notes` (truncated row lists;
   totals that include placeholder numbers).
-- **Large sheets.** Data sheets keep a 200-row text preview (`TABLE_PREVIEW_ROWS`); narrative sheets are
-  indexed in full. `search_documents` scans every row of every data sheet from the saved CSV, so the
-  preview does not limit search. The 2,000-block cap now applies only to PDF, Word and text content.
+- **Large sheets.** Data-sheet rows stay in their CSVs and are not copied into text blocks:
+  `search_documents` scans every row of every data sheet from the saved CSV, and `read_sheet`, `query_table`
+  and `search_all_sheets` read them directly. A spreadsheet's text blocks (what `read_document` pages through)
+  hold only narrative sheets and the notes around tables, so a sheet of any size never uses up the 2,000-block
+  cap. Semantic profiles sample the first 15 rows of each data sheet from its CSV.
 
 The planner is told to check column hints, combine plausible variants with `recode` while still
 reporting the exact-match figure, and to use `group_by` for "which X" questions. The writer states
@@ -1881,7 +1883,7 @@ def examined_documents(evidence):
     return examined
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/enrichment.py", "characters": 13391, "sha256": "7aa71f2c67bb9c5f494bb71365936e58493556bb94bcd095f6e4a13d9cc8d76e"}
+{"path": "backend/agents/enrichment.py", "characters": 13575, "sha256": "230d6867652901d09849823e80294d95e8011ba8b14aee23949df01787ec8340"}
 """Optional semantic profile generated once per document at upload: a document card, references to other
 documents, a glossary, column roles and status meanings.
 
@@ -1955,8 +1957,8 @@ def _norm(text):
 
 
 def document_corpus(doc):
-    """Text that quotes are checked against: every block, plus sheet, column and listed value names."""
-    parts = [b['text'] for b in doc.blocks]
+    """Text that quotes are checked against: every block and sampled row, plus sheet, column and value names."""
+    parts = [b['text'] for b in _profile_blocks(doc)]
     for sheet, meta in (doc.table_metadata or {}).get('sheets', {}).items():
         parts.append(sheet)
         for column in meta.get('columns', []):
@@ -1968,19 +1970,18 @@ def document_corpus(doc):
 
 
 def _profile_blocks(doc):
-    """Blocks worth profiling. Spreadsheets: narrative tabs in full and a few sample rows per data tab,
-    since the sheet index already describes every column and its values."""
-    if not doc.table_metadata:
-        return doc.blocks
-    kept, per_sheet = [], {}
-    for block in doc.blocks:
-        location = block.get('location', {})
-        if 'csv_record' in location:
-            per_sheet[location.get('sheet')] = per_sheet.get(location.get('sheet'), 0) + 1
-            if per_sheet[location['sheet']] > SAMPLE_ROWS:
-                continue
-        kept.append(block)
-    return kept
+    """Blocks worth profiling. Spreadsheets: narrative tabs in full and the first rows of each data tab, read
+    from its CSV, since the sheet index already describes every column and its values."""
+    if not doc.table_metadata or not doc.table_folder:
+        return list(doc.blocks)
+    from backend.shared.rows import row_location, row_text
+    from backend.storage.tables import load_table
+    blocks = list(doc.blocks)
+    for sheet, meta in doc.table_metadata.get('sheets', {}).items():
+        if meta.get('sheet_type') == 'data':
+            for i, row in enumerate(load_table(doc.table_folder, meta).rows[:SAMPLE_ROWS]):
+                blocks.append({'text': row_text(row), 'location': row_location(sheet, meta, i, row)})
+    return blocks
 
 
 def _chunks(doc):
@@ -1990,10 +1991,11 @@ def _chunks(doc):
         sheets = {name: {k: v for k, v in entry.items() if k != 'semantic_profile'}
                   for name, entry in doc.summary().get('sheets', {}).items()}
         header = 'SHEET INDEX: ' + json.dumps(sheets, default=str) + '\n\n'
-        if any('csv_record' in b.get('location', {}) for b in doc.blocks):
-            header += f'(Data tabs show their first {SAMPLE_ROWS} rows only.)\n'
+    blocks = _profile_blocks(doc)
+    if any('csv_record' in b.get('location', {}) for b in blocks):
+        header += f'(Data tabs show their first {SAMPLE_ROWS} rows only.)\n'
     lines = [f"[{', '.join(f'{k} {v}' for k, v in b.get('location', {}).items())}] {b['text']}"
-             for b in _profile_blocks(doc)]
+             for b in blocks]
     chunks, current = [], header
     for line in lines:
         if len(current) + len(line) > CHUNK_CHARS and current.strip():
@@ -3265,7 +3267,7 @@ def _drop_none(values):
 """Preprocessing components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/preprocessing/documents.py", "characters": 7588, "sha256": "a4856eaa5c229e350d07c6ea982a165350002a4df8feb0286ae8c8529216ea6c"}
+{"path": "backend/preprocessing/documents.py", "characters": 7293, "sha256": "d496032b1b77c65c78541ec2cf4544d4a49e9c2b62ab8afb4e04736e276994a3"}
 """Document ingestion and optional persistence for selected document Q&A."""
 from backend.shared.models import Document
 from backend.shared.rows import narrative_rows, row_location, row_text
@@ -3277,7 +3279,6 @@ import re
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 200
 MAX_BLOCKS = 2000
-TABLE_PREVIEW_ROWS = 200  # per data sheet; full rows stay searchable through the CSV
 SUPPORTED = {'.pdf', '.docx', '.xlsx', '.xls', '.csv', '.txt', '.md'}
 
 
@@ -3368,7 +3369,7 @@ def _ingest(name, content, store, enrich, table_options):
         text = content.decode('utf-8-sig')
         for number, paragraph in enumerate(re.split(r'\n\s*\n', text), 1):
             _add_text(doc, paragraph, {'paragraph':number})
-    if not doc.blocks:
+    if not doc.blocks and not doc.table_folder:
         doc.warnings.append('No searchable text was extracted from this file.')
     if enrich is not None:
         # Optional LLM semantic profile (backend/agents/enrichment.py). Sends the extracted text to the model.
@@ -3382,22 +3383,22 @@ def _ingest(name, content, store, enrich, table_options):
 
 
 def index_tables(doc):
-    """Add searchable text for each sheet of doc.table_folder, described by doc.table_metadata."""
+    """Text blocks for a spreadsheet: narrative sheets and the notes around tables.
+
+    Data-sheet rows are not copied into blocks: search_documents and the table tools read every row from the
+    sheet's CSV, so a copy would only crowd the block limit.
+    """
     from backend.storage.tables import load_table
     for sheet, meta in doc.table_metadata['sheets'].items():
-        frame = load_table(doc.table_folder, meta)
-        if meta.get('sheet_type') == 'metadata' and {'source_row', 'source_column', 'text'} <= set(frame.columns):
-            # Narrative sheets are indexed in full, one block per sheet row (not per cell).
-            for number, text in narrative_rows(frame.rows):
-                _add_text(doc, text, {'sheet': sheet, 'row': number})
-            continue
-        # Data sheets get a text preview; search_documents and table tools read every row from the CSV.
-        preview = frame.rows if meta.get('sheet_type') == 'metadata' else frame.rows[:TABLE_PREVIEW_ROWS]
-        for i, row in enumerate(preview):
-            _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
-        if len(preview) < len(frame):
-            doc.warnings.append(f'{sheet}: text preview holds the first {len(preview)} of {len(frame)} rows. '
-                                'search_documents and table tools read all rows.')
+        if meta.get('sheet_type') == 'metadata':
+            frame = load_table(doc.table_folder, meta)
+            if {'source_row', 'source_column', 'text'} <= set(frame.columns):
+                # Narrative sheets are indexed in full, one block per sheet row (not per cell).
+                for number, text in narrative_rows(frame.rows):
+                    _add_text(doc, text, {'sheet': sheet, 'row': number})
+            else:
+                for i, row in enumerate(frame.rows):
+                    _add_text(doc, row_text(row), row_location(sheet, meta, i, row))
         for row in meta.get('context_rows', []):
             _add_text(doc, ' | '.join(row['values']), {'sheet':sheet, 'row':row['source_row']})
     doc.warnings.append('Spreadsheet ingestion uses heuristic headers; inspect ambiguous layouts. Formulas need cached values. Use table tools, not text snippets, for counts and totals.')
@@ -4709,7 +4710,7 @@ def date_calculate(params):
             'method': 'deterministic calendar arithmetic; compare reports date relative to other_date'}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/documents.py", "characters": 2391, "sha256": "72385a3eb5597e6ba548405518171c83137dca199b177667416cfba95f5828af"}
+{"path": "backend/tools/documents.py", "characters": 2754, "sha256": "b140345b30f56f8583fcebaa9619aed639df979bc12d1878c6b4517e3142d247"}
 """Selected-document tools, independent of agent orchestration."""
 from backend.retrieval.search import search_documents
 from backend.tools.tables import execute_table_tool
@@ -4741,9 +4742,14 @@ def execute_document_tool(name, params, docs):
         offset, limit = params.get('offset',0), params.get('limit',8)
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
             raise ValueError('offset must be nonnegative and limit must be 1..20')
-        return {'document_id':doc.id, 'filename':doc.name, 'blocks':doc.blocks[offset:offset+limit],
-                'next_offset':offset+limit if offset+limit<len(doc.blocks) else None,
-                'total_blocks':len(doc.blocks), 'warnings':doc.warnings}
+        result = {'document_id':doc.id, 'filename':doc.name, 'blocks':doc.blocks[offset:offset+limit],
+                  'next_offset':offset+limit if offset+limit<len(doc.blocks) else None,
+                  'total_blocks':len(doc.blocks), 'warnings':doc.warnings}
+        if doc.table_folder is not None:
+            # Spreadsheet blocks hold only narrative sheets and notes; data rows are in the sheets.
+            result['note'] = ('Data-sheet rows are not in these blocks. Use table_tool read_sheet or query_table '
+                              'for rows, or search_documents to find values.')
+        return result
     if name == 'table_tool':
         doc = _document(docs, params)
         allowed = {'list_sheets','get_sheet_schema','read_sheet','search_all_sheets','query_table','join_tables'}
@@ -5858,7 +5864,7 @@ question-answering acceptance criteria, and commands for offline and live-model 
 Generate it with `python -m development.scripts.make_robustness_samples --output data/robustness`.
 
 ===== REPOSITORY FILE =====
-{"path": "development/fixtures/ROBUSTNESS.md", "characters": 7318, "sha256": "e3ebef04e9a4be6daf1366f7626c62dfd5913ee504152a0db2907b6ce0b0dbc1"}
+{"path": "development/fixtures/ROBUSTNESS.md", "characters": 7334, "sha256": "4f7f0d82508e238199bda9e6b361b24848fbfa0bcf3bc5236e28a1155b7a9b07"}
 # Upload and question-answering robustness tests
 
 These are wholly synthetic files that reproduce the VDI warnings without copying private documents. A successful upload means the file was saved, not that every source feature was extracted. Test both the upload result and the answer's evidence/limitations.
@@ -5881,7 +5887,7 @@ Use a separate test document library/prefix. Upload at most ten files per batch.
 
 | File | Expected upload result | What it exercises |
 | --- | --- | --- |
-| `large_crosswalk.xlsx` | Saved with 200-row text-preview and spreadsheet warnings | 2,105 records plus a later dictionary sheet; search and table tools read rows beyond the preview |
+| `large_crosswalk.xlsx` | Saved with the spreadsheet warning; no data rows copied into text blocks | 2,105 records plus a later dictionary sheet; search and table tools read every row from the CSVs |
 | `formula_caches.xlsx` | Saved with spreadsheet warning | Cached 176, missing cache, and cached zero are distinct |
 | `insurance_mappings.xlsx` | Saved with spreadsheet warning | Titles, repeated headers, duplicate headers/records, narrative sheets and source-row mapping |
 | `insurance_claims.csv` | Saved with spreadsheet warning | Leading-zero identifiers, literal NA, missing amount and zero amount |
@@ -6441,7 +6447,7 @@ def _show_message(message):
 """Scripts components."""
 
 ===== REPOSITORY FILE =====
-{"path": "development/scripts/make_robustness_samples.py", "characters": 11894, "sha256": "c1de922387cd5ff8163c35db3bc7a357beb519a6eb0bb90c94f04438c8a88304"}
+{"path": "development/scripts/make_robustness_samples.py", "characters": 11806, "sha256": "77fc909e9698f8af59c1367fcbb7bc157a34950411e40c94c7c055ce470efea7"}
 """Generate deliberately imperfect, wholly synthetic upload/Q&A fixtures. No AWS calls.
 
 The minimal OOXML writer controls formula caches exactly; do not recalculate these
@@ -6536,10 +6542,10 @@ def create_samples(target):
         ('Crosswalk', [['Field ID', 'Definition', 'Units']] +
          [[f'F{i:05}', 'TAILMARKER' if i == 2105 else f'Synthetic field {i}', 1] for i in range(1, 2106)]),
         ('Late Dictionary', [['Code', 'Meaning'], ['LATE-77', 'Late sheet definition']])])
-    upload('large_crosswalk.xlsx', 'saved', ['text preview holds the first 200 of 2105 rows', 'heuristic headers'])
-    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; Crosswalk source row 2106, beyond the 200-row text preview. search_documents or a table query finds it.')
+    upload('large_crosswalk.xlsx', 'saved', ['heuristic headers'])
+    question('tail-row', ['large_crosswalk.xlsx'], 'What is the definition of F02105?', 'TAILMARKER; Crosswalk source row 2106, the last row. search_documents or a table query finds it.')
     question('late-sheet', ['large_crosswalk.xlsx'], 'What does LATE-77 mean?', 'Late sheet definition; Late Dictionary row 2.')
-    question('full-total', ['large_crosswalk.xlsx'], 'Count all Crosswalk records and total Units.', '2105 records and 2105 Units using query_table; never total the text preview or search snippets.')
+    question('full-total', ['large_crosswalk.xlsx'], 'Count all Crosswalk records and total Units.', '2105 records and 2105 Units using query_table; never total search snippets.')
 
     write_workbook(target/'formula_caches.xlsx', [('Calculations', [
         ['Record', 'Quantity', 'Rate', 'Amount'], ['cached', 2, 88, ('B2*C2', 176)],
@@ -8319,7 +8325,7 @@ def test_missing_column_error_suggests_sheet_column(workbook):
     assert '_sheet' in result['error'] and 'Legacy Name' in result['error']
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_messy_tables.py", "characters": 7963, "sha256": "60529d82838601f1b2d09dea3be566116313eaa36af7f75f6a1bccead1c36870"}
+{"path": "development/tests/test_messy_tables.py", "characters": 7905, "sha256": "1cdd2bf7fa5e05a56e13b1babdfed2e6fa25302e8da69d9acd960e52fa642de5"}
 """Messy categorical data: variant spellings, text missing markers, placeholder numbers, large sheets."""
 import json
 
@@ -8327,7 +8333,7 @@ import pandas as pd
 import pytest
 
 from backend.agents.document_agent import run_document_agent
-from backend.preprocessing.documents import TABLE_PREVIEW_ROWS, ingest_document
+from backend.preprocessing.documents import ingest_document
 from backend.preprocessing.profiling import column_quality, variant_groups
 from backend.retrieval.search import search_documents
 from backend.tools.documents import execute_document_tool
@@ -8430,20 +8436,19 @@ def test_notes_flag_truncated_lists_and_placeholder_totals(frame):
     assert '-999999.0' in total['notes'][0]
 
 
-def large_csv(rows=TABLE_PREVIEW_ROWS + 300):
+def large_csv(rows=500):
     lines = ['Code,City,Amount'] + [f'C{i:04},{"Tehran" if i % 2 else "THR"},{i}' for i in range(rows)]
     lines[-1] = f'LASTROW,Boulder,{rows}'
     return ingest_document('large.csv', '\n'.join(lines).encode())
 
 
-def test_large_sheet_preview_is_labeled_and_search_reads_every_row():
+def test_data_rows_stay_in_the_csv_and_search_reads_every_row():
     doc = large_csv()
-    assert len(doc.blocks) == TABLE_PREVIEW_ROWS
-    assert any('first 200 of 500 rows' in w for w in doc.warnings)
-    assert not any('Extraction limited' in w for w in doc.warnings)
+    assert doc.blocks == []  # data rows are read from the CSV, not copied into text blocks
+    assert not any('first 200' in w or 'Extraction limited' in w or 'No searchable text' in w for w in doc.warnings)
     hit = search_documents({doc.id: doc}, 'LASTROW')['matches'][0]
     assert hit['location']['csv_record'] == 500 and hit['block_id'] == 'Sheet1!R500'
-    # Preview rows are not double counted: each row is one searchable unit.
+    # Each row is one searchable unit.
     assert search_documents({doc.id: doc}, 'THR')['total_matching_blocks'] == 250
 
 
@@ -8961,7 +8966,7 @@ def test_export_excludes_bundle_and_is_repeatable(tmp_path):
     assert alternate.read_bytes()==original
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_robustness.py", "characters": 9910, "sha256": "f909127e2c555cee72eaf05f113eb5cdb7b08d4fa24d513a23b84abf35750bd2"}
+{"path": "development/tests/test_robustness.py", "characters": 9835, "sha256": "3ad81be789b9a5a22a22cbc1435d4a45f1b3ee3f4cabc9c5b2de9de8b24f1f19"}
 """Real file parsers/storage/tools; scripted model calls do not grade model reasoning."""
 import json
 from pathlib import Path
@@ -9021,13 +9026,12 @@ def test_pack_upload_outcomes_and_warning_persistence(pack, library):
 def test_truncated_workbook_retains_late_rows_sheets_and_complete_totals(pack, library):
     uploaded = load_file(pack, 'large_crosswalk.xlsx', library)
     doc = library.load(uploaded.storage_ref['manifest_key'])
-    # 200 preview rows for the large data sheet plus the one-row late sheet.
-    assert len(doc.blocks) == 201
+    # Both sheets are data sheets: their rows are searched and queried from the CSVs, not copied into blocks.
+    assert doc.blocks == []
     hit = search_documents({doc.id: doc}, 'TAILMARKER')['matches'][0]
     assert hit['location'] == {'sheet': 'Crosswalk', 'csv_record': 2105, 'row': 2106}
     tail = query(doc, 'Crosswalk', filters=[{'column': 'Field ID', 'op': 'eq', 'value': 'F02105'}])
     assert tail['table_result']['rows'][0]['Definition'] == 'TAILMARKER'
-    assert any('first 200 of 2105 rows' in w for w in tail['warnings'])
     assert query(doc, 'Late Dictionary')['table_result']['rows'][0]['Meaning'] == 'Late sheet definition'
     totals = query(doc, 'Crosswalk', aggregations=[{'op': 'count_rows', 'as': 'records'},
                    {'column': 'Units', 'op': 'sum', 'as': 'units'}])['table_result']
@@ -9066,8 +9070,8 @@ def test_table_only_answer_receives_extraction_warnings(pack, native_script):
         {'tool': 'answer', 'parameters': {}}, 'Definition: TAILMARKER [E1].'])
     result = run_document_agent({doc.id: doc}, [doc.id], 'Define F02105')
     payload = json.loads(requests[-1]['messages'][0]['content'][0]['text'])
-    assert any('text preview holds the first 200' in w for w in payload['limitations'])
-    assert any('text preview holds the first 200' in w for w in result['limitations'])
+    assert any('heuristic headers' in w for w in payload['limitations'])
+    assert any('heuristic headers' in w for w in result['limitations'])
     assert result['evidence'][0]['data']['table_result']['rows'][0]['Definition'] == 'TAILMARKER'
 
 
