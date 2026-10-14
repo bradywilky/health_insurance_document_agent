@@ -1342,7 +1342,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 30580, "sha256": "631621217950ec55b817f468c072b687a42328dbcf1e43f6b649040a3d0caf44"}
+{"path": "backend/agents/document_agent.py", "characters": 31045, "sha256": "d9c6e97a95c2f99df2af3a94c0fd2e448f734e359aaf961fc1fd7cb75d9db4ce"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1413,6 +1413,11 @@ grouping a text column, check its values. When variants plausibly name the same 
 (or an "in" list) in the same query, and also note the exact-match figure. Treat text markers such as "nan" as
 possibly missing. Read filter_diagnostics and notes in every table result and fix the query when they apply.
 For "which X" questions use group_by X with count_rows, never a partial row list.
+Lookups by meaning: when several columns name the same item differently (one column per application, system or
+version), the words in the question may match only some of them. Find the row through whichever column matches,
+or with search, then read the requested column from that row. A filter on the requested column alone is not a
+lookup: if it misses, or matches only outside the tab the user named, check the other name columns and Definition
+before answering.
 When the tab holding an item is unknown, or a question spans tabs (totals, lookups, "is X listed"), query all
 sheets at once with "sheet_names": ["*"]. Never conclude an item is absent after checking only some tabs.
 frequent_values shows status words (e.g. "Out of Scope") stored inside name columns; filter on them, not is_null.
@@ -4831,7 +4836,7 @@ def execute_document_tool(name, params, docs):
     raise ValueError(f'Unknown document tool: {name}')
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/table_operations.py", "characters": 25439, "sha256": "0d7f10ff4674e4871be3d8fd961b5c5e7aa60dafe844b1c86e588d55516f99b0"}
+{"path": "backend/tools/table_operations.py", "characters": 25627, "sha256": "567a31dd84ee287f5c591132d1b712ac6787ff8f5c585018e0dc429a01f14915"}
 """Validated, deterministic table operations. No eval or generated Python."""
 import operator
 from collections import Counter
@@ -5052,7 +5057,9 @@ def _filter_diagnostics(frame, filters):
             if elsewhere:
                 notes.append({'column': col, 'requested': value, 'matched_rows': 0, 'value_found_in_columns': elsewhere,
                               'message': 'This filter matched nothing in its column, but the value occurs in the '
-                                         'columns listed. Check that the query uses the right column.'})
+                                         'columns listed. Check that the query uses the right column; for a lookup, '
+                                         'filter on the column that holds it and read the other columns from the '
+                                         'matching rows.'})
         counts = _value_counts(_present(frame, col))
         if len(counts) > 1000:
             continue
@@ -5314,7 +5321,7 @@ def join_tables(left, right, params):
     return result
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/tables.py", "characters": 13867, "sha256": "07e91bcabb684ccfa48d51c543e8be309faa7a0964ea412d0b4be141d8382480"}
+{"path": "backend/tools/tables.py", "characters": 14092, "sha256": "0e806ce94aef3f0635387899ce15d365e1aba79586a26d3114fd319a05f065aa"}
 """Deterministic table tools used by the document agent; no agent imports."""
 import logging
 from backend.shared.serialization import sanitize_result
@@ -5451,7 +5458,9 @@ def execute_table_tool(
                               'csv_record_indices': indices,
                               'row_number_basis': 'CSV indices are zero-based; source rows are one-based'}]
         result['warnings'] = sheets[sheet_name].get('warnings', [])
-        if result['matched_rows'] == 0 and tool_input.get('filters'):
+        # A value found in another column of this sheet is a wrong-column query, not a wrong-sheet one.
+        found_here = any('value_found_in_columns' in d for d in result.get('filter_diagnostics', []))
+        if result['matched_rows'] == 0 and tool_input.get('filters') and not found_here:
             needed = _referenced_columns(tool_input)
             others = [n for n, m in sheets.items() if n != sheet_name and m.get('sheet_type') == 'data'
                       and needed <= {c['name'] for c in m.get('columns', [])}]
@@ -8280,7 +8289,7 @@ def test_delete_removes_the_document_and_its_original(tmp_path):
         store.delete('../keep.txt')
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_mapping_workbooks.py", "characters": 9346, "sha256": "2016c00eeab80a78a93a47e6643681e0a8c7dc19add4bc0f02d5c5a295af38a8"}
+{"path": "development/tests/test_mapping_workbooks.py", "characters": 9490, "sha256": "2573fc57b0fbf30a8213401cb953fe640384af67a24b77bf61efa8fea45c1864"}
 """Multi-tab attribute-mapping workbooks: cross-tab queries, status words in name columns,
 conflicting duplicate mappings, and narrative tabs with embedded tables. Synthetic data only."""
 from datetime import datetime
@@ -8366,6 +8375,8 @@ def test_value_in_another_column_is_reported(workbook):
     result = query(workbook, sheet_name='Billing', filters=[{'column': 'Notes', 'op': 'contains', 'value': 'out of scope'}])
     assert result['matched_rows'] == 0
     assert result['filter_diagnostics'][0]['value_found_in_columns'] == {'New Name': 6, 'Cloud Name': 6}
+    # The value is in this tab, so the planner is not sent to other tabs.
+    assert not any('sheet_names' in note for note in result['notes'])
 
 
 def test_conflicting_mappings_flagged_only_for_identifier_keys(workbook):
