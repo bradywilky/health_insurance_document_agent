@@ -19,6 +19,10 @@ def validate_action(action, specs):
         raise ValueError(errors[0].message[:800])
 
 
+class ProseReply(ValueError):
+    """A complete reply with no tool calls: usually the model narrating its next step, not a malformed request."""
+
+
 class TurnSession:
     """request() returns the model's next tool calls; feedback() answers every one of them; note() adds guidance."""
 
@@ -38,6 +42,8 @@ class TurnSession:
             raise ValueError('Invalid or duplicate native toolUse IDs')
         # Preserve complete assistant blocks and pair every toolUse with one result.
         self.messages.append(message)
+        if not self.pending and response.get('stopReason')=='end_turn':
+            raise ProseReply('The model replied with text instead of a tool call.')
         if response.get('stopReason')!='tool_use' or not self.pending:
             raise ValueError('Research must return native tool calls; prose is not a tool result. Stop reason: '+str(response.get('stopReason')))
         return [{'tool':t['name'],'parameters':t.get('input')} for t in self.pending]

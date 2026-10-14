@@ -4,7 +4,7 @@ import pytest
 from backend.preprocessing.documents import ingest_document
 from backend.agents.turn_session import TurnSession, validate_action
 from backend.agents.document_protocol import tool_specs
-from backend.agents.document_agent import run_document_agent
+from backend.agents.document_agent import run_document_agent, MAX_PROSE_REPLIES
 from backend.agents.llm import LLM, Usage
 from development.observability import capture
 
@@ -25,19 +25,39 @@ def test_text_tool_requests_never_become_evidence(native_script):
         {'tool':'read_document','parameters':{'document_id':doc.id}},
         {'tool':'answer','parameters':{}},'USD 88 [E1].'])
     r=run_document_agent({doc.id:doc},[doc.id],'Rate?')
-    assert r['protocol']['repair_attempts']==1
+    # A text reply is nudged back to tool calls without spending a repair attempt.
+    assert r['protocol']['prose_replies']==1 and r['protocol']['repair_attempts']==0
     assert '999' not in json.dumps(r['evidence'])
-    assert 'native tool calls' in requests[1]['messages'][-1]['content'][0]['text']
+    assert 'native tool call' in requests[1]['messages'][-1]['content'][0]['text']
 
 
 def test_repair_budget_is_bounded(native_script):
     doc=ingest_document('rates.txt',b'Rate USD 88.')
-    requests=native_script(['{"tool":"answer","parameters":{}}']*3+['USD 88 [E1].'])
+    requests=native_script([{'tool':'read_document','parameters':{'document_id':'outside'}}]*3+['USD 88 [E1].'])
     r=run_document_agent({doc.id:doc},[doc.id],'Rate?')
-    # Three planner turns, then the writer; only the automatic read of the short document is evidence.
+    # Three invalid planner turns, then the writer; only the automatic read of the short document is evidence.
     assert len(requests)==4 and [e.get('auto') for e in r['evidence']]==[True]
     assert r['protocol']['validation_errors']==3
     assert r['limitations']
+
+
+def test_text_replies_are_bounded_apart_from_repairs(native_script):
+    doc=ingest_document('rates.txt',b'Rate USD 88.')
+    requests=native_script(['Let me read the rates next.']*MAX_PROSE_REPLIES+['USD 88 [E1].'])
+    r=run_document_agent({doc.id:doc},[doc.id],'Rate?')
+    assert len(requests)==MAX_PROSE_REPLIES+1 and [e.get('auto') for e in r['evidence']]==[True]
+    assert r['protocol']['prose_replies']==MAX_PROSE_REPLIES and r['protocol']['validation_errors']==0
+    assert any('stopped making tool calls' in l for l in r['limitations'])
+
+
+def test_narration_between_tool_calls_does_not_end_research(native_script):
+    doc=ingest_document('rates.txt',b'Rate USD 88.')
+    narrate=['I will read the file next.']*(MAX_PROSE_REPLIES-1)
+    native_script(narrate+[{'tool':'read_document','parameters':{'document_id':doc.id}}]+narrate
+                  +[{'tool':'answer','parameters':{}},'Rate USD 88.'])
+    r=run_document_agent({doc.id:doc},[doc.id],'Rate?')
+    assert r['protocol']['prose_replies']==2*(MAX_PROSE_REPLIES-1)
+    assert not r['limitations'] and not any(e.get('auto') for e in r['evidence'])
 
 
 def response(calls,stop='tool_use'):

@@ -390,7 +390,9 @@ unread amendments, and answers stating what the insurer "will pay".
   [Future features](#future-features).
 
 Results include `protocol` counters (`coverage_prompts`, `auto_reads`, `calculation_prompts`,
-`answer_revisions`) and `coverage` (`examined`, `auto_read`, `unexamined`).
+`answer_revisions`, `prose_replies`) and `coverage` (`examined`, `auto_read`, `unexamined`). A planner reply
+that is only text (usually the model narrating its next step) is answered with a request to make that call; it
+does not use one of the two repair attempts, and only three in a row end research.
 
 ## Messy spreadsheets
 
