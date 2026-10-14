@@ -521,9 +521,9 @@ metrics and content, and share the `trace_id`. The chat app shows the first 12 c
 under every answer.
 
 ```text
-agent     document_agent          request and session IDs, app, group, code and prompt versions, model,
-                                  ambiguity mode, documents, question/answer SHA-256, status, error, totals,
-                                  protocol stats, coverage, evidence summary (tool, document, locations; no text)
+agent     document_agent          request, session, user and app IDs, group, code and prompt versions,
+                                  model, ambiguity mode, documents, question/answer SHA-256, status, error,
+                                  totals, protocol stats, coverage, evidence summary (tool, document, locations)
   workflow  init | assess | plan | tools | synthesize
     llm       <step name>           model, input/output tokens, stop reason, tool calls requested, latency
     tool      <tool name>           evidence ID, document IDs, match/row counts; error status
@@ -622,9 +622,10 @@ response = ask_question(
     document_filenames=["rates.txt", "benefit_summary.pdf"],
     history=[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}],
     session_id="abc123",
+    user_id="u-1042",            # who asked; a Datadog tag
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
-    app="my-service",            # recorded in the trace
+    app_id="my-service",         # which application called; a Datadog tag
     store=store, archive=archive,  # optional; reuse across requests in a long-lived process
 )
 ```
@@ -648,8 +649,8 @@ result or calculation, and whether it is partial), `evidence` (raw tool output),
 `<DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/` in `DOCUMENTS_S3_BUCKET`, so callers
 never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `invalid_request`.
 
-The Lambda event is `{"question", "session_id", "group_name", "document_filenames", "chat_history", "clarification",
-"args": {"model", "ambiguity", "app_name"}}`, and the handler returns the response unchanged. It logs only
+The Lambda event is `{"question", "session_id", "user_id", "group_name", "document_filenames", "chat_history",
+"clarification", "args": {"model", "ambiguity", "app_id"}}`, and the handler returns the response unchanged. It logs only
 identifiers, because questions and history can contain PHI. It creates the document store and trace archive on the
 first request and reuses them while the Lambda stays warm.
 

@@ -50,29 +50,30 @@ class RequestError(ValueError):
         self.status = status
 
 
-def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, clarification=None,
-                 model=None, ambiguity='off', app='api', store=None, archive=None):
+def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, user_id=None,
+                 clarification=None, model=None, ambiguity='off', app_id='api', store=None, archive=None):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
     document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
                    <DOCUMENTS_S3_PREFIX_BASE><group_name>/<DOCUMENTS_S3_PREFIX_PPDOCS>/<filename>/
     group_name     the group folder, e.g. 'aol.com'; default DOCUMENTS_GROUP_NAME. Required for S3 storage.
     history        prior turns: [{'role': 'user' | 'assistant', 'content': str}]
-    session_id     conversation identifier, recorded in the trace
+    session_id     conversation identifier; Datadog groups the conversation's traces by it
+    user_id        who asked, e.g. from the signed-in user's profile; a tag on the trace
     clarification  the reading the user chose after a needs_clarification response
     model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
     ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
-    app            caller name recorded in the trace
+    app_id         which application called; a tag on the trace
     store, archive document store and trace archive; default from the environment. A long-lived process (a warm
                    Lambda) can create them once and pass them to reuse their AWS clients across requests.
     """
     return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name, store),
-                history=history, session_id=session_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app=app, archive=archive, group=group_name)
+                history=history, session_id=session_id, user_id=user_id, clarification=clarification, model=model,
+                ambiguity=ambiguity, app_id=app_id, archive=archive, group=group_name)
 
 
-def ask_question_local(question, *, documents, history=None, session_id=None, clarification=None, model=None,
-                       ambiguity='off', app='local', archive=None, on_step=None):
+def ask_question_local(question, *, documents, history=None, session_id=None, user_id=None, clarification=None,
+                       model=None, ambiguity='off', app_id='local', archive=None, on_step=None):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
@@ -80,11 +81,11 @@ def ask_question_local(question, *, documents, history=None, session_id=None, cl
     on_step        callback after each research step, for a progress display
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
-                session_id=session_id, clarification=clarification, model=model, ambiguity=ambiguity, app=app,
-                archive=archive, on_step=on_step)
+                session_id=session_id, user_id=user_id, clarification=clarification, model=model,
+                ambiguity=ambiguity, app_id=app_id, archive=archive, on_step=on_step)
 
 
-def _run(question, *, selected, load, history, session_id, clarification, model, ambiguity, app, archive,
+def _run(question, *, selected, load, history, session_id, user_id, clarification, model, ambiguity, app_id, archive,
          group=None, on_step=None):
     """Validate, load and run the agent inside one trace, which is archived when it ends."""
     usage = Usage()
@@ -97,7 +98,7 @@ def _run(question, *, selected, load, history, session_id, clarification, model,
             'request_id': request_id, 'ambiguity_mode': ambiguity, 'model': model, 'group_name': group,
             'code_version': code_version(), 'prompt_version': document_agent.PROMPT_VERSION,
             'question_sha256': digest(text), 'question_chars': len(text), 'clarified': bool(clarification)},
-            tags={'app': app})
+            tags={'app_id': app_id, 'user_id': user_id})
         tracing.annotate_content(root, input_data={'question': question, 'clarification': clarification})
         try:
             question, history, clarification = _validate(question, history, clarification, model, ambiguity,

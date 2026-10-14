@@ -142,7 +142,7 @@ def ask(question, clarification=None):
         status = st.empty()
         # The documents were loaded above for display; pass them so they are not loaded twice.
         response = ask_question_local(question, documents=docs, history=history, session_id=st.session_state.session_id,
-                                clarification=clarification, model=model, ambiguity=ambiguity, app='chat',
+                                clarification=clarification, model=model, ambiguity=ambiguity, app_id='chat',
                                 on_step=lambda _:status.caption('Checking the selected sources…'))
         status.empty()
         if response['trace_id']:

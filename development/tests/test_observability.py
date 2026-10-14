@@ -32,7 +32,7 @@ def root_metadata(trace):
 
 
 def test_archived_trace_is_the_captured_trace(rates_run, isolated_archive):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1')
     [trace] = archived(isolated_archive, 'document_agent')
     assert trace['trace_id'] == result['trace_id'] and trace['status'] == 'ok'
     assert trace['spans'] == capture.trace(result['trace_id'])
@@ -40,7 +40,7 @@ def test_archived_trace_is_the_captured_trace(rates_run, isolated_archive):
 
 
 def test_archived_question_has_audit_fields_but_no_text(rates_run, isolated_archive):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1')
     [trace] = archived(isolated_archive, 'document_agent')
     text = json.dumps(trace)
     assert 'Alpha' not in text and 'USD 88' not in text and 'member rate' not in text
@@ -58,7 +58,7 @@ def test_archived_question_has_audit_fields_but_no_text(rates_run, isolated_arch
 
 def test_content_is_archived_only_with_trace_content(rates_run, isolated_archive, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    ask_question_local(QUESTION, documents=[rates_run], app='test')
+    ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     [trace] = archived(isolated_archive, 'document_agent')
     root = trace['spans'][0]
     assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
@@ -71,7 +71,7 @@ def test_failed_question_is_archived(monkeypatch, isolated_archive):
     def fail(*args, **kwargs):
         raise RuntimeError('Bedrock unavailable')
     monkeypatch.setattr(document_agent, 'run_document_agent', fail)
-    response = ask_question_local(QUESTION, documents=[doc], app='test')
+    response = ask_question_local(QUESTION, documents=[doc], app_id='test')
     assert response['status'] == 'error' and response['status_code'] == 500 and response['answer'] is None
     assert 'Bedrock unavailable' in response['message']
     [trace] = archived(isolated_archive, 'document_agent')
@@ -86,11 +86,11 @@ class BrokenArchive:
 
 
 def test_archive_failure_is_a_warning_unless_required(rates_run, monkeypatch, caplog):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', archive=BrokenArchive())
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
     assert result['status'] == 'answered' and 'disk full' in caplog.text
     monkeypatch.setenv('TRACE_ARCHIVE_REQUIRED', 'true')
     with pytest.raises(RuntimeError, match='Trace could not be archived'):
-        ask_question_local(QUESTION, documents=[rates_run], app='test', archive=BrokenArchive())
+        ask_question_local(QUESTION, documents=[rates_run], app_id='test', archive=BrokenArchive())
 
 
 def test_s3_archive_writes_one_encrypted_object_per_trace():
@@ -129,12 +129,13 @@ def test_archive_modes(monkeypatch):
 
 
 def test_spans_follow_the_graph(rates_run):
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1', user_id='u-1042')
     events = capture.trace(result['trace_id'])
     by_id = {e['span_id']: e for e in events}
     [root] = [e for e in events if capture.kind(e) == 'agent']
     assert root['name'] == 'document_agent' and root['parent_id'] == 'undefined'
-    assert root['session_id'] == 's1' and 'app:test' in root['tags'] and root['status'] == 'ok'
+    assert root['session_id'] == 's1' and root['status'] == 'ok'
+    assert {'app_id:test', 'user_id:u-1042'} <= set(root['tags'])
     assert root['meta']['metadata']['request_id'] == result['request_id']
     assert root['meta']['metadata']['status'] == 'answered'
 
@@ -161,7 +162,7 @@ def test_spans_follow_the_graph(rates_run):
 
 def test_trace_content_is_opt_in(rates_run, monkeypatch):
     monkeypatch.setenv('TRACE_CONTENT', 'true')
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     events = capture.trace(result['trace_id'])
     root = next(e for e in events if capture.kind(e) == 'agent')
     assert QUESTION in root['meta']['input']['value'] and 'USD 88' in root['meta']['output']['value']
@@ -184,7 +185,7 @@ def test_summary_reports_totals_largest_call_and_gaps(rates_run):
 
 def test_traces_are_recorded_and_archived_without_datadog(rates_run, isolated_archive, monkeypatch):
     monkeypatch.setattr(LLMObs, 'enabled', False)
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test')
     assert result['status'] == 'answered' and result['usage']['llm_calls'] == 3
     [trace] = archived(isolated_archive, 'document_agent')
     assert trace['trace_id'] == result['trace_id']
@@ -196,7 +197,7 @@ def test_tool_errors_mark_their_span(native_script):
     # 77 is not in any cited source, so the calculation is refused and returned to the planner as an error.
     native_script([{'tool': 'calculate', 'parameters': {'label': 'x', 'expression': '77 * 2', 'sources': ['question']}},
                    {'tool': 'answer', 'parameters': {}}] + ['USD 88 [E1].'] * 4)
-    result = ask_question_local('Rate?', documents=[doc], app='test')
+    result = ask_question_local('Rate?', documents=[doc], app_id='test')
     tool = next(e for e in capture.trace(result['trace_id']) if e['name'] == 'calculate')
     assert tool['status'] == 'error'
 
@@ -250,7 +251,7 @@ def test_chat_and_upload_apps_archive_their_traces(monkeypatch, tmp_path, isolat
     assert not chat.exception
     [question] = archived(isolated_archive, 'document_agent')
     root = question['spans'][0]
-    assert 'app:chat' in root['tags'] and root['session_id'] == chat.session_state['session_id']
+    assert 'app_id:chat' in root['tags'] and root['session_id'] == chat.session_state['session_id']
     assert any(root['meta']['metadata']['request_id'][:12] in c.value for c in chat.caption)
 
 
@@ -284,9 +285,11 @@ class FakeDatadog:
 def test_datadog_receives_the_same_spans_and_trace_id(rates_run, monkeypatch, isolated_archive):
     datadog = FakeDatadog()
     monkeypatch.setattr(tracing, 'LLMObs', datadog)
-    result = ask_question_local(QUESTION, documents=[rates_run], app='test', session_id='s1')
+    result = ask_question_local(QUESTION, documents=[rates_run], app_id='test', session_id='s1', user_id='u-1042')
     [trace] = archived(isolated_archive, 'document_agent')
     assert result['trace_id'] == trace['trace_id'] == 'dd-trace'
+    assert {'app_id': 'test', 'user_id': 'u-1042'}.items() <= next(
+        f['tags'] for span_id, f in datadog.annotations if span_id == trace['spans'][0]['span_id'] and 'tags' in f).items()
     assert [(kind, name) for kind, name, _ in datadog.spans] == [
         (capture.kind(e), e['name']) for e in sorted(trace['spans'], key=lambda e: int(e['span_id'][2:]))]
     assert datadog.spans[0][2] == {'session_id': 's1'}

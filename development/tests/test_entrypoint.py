@@ -34,7 +34,7 @@ def answered(native_script, doc_id):
 
 def test_answer_from_saved_filenames(native_script, store, saved):
     answered(native_script, store.load(saved).id)
-    response = ask_question('What is the Alpha rate?', document_filenames=['rates.txt'], session_id='s1', app='test')
+    response = ask_question('What is the Alpha rate?', document_filenames=['rates.txt'], session_id='s1', app_id='test')
     assert response['status'] == 'answered' and response['status_code'] == 200
     assert response['answer'] == 'The member rate is USD 88.' and response['message'] is None
     assert response['documents'][0]['name'] == 'rates.txt' and response['documents'][0]['key'] == saved
@@ -56,7 +56,7 @@ def test_answer_from_saved_filenames(native_script, store, saved):
 ])
 def test_invalid_requests_are_reported_and_archived(kwargs, message, isolated_archive):
     request = {'question': 'Rate?', 'document_filenames': ['k'], **kwargs}
-    response = ask_question(request.pop('question'), app='test', **request)
+    response = ask_question(request.pop('question'), app_id='test', **request)
     assert response['status'] == 'invalid_request' and response['status_code'] == 400
     assert message in response['message'] and response['answer'] is None
     [trace] = archived(isolated_archive, 'document_agent')
@@ -140,7 +140,8 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
     from apps.api import lambda_handler as module
     module.clients.cache_clear()
     answered(native_script, store.load(saved).id)
-    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'document_filenames': [saved],
+    response = lambda_handler({'question': 'What is the Alpha rate?', 'session_id': 's9', 'user_id': 'u-1042',
+                               'document_filenames': [saved],
                                'chat_history': [], 'args': {'model': 'maverick'}}, None)
     assert response['status_code'] == 200 and response['session_id'] == 's9' and 'USD 88' in response['answer']
     assert lambda_handler({'document_filenames': [saved]}, None)['status_code'] == 400
@@ -150,8 +151,8 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
 
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
-    assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'clarification', 'model',
-                          'ambiguity', 'app', 'store', 'archive'}
+    assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'user_id',
+                          'clarification', 'model', 'ambiguity', 'app_id', 'store', 'archive'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 

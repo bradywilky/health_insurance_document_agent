@@ -1,10 +1,11 @@
 """AWS Lambda handler: a thin adapter from the event to backend.entrypoint.ask_question.
 
 Event:
-    {"question": "...", "session_id": "...", "group_name": "aol.com", "document_filenames": ["rates.txt", ...],
+    {"question": "...", "session_id": "...", "user_id": "...", "group_name": "aol.com",
+     "document_filenames": ["rates.txt", ...],
      "chat_history": [{"role": "user" | "assistant", "content": "..."}],
      "clarification": "<chosen reading, after a needs_clarification response>",
-     "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_name": "..."}}
+     "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_id": "..."}}
 
 Returns the ask_question response (status, status_code, answer or message, sources, limitations, request_id, ...).
 Configure storage, trace archive and model settings with the same environment variables as the apps (.env.example).
@@ -38,10 +39,11 @@ def lambda_handler(event, context):
         group_name=event.get('group_name'),
         history=event.get('chat_history') or [],
         session_id=event.get('session_id'),
+        user_id=event.get('user_id'),
         clarification=event.get('clarification'),
         model=args.get('model'),
         ambiguity=args.get('ambiguity', 'off'),
-        app=args.get('app_name') or 'lambda',
+        app_id=args.get('app_id') or 'lambda',
         store=store,
         archive=archive,
     )

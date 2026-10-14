@@ -52,7 +52,7 @@ def main():
                 for event in run_document_agent_stream(documents, [doc.id], args.question, model=args.model):
                     print(json.dumps(event, default=str), flush=True)
             else:
-                response = ask_question_local(args.question, documents=[doc], app="cli", model=args.model)
+                response = ask_question_local(args.question, documents=[doc], app_id="cli", model=args.model)
                 print(response["answer"] or response["message"])
                 for warning in response["limitations"]:
                     print(f"Limitation: {warning}")

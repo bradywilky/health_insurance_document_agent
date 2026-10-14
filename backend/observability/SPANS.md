@@ -60,7 +60,8 @@ finished trace is archived.
 | `protocol` | metadata | Research statistics (steps, retries, prompts); excludes the ambiguity assessment, which quotes the question |
 | `coverage`, `limitations_count` | metadata | Files examined, auto-read and not examined; number of limitations |
 | `evidence` | metadata | Per evidence item: tool, document, operation, error flag, matched rows, page/sheet/row locations; no text |
-| `app` | tag | `chat` (chat app), `lambda` (Lambda handler); `api` and `local` are the entry-point defaults |
+| `app_id` | tag | Which application called: the Lambda event's `args.app_id` (default `lambda`), `chat` (chat app), `cli`; `api` and `local` are the entry-point defaults |
+| `user_id` | tag | Who asked, from the caller (the Lambda event's `user_id`); omitted when not given |
 | `status` | tag | Final status |
 | input 🔒 | content | `{question, clarification}` |
 | output 🔒 | content | Answer text |
@@ -160,7 +161,7 @@ reconstruction consistent with those totals, not recorded values.
 agent  document_agent                                                  5.4 s
 │  metadata  request_id: 3e00087c7927…   ambiguity_mode: off   documents: [{id: 802f2eedc04f707a, …}]
 │            status: answered            (model omitted: default used)
-│  tags      app: chat   status: answered
+│  tags      app_id: chat   status: answered
 │  🔒 input   {question: "give me some info on this file", clarification: null}
 │  🔒 output  "The file \"Northstar_Commerce_…xlsx\" is a spreadsheet document with…"
 │
