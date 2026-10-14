@@ -1,6 +1,6 @@
 REPOSITORY-TEXT-BUNDLE-V1
 ===== REPOSITORY FILE =====
-{"path": ".env.example", "characters": 2695, "sha256": "bcdce4606effee7c1982b2459a7421dac99b6170e267b5da9a814f7630678fb5"}
+{"path": ".env.example", "characters": 2817, "sha256": "54a8a21885c043f39103a25c3c063379e804f7834f1fa16dd2b665024037a10d"}
 # Replace with your own local profile name. Never add credentials here.
 AWS_PROFILE=dev-profile
 AWS_DEFAULT_REGION=us-east-1
@@ -8,6 +8,8 @@ AWS_DEFAULT_REGION=us-east-1
 # AWS_REGION=us-east-1
 # Default answering model, a key of MODELS in backend/config/settings.py.
 TABLES_MODEL=maverick
+# Ask the planner, without tools, for its next step and why before each tool call (default off).
+# PLANNER_REASONING=true
 # Model for semantic profiles generated at upload (default maverick).
 # ENRICHMENT_MODEL=maverick
 # Optional deployment-specific inference profile ID or ARN:
@@ -114,7 +116,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 49644, "sha256": "1db097340710de5351ad20749f8238cbf5369ebaae83355c9193d739ba9e5a4f"}
+{"path": "README.md", "characters": 50408, "sha256": "b207590cc69f4e16bbbc7e98ba95445dff3ffc2e71a30ce013b7c495a6fa6dca"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -603,6 +605,16 @@ Llama 4 Scout was removed after it trailed Maverick in every evaluation (documen
 and ambiguity question sets). Maverick is the default; Claude Haiku/Sonnet/Opus 4.5 remain available. To
 restore Scout, add `"scout": "us.meta.llama4-scout-17b-instruct-v1:0"` back to `MODELS` in
 `backend/config/settings.py`.
+
+## Planner reasoning (optional)
+
+Maverick calls tools without saying why. With `PLANNER_REASONING=true` (or `run_document_agent(...,
+reasoning=True)`), each planner call is preceded by a plain-text call to the same model, with no tools
+attached: it sees the conversation so far and states what the results show and which call to make next, and
+why. That plan is added to the tool conversation as "Your next step should be this: ...". The plans are returned
+in the result's `reasoning` (`[{step, plan}]`), counted in `protocol.reasoning_steps`, and traced as `Planner
+Reasoning` llm spans. It roughly doubles planner calls. With the setting off, research is unchanged. The step
+lives in `backend/agents/reasoning.py` plus the `reason` node in `document_agent.py`.
 
 ## Semantic profiles (optional, at upload)
 
@@ -1344,7 +1356,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 32095, "sha256": "02476b3d84823caae348ce8a1774e92e797f6b2536f1f852e3b1c9d52deb0f2a"}
+{"path": "backend/agents/document_agent.py", "characters": 34397, "sha256": "8bee6f733e50fa4ff8236cdb96f9391a5cac9f2f957c9ce021b5bbfb46c3bbfc"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1364,6 +1376,7 @@ from backend.agents.answer_checks import answer_issues, unsupported_amounts
 from backend.tools.calculations import calculate, date_calculate
 from backend.agents.turn_session import TurnSession, ProseReply, validate_action
 from backend.agents import ambiguity as amb
+from backend.agents import reasoning
 from backend.observability import tracing
 
 MAX_STEPS = 16
@@ -1490,6 +1503,8 @@ class DocumentState(TypedDict, total=False):
     request_error: str | None
     prose_reply: bool
     prose_streak: int
+    reasoning: bool
+    reasoning_log: list
     steps: int
     evidence: list
     seen: dict
@@ -1530,8 +1545,10 @@ def node_init(state: DocumentState) -> dict:
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
             'stats': {'validation_errors': 0, 'repair_attempts': 0, 'prose_replies': 0,
                       'duplicate_requests': 0, 'coverage_prompts': 0, 'auto_reads': 0, 'calculation_prompts': 0,
-                      'answer_revisions': 0, 'ambiguity_mode': mode, 'ambiguity_decision': 'off'},
-            'ambiguity': mode, 'interpretation': None}
+                      'answer_revisions': 0, 'ambiguity_mode': mode, 'ambiguity_decision': 'off',
+                      'reasoning_steps': 0, 'reasoning_failures': 0},
+            'ambiguity': mode, 'interpretation': None,
+            'reasoning': reasoning.enabled(state.get('reasoning')), 'reasoning_log': []}
 
 
 def _unexamined(docs, evidence):
@@ -1592,8 +1609,35 @@ def node_assess(state: DocumentState) -> dict:
     return {'stats': stats, 'interpretation': interpretation}
 
 
+def _research(state):
+    """The next research node: the optional reasoning step, else the planner."""
+    return 'reason' if state.get('reasoning') else 'plan'
+
+
+def node_reason(state: DocumentState) -> dict:
+    """Ask the planner model, without tools, for its next step and why; hand that plan to the planner."""
+    stats, log = dict(state['stats']), list(state['reasoning_log'])
+    if state.get('on_step'):
+        state['on_step'](f"Step {state['steps'] + 1}: reasoning")
+    _, inference = get_model_config()
+    llm = LLM(agent_name='health_insurance_document_agent', tool_name='Planner Reasoning',
+              model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[state['model']], params=inference,
+              usage_meter=state['usage'])
+    session = state['turn_session']
+    try:
+        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1), session.messages)
+    except (ValueError, KeyError, TypeError):
+        # Fail open: the planner runs without a plan for this step.
+        stats['reasoning_failures'] += 1
+        return {'stats': stats}
+    stats['reasoning_steps'] += 1
+    log.append({'step': state['steps'] + 1, 'plan': plan})
+    session.note(reasoning.NOTE.format(plan=plan))
+    return {'stats': stats, 'reasoning_log': log}
+
+
 def route_after_assess(state: DocumentState) -> str:
-    return END if 'result' in state else 'plan'
+    return END if 'result' in state else _research(state)
 
 
 def node_plan(state: DocumentState) -> dict:
@@ -1744,7 +1788,7 @@ def _prompt_version():
     parts = [system_prompt(True), system_prompt(False), writer_prompt(True), writer_prompt(False),
              INTERPRETATION_RULE, amb.ASSESS_SYSTEM, json.dumps(amb.ASSESS_SPEC, sort_keys=True),
              json.dumps(tool_specs(['<document>']), sort_keys=True),
-             json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True)]
+             json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True), reasoning.RULES, reasoning.NOTE]
     return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 
@@ -1802,17 +1846,20 @@ def _result(state, answer, limitations, stats, status='answered'):
     coverage = {'examined': [docs[d].name for d in docs if d in examined_documents(evidence)],
                 'auto_read': [docs[e['parameters']['document_id']].name for e in evidence if e.get('auto')],
                 'unexamined': unexamined}
-    return {'result': {'status': status, 'answer': answer, 'evidence': evidence, 'limitations': limitations,
-                       'document_ids': list(docs), 'protocol': stats, 'coverage': coverage,
-                       'interpretation': state.get('interpretation')}}
+    result = {'status': status, 'answer': answer, 'evidence': evidence, 'limitations': limitations,
+              'document_ids': list(docs), 'protocol': stats, 'coverage': coverage,
+              'interpretation': state.get('interpretation')}
+    if state.get('reasoning'):
+        result['reasoning'] = state['reasoning_log']
+    return {'result': result}
 
 
 def route_after_tools(state: DocumentState) -> str:
-    return 'synthesize' if state['finished'] else 'plan'
+    return 'synthesize' if state['finished'] else _research(state)
 
 
 def route_after_synthesize(state: DocumentState) -> str:
-    return END if 'result' in state else 'plan'
+    return END if 'result' in state else _research(state)
 
 
 def build_document_graph():
@@ -1825,46 +1872,54 @@ def build_document_graph():
     graph.add_edge(START, 'init')
     graph.add_node('assess', tracing.traced_node('assess')(node_assess))
     graph.add_edge('init', 'assess')
-    graph.add_conditional_edges('assess', route_after_assess, {'plan': 'plan', END: END})
+    graph.add_node('reason', tracing.traced_node('reason')(node_reason))
+    graph.add_conditional_edges('assess', route_after_assess, {'reason': 'reason', 'plan': 'plan', END: END})
+    graph.add_edge('reason', 'plan')
     graph.add_edge('plan', 'tools')
     graph.add_conditional_edges('tools', route_after_tools,
-                                {'plan': 'plan', 'synthesize': 'synthesize'})
-    graph.add_conditional_edges('synthesize', route_after_synthesize, {'plan': 'plan', END: END})
+                                {'reason': 'reason', 'plan': 'plan', 'synthesize': 'synthesize'})
+    graph.add_conditional_edges('synthesize', route_after_synthesize,
+                                {'reason': 'reason', 'plan': 'plan', END: END})
     return graph.compile()
 
 
 DOCUMENT_GRAPH = build_document_graph()
+RECURSION_LIMIT = MAX_STEPS * 3 + 10  # reason, plan and tools nodes per research step
 PROMPT_VERSION = _prompt_version()
 
 
 def run_document_agent(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
-                       ambiguity='off', clarification=None):
-    """Run the LangGraph workflow while preserving the document-agent API."""
+                       ambiguity='off', clarification=None, reasoning=None):
+    """Run the LangGraph workflow while preserving the document-agent API.
+
+    reasoning: True/False turns the reasoning step on or off (backend/agents/reasoning.py); None follows
+    PLANNER_REASONING."""
     state = DOCUMENT_GRAPH.invoke(
         {'documents': documents, 'document_ids': document_ids, 'question': question,
          'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
-              'ambiguity': ambiguity, 'clarification': clarification},
-        config={'recursion_limit': MAX_STEPS * 2 + 10})
+              'ambiguity': ambiguity, 'clarification': clarification, 'reasoning': reasoning},
+        config={'recursion_limit': RECURSION_LIMIT})
     return state['result']
 
 
 def run_document_agent_stream(documents, document_ids, question, *, history=None, usage=None, on_step=None, model=None,
-                       ambiguity='off', clarification=None):
+                       ambiguity='off', clarification=None, reasoning=None):
     """Stream progress from the same graph; omit runtime objects and raw evidence from updates."""
     inputs = {'documents': documents, 'document_ids': document_ids, 'question': question,
               'history': history, 'usage': usage, 'on_step': on_step, 'model': model,
-              'ambiguity': ambiguity, 'clarification': clarification}
+              'ambiguity': ambiguity, 'clarification': clarification, 'reasoning': reasoning}
     for event in DOCUMENT_GRAPH.stream(inputs, stream_mode='updates',
-                                      config={'recursion_limit': MAX_STEPS * 2 + 10}):
+                                      config={'recursion_limit': RECURSION_LIMIT}):
         for node, update in event.items():
             update = update or {}  # a step that changes nothing (e.g. assess when off) streams None
             if 'result' in update:
                 result = update['result']
                 yield {'answer': result['answer'], 'limitations': result['limitations'],
-                       'protocol': result['protocol']}
+                       'protocol': result['protocol'], **({'reasoning': result['reasoning']}
+                                                          if 'reasoning' in result else {})}
             else:
                 yield {'node': node, 'update': {k: update[k] for k in
-                       ('steps', 'finished', 'stats', 'limitations') if k in update}}
+                       ('steps', 'finished', 'stats', 'limitations', 'reasoning_log') if k in update}}
 
 ===== REPOSITORY FILE =====
 {"path": "backend/agents/document_protocol.py", "characters": 4837, "sha256": "cc44a084ca9d415d1c3f49863f65c0219fbb597c67aff19267dcef2ff89ebe1b"}
@@ -2369,6 +2424,80 @@ class LLM:
         return text
 
 ===== REPOSITORY FILE =====
+{"path": "backend/agents/reasoning.py", "characters": 3276, "sha256": "5c652d7998fc9d0b56b5d0a30f856b949d0ddba89d0ee66cab672c3091c04ef8"}
+"""Optional reasoning step before each planner call (PLANNER_REASONING=true, or reasoning=True).
+
+The planner model rarely explains its tool calls. When this step is on, the same model is first asked in plain
+text, with no tools attached, what the next step should be and why. Its reply is added to the tool conversation
+as the planned next step, recorded in the result's `reasoning`, and traced as a `Planner Reasoning` llm span.
+With the step off, research runs exactly as before.
+"""
+import json
+import os
+
+RULES = '''
+REASONING STEP. You are not calling tools in this reply. Reply in plain text, at most four sentences:
+1. What the results so far establish, or "Nothing yet" before the first call.
+2. The single next tool call: the tool, its key parameters, and why it is the right next step.
+If the evidence already answers the question, say the next step is to call answer, and why.
+Do not answer the question and do not write tool requests as JSON.'''
+
+NOTE = ('Your next step should be this (from your own reasoning): {plan}\n'
+        'Make that call now as a native tool call. If the results above show the plan is wrong, make the better '
+        'call instead.')
+
+RESULT_CHARS = 4000  # per tool result in the transcript; full results stay in the tool conversation
+
+
+def enabled(setting=None):
+    """An explicit setting wins; otherwise PLANNER_REASONING (off unless 'true', '1' or 'yes')."""
+    if setting is not None:
+        return bool(setting)
+    return os.getenv('PLANNER_REASONING', '').strip().lower() in {'true', '1', 'yes'}
+
+
+def _clip(text):
+    return text if len(text) <= RESULT_CHARS else text[:RESULT_CHARS] + ' ...[truncated]'
+
+
+def _earlier_plan(text):
+    return text.startswith(NOTE.split('{')[0])
+
+
+def transcript(messages):
+    """The tool conversation as plain text, so it can be sent without tool definitions.
+
+    Earlier plans are left out: the calls that followed them show what was done, and a model shown its first plan
+    tends to repeat it word for word.
+    """
+    lines = []
+    for index, message in enumerate(messages):
+        for block in message['content']:
+            if 'toolUse' in block:
+                call = block['toolUse']
+                lines.append(f"PLANNER CALLED {call['name']}: {json.dumps(call.get('input'), default=str)}")
+            elif 'toolResult' in block:
+                for part in block['toolResult']['content']:
+                    if 'text' in part and not _earlier_plan(part['text']):
+                        lines.append('RESULT: ' + _clip(part['text']))
+            elif 'text' in block and _earlier_plan(block['text']):
+                continue
+            elif 'text' in block:
+                if index == 0:
+                    lines.append('REQUEST: ' + block['text'])
+                elif message['role'] == 'assistant':
+                    lines.append('PLANNER WROTE: ' + _clip(block['text']))
+                else:
+                    lines.append('NOTE: ' + _clip(block['text']))
+    return '\n'.join(lines)
+
+
+def next_step(llm, system, messages):
+    """Ask the planner model, without tools, for its next step and the reason for it."""
+    return llm.run(system=system + RULES,
+                   messages=[{'role': 'user', 'content': [{'text': transcript(messages)}]}]).strip()
+
+===== REPOSITORY FILE =====
 {"path": "backend/agents/turn_session.py", "characters": 3860, "sha256": "b6ecc6ce4feb0b9b0d06c615b2d14861c4eb2245a4bcd495bf070aa3ba188659"}
 """The model conversation for one turn (a question through to its answer), over native Bedrock tool calls, and
 tool-call validation.
@@ -2715,7 +2844,7 @@ def _response(status, result, error, loaded, request_id, trace_id, session_id, q
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/SPANS.md", "characters": 12830, "sha256": "3e33a1a91597acf1e9bc295485c662c9c3f50cef74a9dc42422e8a7c9f90abb2"}
+{"path": "backend/observability/SPANS.md", "characters": 13005, "sha256": "4175011a0b8501b17b11307c5b049e282e8620579b376c7cd3546e29b40ec719"}
 # Trace spans
 
 Every span the application records, and every field each one carries. The same spans go to Datadog LLM
@@ -2734,7 +2863,9 @@ agent  document_agent
 ├── workflow  init
 ├── workflow  assess                         always; returns at once when ambiguity is 'off'
 │   └── llm  Ambiguity Assessment            ambiguity 'assumptions' or 'ask', no clarification
-├── workflow  plan                     ┐
+├── workflow  reason                   ┐     only with PLANNER_REASONING (backend/agents/reasoning.py)
+│   └── llm  Planner Reasoning         │
+├── workflow  plan                     │
 │   └── llm  Native Document Research  │     repeated once per research step
 ├── workflow  tools                    │
 │   └── tool  <tool name> × N          ┘
@@ -2785,7 +2916,7 @@ finished trace is archived.
 | output 🔒 | content | Answer text |
 | error | status | Set when the status is not `answered`, `needs_clarification` or `no_evidence` |
 
-## `workflow` · `init`, `assess`, `plan`, `tools`, `synthesize`
+## `workflow` · `init`, `assess`, `reason`, `plan`, `tools`, `synthesize`
 
 One span per LangGraph node execution, from `tracing.traced_node` (applied in
 `document_agent.build_document_graph`).
@@ -2800,7 +2931,7 @@ One span per LangGraph node execution, from `tracing.traced_node` (applied in
 ## `llm` · one per Bedrock call
 
 Started in `LLM.converse` (`backend/agents/llm.py`). The span name is the `LLM`'s `tool_name`: `Ambiguity
-Assessment`, `Native Document Research`, `Document Answer`, `Document Answer Revision` or `Document Enrichment`.
+Assessment`, `Planner Reasoning`, `Native Document Research`, `Document Answer`, `Document Answer Revision` or `Document Enrichment`.
 
 | Field | Type | Value |
 | --- | --- | --- |
@@ -9094,6 +9225,51 @@ def test_exported_directory_rejects_traversal(tmp_path):
     (tmp_path / SHEETS_FILE).write_text(json.dumps(meta))
     with pytest.raises(ValueError, match='basename'):
         read_exported_tables(tmp_path)
+
+===== REPOSITORY FILE =====
+{"path": "development/tests/test_reasoning.py", "characters": 2395, "sha256": "942222dece885f67efbc0ce89b13b4ca8ab0afafa06b018bbe40b9f2498119c1"}
+import json
+
+from backend.preprocessing.documents import ingest_document
+from backend.agents import reasoning
+from backend.agents.document_agent import run_document_agent
+
+
+def test_reasoning_runs_before_each_planner_call(native_script):
+    doc = ingest_document('rates.txt', b'Rate USD 88.')
+    requests = native_script(['Nothing yet. Read rates.txt because it is the only file.',
+                              {'tool': 'read_document', 'parameters': {'document_id': doc.id}},
+                              'E1 shows the rate. Call answer.',
+                              {'tool': 'answer', 'parameters': {}}, 'Rate USD 88.'])
+    r = run_document_agent({doc.id: doc}, [doc.id], 'Rate?', reasoning=True)
+    assert [s['step'] for s in r['reasoning']] == [1, 2]
+    assert r['reasoning'][0]['plan'].startswith('Nothing yet')
+    assert r['protocol']['reasoning_steps'] == 2 and r['answer'] == 'Rate USD 88.'
+    # The reasoning call has no tools; the planner call after it carries the plan.
+    assert 'toolConfig' not in requests[0] and 'REASONING STEP' in requests[0]['system'][0]['text']
+    assert 'Read rates.txt' in json.dumps(requests[1]['messages'])
+    # The second reasoning call sees the first tool call and its result as text.
+    transcript = requests[2]['messages'][0]['content'][0]['text']
+    assert 'PLANNER CALLED read_document' in transcript and 'RESULT:' in transcript
+    # Earlier plans are left out, so the model does not repeat its first plan.
+    assert 'Read rates.txt' not in transcript
+
+
+def test_reasoning_off_leaves_research_unchanged(native_script, monkeypatch):
+    monkeypatch.delenv('PLANNER_REASONING', raising=False)
+    doc = ingest_document('rates.txt', b'Rate USD 88.')
+    requests = native_script([{'tool': 'read_document', 'parameters': {'document_id': doc.id}},
+                              {'tool': 'answer', 'parameters': {}}, 'Rate USD 88.'])
+    r = run_document_agent({doc.id: doc}, [doc.id], 'Rate?')
+    assert 'reasoning' not in r and len(requests) == 3
+    assert not any('next step should be' in json.dumps(q['messages']) for q in requests)
+
+
+def test_setting_follows_environment_unless_explicit(monkeypatch):
+    monkeypatch.setenv('PLANNER_REASONING', 'true')
+    assert reasoning.enabled() and not reasoning.enabled(False)
+    monkeypatch.setenv('PLANNER_REASONING', 'no')
+    assert not reasoning.enabled() and reasoning.enabled(True)
 
 ===== REPOSITORY FILE =====
 {"path": "development/tests/test_repo_bundle.py", "characters": 2219, "sha256": "0e14fae76d50c27465d1ca2fbf2fb07a7844add05f8099e46f8edeb5fdbe9c66"}
