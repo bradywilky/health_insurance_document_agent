@@ -269,6 +269,25 @@ def _filter_diagnostics(frame, filters):
     return notes
 
 
+def _anded_same_column(frame, filters):
+    """Notes for several eq/contains filters on one column that only fail together (an AND meant as OR)."""
+    by_column = {}
+    for condition in filters if isinstance(filters, list) else []:
+        if isinstance(condition, dict) and condition.get('op') in {'eq', 'contains'}:
+            by_column.setdefault(condition.get('column'), []).append(condition)
+    notes = []
+    for col, conditions in by_column.items():
+        if len(conditions) < 2 or col not in frame.columns or len(filter_rows(frame, conditions)):
+            continue
+        alone = {str(c.get('value')): len(filter_rows(frame, [c])) for c in conditions}
+        if any(alone.values()):
+            notes.append({'column': col, 'anded_same_column': alone, 'matched_rows': 0,
+                          'message': f'These {len(conditions)} filters on {col!r} are ANDed, so a row must satisfy '
+                                     'all of them, and none does. Alone they match the counts shown. For "any of '
+                                     'these", put them in one {"any": [...]} filter and rerun before answering.'})
+    return notes
+
+
 def _ordered(value):
     """Sort key that orders numbers before text, so a mixed column still sorts."""
     return (0, value, '') if isinstance(value, (int, float)) and not isinstance(value, bool) else (1, 0, str(value))
@@ -429,7 +448,9 @@ def query_table(frame, params):
             'unit_context': unit_context, 'conversions': conversions,
             'numeric_policy': 'Decimal arithmetic, 38 significant digits; means may repeat. No implicit rounding.',
             'recode': params.get('recode', []), 'derive': params.get('derive', []),
-            'filter_diagnostics': _filter_diagnostics(frame, params.get('filters', [])), 'notes': notes}
+            'filter_diagnostics': _filter_diagnostics(frame, params.get('filters', []))
+                                  + (_anded_same_column(frame, params.get('filters', [])) if not len(filtered) else []),
+            'notes': notes}
 
 
 def join_tables(left, right, params):

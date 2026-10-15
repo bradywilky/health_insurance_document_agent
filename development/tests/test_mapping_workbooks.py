@@ -87,6 +87,22 @@ def test_value_in_another_column_is_reported(workbook):
     assert not any('sheet_names' in note for note in result['notes'])
 
 
+def test_anded_filters_on_one_column_suggest_any_group(workbook):
+    result = query(workbook, sheet_name='Billing', filters=[
+        {'column': 'Legacy Name', 'op': 'contains', 'value': 'Field 1'},
+        {'column': 'Legacy Name', 'op': 'contains', 'value': 'Field 2'}])
+    assert result['matched_rows'] == 0
+    note = next(d for d in result['filter_diagnostics'] if 'anded_same_column' in d)
+    assert note['anded_same_column'] == {'Field 1': 11, 'Field 2': 11}
+    # The query is wrong, not the tab, so the planner is not sent to other tabs.
+    assert not any('sheet_names' in n for n in result['notes'])
+    both = query(workbook, sheet_name='Billing', filters=[{'any': [
+        {'column': 'Legacy Name', 'op': 'contains', 'value': 'Field 1'},
+        {'column': 'Legacy Name', 'op': 'contains', 'value': 'Field 2'}]}])
+    assert both['matched_rows'] == 22
+    assert not any('anded_same_column' in d for d in both['filter_diagnostics'])
+
+
 def test_conflicting_mappings_flagged_only_for_identifier_keys(workbook):
     conflict = query(workbook, sheet_names=['*'], filters=[{'column': 'Legacy Name', 'op': 'eq',
                      'value': 'Parcel - Field 2'}], select=['New Name'])

@@ -135,8 +135,10 @@ def execute_table_tool(
                               'csv_record_indices': indices,
                               'row_number_basis': 'CSV indices are zero-based; source rows are one-based'}]
         result['warnings'] = sheets[sheet_name].get('warnings', [])
-        # A value found in another column of this sheet is a wrong-column query, not a wrong-sheet one.
-        found_here = any('value_found_in_columns' in d for d in result.get('filter_diagnostics', []))
+        # A value found in another column of this sheet, or filters that only fail when ANDed, mean a wrong
+        # query, not a wrong sheet.
+        found_here = any('value_found_in_columns' in d or 'anded_same_column' in d
+                         for d in result.get('filter_diagnostics', []))
         if result['matched_rows'] == 0 and tool_input.get('filters') and not found_here:
             needed = _referenced_columns(tool_input)
             others = [n for n, m in sheets.items() if n != sheet_name and m.get('sheet_type') == 'data'
