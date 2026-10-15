@@ -1363,7 +1363,7 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 34397, "sha256": "8bee6f733e50fa4ff8236cdb96f9391a5cac9f2f957c9ce021b5bbfb46c3bbfc"}
+{"path": "backend/agents/document_agent.py", "characters": 34563, "sha256": "5484d2fe53b76a296d69f9783c88c9e9dd85fac6a833ac71bc703254560b93e9"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
@@ -1410,6 +1410,7 @@ $search_tools
   read_sheet parameters: {"sheet_name":"name","offset":0,"limit":50}.
   query_table: {"sheet_name":"name","filters":[{"column":"name","op":"eq","value":"value"}],"select":["column"],"group_by":["column"],"aggregations":[{"column":"numeric","op":"sum","as":"total"}],"limit":50}.
   select and aggregations cannot be combined; optional fields may be omitted. Filter ops: eq,ne,gt,ge,lt,le,in,contains,is_null,not_null. Aggregates: sum,mean,min,max,count,nunique,count_rows.
+  Filters are ANDed. For OR, put conditions in one group: {"any":[{"column":"Name","op":"contains","value":"Red"},{"column":"Name","op":"contains","value":"Blue"}]}.
   recode (applied before filters and grouping): [{"column":"city","map":{"THR":"Tehran","tehr@n":"Tehran"}}]
   maps exact column values to one value, or to null ({"nan":null}) for text missing markers.
   derive (applied after recode): [{"column":"Element Name","as":"prefix","split":" - ","part":0}] adds a column
@@ -5049,7 +5050,7 @@ def execute_document_tool(name, params, docs):
     raise ValueError(f'Unknown document tool: {name}')
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/table_operations.py", "characters": 25627, "sha256": "567a31dd84ee287f5c591132d1b712ac6787ff8f5c585018e0dc429a01f14915"}
+{"path": "backend/tools/table_operations.py", "characters": 26878, "sha256": "776ff0d5d37a4890771ab50a047c8de9e43d7c7d605de3905efb8468f0fd85da"}
 """Validated, deterministic table operations. No eval or generated Python."""
 import operator
 from collections import Counter
@@ -5188,15 +5189,43 @@ def _matches(frame, col, op, value):
     raise ValueError(f'Unsupported filter operator: {op}')
 
 
+def _condition_mask(frame, condition):
+    if not isinstance(condition, dict):
+        raise ValueError('Each filter must be an object')
+    _check_keys(condition, {'column', 'op', 'value'})
+    col, op = condition.get('column'), condition.get('op')
+    _columns(frame, [col])
+    return _matches(frame, col, op, condition.get('value'))
+
+
+def _filter_mask(frame, condition):
+    """A plain condition, or {"any": [conditions]} keeping rows that match at least one of them."""
+    if isinstance(condition, dict) and 'any' in condition:
+        _check_keys(condition, {'any'})
+        group = condition['any']
+        if not isinstance(group, list) or not group:
+            raise ValueError('"any" must be a nonempty list of filter conditions')
+        masks = [_condition_mask(frame, c) for c in group]
+        return [any(row) for row in zip(*masks)]
+    return _condition_mask(frame, condition)
+
+
+def flat_conditions(filters):
+    """Every plain condition in a filter list, including those inside "any" groups."""
+    for condition in filters if isinstance(filters, list) else []:
+        if isinstance(condition, dict) and isinstance(condition.get('any'), list):
+            yield from (c for c in condition['any'] if isinstance(c, dict))
+        elif isinstance(condition, dict):
+            yield condition
+
+
 def filter_rows(frame, filters):
+    """Filters are ANDed; an {"any": [...]} filter ORs the conditions inside it."""
     if not isinstance(filters, list):
         raise ValueError('filters must be a list')
     result = frame
     for condition in filters:
-        _check_keys(condition, {'column', 'op', 'value'})
-        col, op = condition['column'], condition['op']
-        _columns(result, [col])
-        mask = _matches(result, col, op, condition.get('value'))
+        mask = _filter_mask(result, condition)
         result = result.take(p for p, keep in enumerate(mask) if keep)
     return result
 
@@ -5261,7 +5290,7 @@ def _found_elsewhere(frame, condition):
 def _filter_diagnostics(frame, filters):
     """Point out likely spelling variants, missing markers, or a value that sits in another column."""
     notes = []
-    for condition in filters:
+    for condition in flat_conditions(filters):
         col, op, value = condition.get('column'), condition.get('op'), condition.get('value')
         if col not in frame.columns or col in frame.numeric:
             continue
@@ -5534,14 +5563,14 @@ def join_tables(left, right, params):
     return result
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/tables.py", "characters": 14092, "sha256": "0e806ce94aef3f0635387899ce15d365e1aba79586a26d3114fd319a05f065aa"}
+{"path": "backend/tools/tables.py", "characters": 14187, "sha256": "d30a88c10da65756918dbf80a88961bacfcf287e6d9e3060a90f8b242682e9ff"}
 """Deterministic table tools used by the document agent; no agent imports."""
 import logging
 from backend.shared.serialization import sanitize_result
 from backend.shared.rows import narrative_rows
 from backend.shared.table import Table, concat
 from backend.storage.tables import load_table
-from backend.tools.table_operations import query_table, join_tables
+from backend.tools.table_operations import flat_conditions, query_table, join_tables
 
 logger = logging.getLogger(__name__)
 
@@ -5566,7 +5595,8 @@ def _load_for_query(load, name, meta):
 
 def _referenced_columns(params):
     names = set(params.get('select', [])) | set(params.get('group_by', []))
-    for key in ('filters', 'aggregations', 'recode', 'sort', 'derive'):
+    names |= {item.get('column') for item in flat_conditions(params.get('filters', []))}
+    for key in ('aggregations', 'recode', 'sort', 'derive'):
         names |= {item.get('column') for item in params.get(key, []) if isinstance(item, dict)}
     derived = {item.get('as') for item in params.get('derive', []) if isinstance(item, dict)}
     return {n for n in names if n and n not in {'_sheet', '_source_row'} | derived}
@@ -9818,7 +9848,7 @@ def test_delete_removes_outputs_and_original_within_the_group(store):
     assert [d['filename'] for d in store.for_group('other.org').list_documents()] == ['rules.txt']
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_table_tools.py", "characters": 7305, "sha256": "6e6cbced1ed3f9760141795e064e49cfd329ecc735d8f9d5ff87ed7b85d5cc17"}
+{"path": "development/tests/test_table_tools.py", "characters": 8199, "sha256": "91b3025a20b3b2c16cf9bfa9b9b3a7f2d850a8ac003f77e071ebef860be3163c"}
 import pandas as pd
 import pytest
 
@@ -9861,7 +9891,20 @@ def test_literal_filter_and_pagination_preserve_source_indices():
     assert result['next_offset'] is None
 
 
+def test_any_group_ors_conditions_and_ands_with_other_filters():
+    df = as_table(pd.DataFrame({'Name':['Blue Flare','Dark Pulse','Red Card','Tackle','Blue Card'],
+                                'Gen':['V','IV','VI','I','I']}))
+    colors = {'any':[{'column':'Name','op':'contains','value':'blue'},
+                     {'column':'Name','op':'contains','value':'red'}]}
+    result = query_table(df, {'filters':[colors], 'select':['Name']})
+    assert [r['Name'] for r in result['rows']] == ['Blue Flare','Red Card','Blue Card']
+    result = query_table(df, {'filters':[colors, {'column':'Gen','op':'ne','value':'I'}], 'select':['Name']})
+    assert [r['Name'] for r in result['rows']] == ['Blue Flare','Red Card']
+
+
 @pytest.mark.parametrize('params', [
+    {'filters':[{'any':[]}]}, {'filters':[{'any':[{'column':'missing','op':'eq','value':'a'}]}]},
+    {'filters':[{'any':[{'column':'x','op':'eq','value':1}], 'column':'x'}]},
     {'sql':'DROP TABLE anything'}, {'select':['missing']}, {'limit':0}, {'offset':-1},
     {'group_by':['x']}, {'filters':[{'column':'x','op':'execute','value':'bad'}]},
     {'aggregations':[{'column':'x','op':'median','as':'m'}]},
