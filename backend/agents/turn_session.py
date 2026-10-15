@@ -27,6 +27,26 @@ class TruncatedReply(ValueError):
     """The reply hit the output token limit, so its tool calls may be incomplete and are not run."""
 
 
+def record_once(llm, system, payload, spec, attempts=2):
+    """Parameters of the one call to `spec` the model makes for payload, retrying with a correction.
+
+    Used by the upload-time search hints and the relevance scan, which each need a single structured reply.
+    """
+    name = spec['toolSpec']['name']
+    session = TurnSession(llm, system, payload, [spec])
+    for attempt in range(attempts):
+        try:
+            actions = session.request()
+            if len(actions) != 1 or actions[0]['tool'] != name:
+                raise ValueError(f'Call {name} exactly once')
+            validate_action(actions[0], [spec])
+            return actions[0]['parameters']
+        except ValueError as exc:
+            if attempt == attempts - 1:
+                raise
+            session.feedback([], error=f'{exc}. Call {name} once, following its schema.')
+
+
 class TurnSession:
     """request() returns the model's next tool calls; feedback() answers every one of them; note() adds guidance."""
 

@@ -30,6 +30,10 @@ def tool_specs(document_ids, table_ids=None):
     return listing + [
         spec('search',f'Search {scope} text{rows} lexically. Empty results do not prove absence.',
              search, ['query']),
+        spec('scan','Have a model read every text block and return the ones relevant to '
+             'query, with a reason each. Finds passages worded differently from the question. Slower and costlier '
+             'than search: use it when search misses, or when the answer must be complete.',
+             {**search, 'query':{'type':'string','minLength':1,'maxLength':1000}}, ['query']),
         spec('read_document','Read consecutive source blocks. Follow next_offset for more content.',
              {'document_id':doc,'offset':{'type':'integer','minimum':0},
               'limit':{'type':'integer','minimum':1,'maximum':20}}, ['document_id'])] + tables + [
@@ -59,7 +63,7 @@ def has_content(record):
         return False
     if record['tool']=='read_document':
         return bool(data.get('blocks'))
-    if record['tool']=='search':
+    if record['tool'] in {'search','scan'}:
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
         result = data.get('table_result',{})
@@ -78,9 +82,12 @@ def examined_documents(evidence):
     """Selected document IDs from which source content was actually retrieved."""
     examined = set()
     for record in evidence:
+        if record['tool'] == 'scan' and not record['data'].get('error'):
+            # A scan read every text block, so a document with no relevant blocks was still examined.
+            examined.update(record['data'].get('scanned_document_ids', []))
         if not has_content(record):
             continue
-        if record['tool'] == 'search':
+        if record['tool'] in {'search', 'scan'}:
             examined.update(match['document_id'] for match in record['data']['matches'])
         else:
             examined.add(record['data']['document_id'])

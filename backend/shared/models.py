@@ -14,6 +14,7 @@ class Document:
 
     storage_ref: dict | None = None
     profile: dict | None = None
+    search_hints: dict | None = None  # backend/agents/search_hints.py; routes search, never evidence
 
     def summary(self):
         result = {'document_id':self.id, 'filename':self.name, 'type':self.kind,

@@ -1,6 +1,7 @@
 import os
 from botocore.config import Config
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import threading
 
 import boto3
 
@@ -15,11 +16,14 @@ class Usage:
     llm_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Relevance scans call the model from several threads at once.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def add(self, usage: dict) -> None:
-        self.llm_calls += 1
-        self.input_tokens += usage.get('inputTokens', 0)
-        self.output_tokens += usage.get('outputTokens', 0)
+        with self._lock:
+            self.llm_calls += 1
+            self.input_tokens += usage.get('inputTokens', 0)
+            self.output_tokens += usage.get('outputTokens', 0)
 
     def totals(self) -> dict:
         return {'llm_calls': self.llm_calls, 'input_tokens': self.input_tokens, 'output_tokens': self.output_tokens}

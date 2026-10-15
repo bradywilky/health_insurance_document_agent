@@ -39,6 +39,10 @@ Ask for missing dates/versions when necessary. Separate quoted rules from interp
 Preserve units and numerical precision.
 Tools:
 $search_tools
+- scan: {"query":"what the passages must show"$scan_ids} has a model read every text block and return the relevant
+  ones with reasons. It finds passages worded differently from the question but is slower and costlier than search.
+  Use it when search misses or the wording is uncertain, or when the answer must be complete (every exclusion,
+  limit or exception). Follow more_relevant with read_document.
 - read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
 ${table_tool}- calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
   using numbers copied from the cited evidence or question.
@@ -78,7 +82,7 @@ TABLE_TOOL = '''- table_tool: {"document_id":"ID","name":"list_sheets|get_sheet_
 '''
 TABLE_RULES = '''list_sheets is evidence of a workbook's sheets and columns, not of the values inside them. Its _same_columns and
 _similar_columns already compare the data sheets' columns; use them rather than comparing column lists yourself.
-Use query_table for totals, not partial search snippets.
+Use query_table for totals, not partial search snippets. scan reads text blocks only, never data-sheet rows.
 Spreadsheet data quality: column_hints and get_sheet_schema list all_values, possible_variant_groups
 (spellings that may be one entity), possible_missing_markers and possible_placeholder_values. Before filtering or
 grouping a text column, check its values. When variants plausibly name the same entity, combine them with recode
@@ -108,6 +112,7 @@ SINGLE = {
                 'read_document over narrow searches.',
     'index_note': "The selected_documents summary is not evidence of the document's contents.",
     'governs': '',
+    'scan_ids': '',
 }
 MULTIPLE = {
     'source': 'the selected documents',
@@ -120,6 +125,7 @@ MULTIPLE = {
                 'selected source remains unread. For short relevant text files prefer read_document over narrow searches.',
     'index_note': 'The list_documents index is not evidence of document contents.',
     'governs': ' and which selected document governs',
+    'scan_ids': ',"document_ids":["optional selected IDs"]',
 }
 
 
@@ -153,6 +159,7 @@ class DocumentState(TypedDict, total=False):
     model: str
     docs: dict
     turn_session: TurnSession
+    scan_llm: LLM
     specs: list
     actions: list
     request_error: str | None
@@ -193,9 +200,13 @@ def node_init(state: DocumentState) -> dict:
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Native Document Research',
               model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
+    # The scan tool's model reads blocks in parallel; its calls count toward this question's usage.
+    scan_llm = LLM(agent_name='health_insurance_document_agent', tool_name='Relevance Scan',
+                   model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
     turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables))
                                + '\nUse native tools; do not write tool requests as text.', payload, specs)
     return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
+            'scan_llm': scan_llm,
             'steps': 0, 'evidence': [], 'seen': {},
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
@@ -365,7 +376,7 @@ def node_tools(state: DocumentState) -> dict:
                         results.append({'error': str(exc)})
                         continue
                 else:
-                    data = execute_document_tool(name, params, state['docs'])
+                    data = execute_document_tool(name, params, state['docs'], scan_llm=state.get('scan_llm'))
                 failed = data.get('error') or (data.get('table_result') or {}).get('error')
                 if failed:
                     tracing.mark_error(tool_span, failed)

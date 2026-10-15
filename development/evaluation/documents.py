@@ -1,6 +1,7 @@
 """Run the synthetic selected-document evaluation with real Bedrock inference."""
 import argparse
 from backend.agents.enrichment import make_enricher
+from backend.agents.search_hints import make_hinter
 import json
 import os
 from pathlib import Path
@@ -30,6 +31,8 @@ def main():
     parser.add_argument('--traces', type=Path, help='Save full local model-call traces')
     parser.add_argument('--enrich', action='store_true',
                         help='Generate semantic profiles (one extra model call per document chunk) before asking')
+    parser.add_argument('--hints', action='store_true',
+                        help='Generate search hints (one extra model call per 15 text blocks) before asking')
     parser.add_argument('--fixtures', type=Path,
                         help='Generated fixture directory containing questions.json and upload files')
     args=parser.parse_args()
@@ -51,7 +54,8 @@ def main():
         if not path.is_relative_to(root.resolve()):
             raise ValueError('Fixture path escapes the fixture directory')
         docs.append(ingest_document(path.name,path.read_bytes(),
-                                    enrich=make_enricher() if args.enrich else None))
+                                    enrich=make_enricher() if args.enrich else None,
+                                    hint=make_hinter() if args.hints else None))
     documents={d.id:d for d in docs}
     if args.enrich:
         save_profiles(docs, args.output)

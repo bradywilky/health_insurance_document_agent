@@ -67,7 +67,7 @@ The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with a
 
 `backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
 
-This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and semantic retrieval are not implemented. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. The returned `sources` identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
+This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and embedding-based retrieval are not implemented; see Search hints and relevance scan. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. The returned `sources` identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
 
 **Load Bingle-Dingle examples** loads eight Bingle-Dingle health-insurance documents: provider agreement, rate schedule, executed amendment, processing guide, unexecuted draft, benefit summary, authorization rules, and claim packet. Bingle-Dingle Insurance is a regional health insurer offering the Meadow product. The documents cover provider terms, benefits, authorization, and claim-specific records.
 
@@ -285,7 +285,9 @@ store.delete(filename)                                        # remove its prepr
 ```
 
 `ingest_document` also takes `enrich=make_enricher()` (backend/agents/enrichment.py) to add a semantic profile,
-and `store.save_profile(manifest_key, profile)` stores a reviewed one. `load` and `delete` accept a filename or the
+and `store.save_profile(manifest_key, profile)` stores a reviewed one. `hint=make_hinter()`
+(backend/agents/search_hints.py) adds search hints, and `store.save_search_hints(manifest_key, hints)` adds them to a
+saved document. `load` and `delete` accept a filename or the
 full `storage_ref['manifest_key']`. `delete` removes the manifest first, so the document leaves the list at once;
 deleting a document that is already gone does nothing. Without a store, `ingest_document` only extracts.
 
@@ -496,6 +498,24 @@ why. That plan is added to the tool conversation as "Your next step should be th
 in the result's `reasoning` (`[{step, plan}]`), counted in `protocol.reasoning_steps`, and traced as `Planner
 Reasoning` llm spans. It roughly doubles planner calls. With the setting off, research is unchanged. The step
 lives in `backend/agents/reasoning.py` plus the `reason` node in `document_agent.py`.
+
+## Search hints and relevance scan
+
+Keyword search misses passages worded differently from the question ("ER visit" vs "emergency room services").
+Two optional pieces close that gap:
+
+- **Search hints** (upload portal checkbox, off by default; `backend/agents/search_hints.py`). At upload the model
+  lists, for every text block, other words a reader might search for it by: synonyms, plain-language and technical
+  names, expanded abbreviations and questions the block answers. One Bedrock call per 15 blocks, run in parallel
+  (`SEARCH_HINT_WORKERS`, default 4), stored as `search_hints.json`. `search` then matches a query against a block's
+  hints as well as its text; a hit still returns only the block's own text, with `matched_hints` naming the query
+  words found only through hints. Hints are never evidence, and a failed batch never blocks an upload.
+- **scan tool** (`backend/retrieval/scan.py`). At question time the planner can have the model read every text
+  block of the selected documents, 20 blocks per call, in parallel (`SCAN_WORKERS`, default 8), and keep the ones
+  relevant to a query with a short reason. The model judges the raw blocks, not summaries, so details such as
+  exceptions are not lost. It is slower and costlier than search, so the planner uses it when search misses or
+  when an answer must be complete. One call is capped at `SCAN_MAX_BLOCKS` (default 600) text blocks. Spreadsheet
+  data rows are not scanned; table tools cover them. Scan calls count toward the question's usage.
 
 ## Semantic profiles (optional, at upload)
 

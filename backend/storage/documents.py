@@ -148,10 +148,13 @@ class ObjectDocumentStore:
                                             'table_metadata':doc.table_metadata})
         if doc.profile:
             self._json(root + 'semantic_profile.json', doc.profile)
+        if doc.search_hints:
+            self._json(root + 'search_hints.json', doc.search_hints)
         # Publish the manifest last. Failed uploads do not appear in the saved-file picker.
         key = root + 'manifest.json'
         manifest = {'schema_version':2, 'document_id':doc.id, 'filename':doc.name,
-                    'kind':doc.kind, 'has_tables':bool(doc.table_folder), 'has_profile':bool(doc.profile)}
+                    'kind':doc.kind, 'has_tables':bool(doc.table_folder), 'has_profile':bool(doc.profile),
+                    'has_search_hints':bool(doc.search_hints)}
         self._json(key, manifest)
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':key}
         return doc.storage_ref
@@ -190,6 +193,8 @@ class ObjectDocumentStore:
             doc.table_folder = TableFolder(self.client, self.bucket, root)
         if manifest.get('has_profile'):
             doc.profile = self._read_json(root + 'semantic_profile.json')
+        if manifest.get('has_search_hints'):
+            doc.search_hints = self._read_json(root + 'search_hints.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
         return doc
 
@@ -226,6 +231,18 @@ class ObjectDocumentStore:
             self._json(manifest_key, {**manifest, 'has_profile': True})
             from backend.observability import tracing
             tracing.annotate(current, metadata=_profile_change(previous, profile))
+
+    def save_search_hints(self, manifest_key, hints):
+        """Store generated search hints for an already saved document, replacing any earlier ones."""
+        if self.read_only:
+            raise PermissionError("This document store is read-only")
+        with _trace('save_search_hints', manifest_key=manifest_key, group_name=self.group):
+            root = self._root(manifest_key)
+            manifest = self._read_json(manifest_key)
+            if not isinstance(hints, dict) or not isinstance(hints.get('blocks'), dict):
+                raise ValueError('Search hints must be an object with blocks')
+            self._json(root + 'search_hints.json', hints)
+            self._json(manifest_key, {**manifest, 'has_search_hints': True})
 
     def list_documents(self, limit=100):
         if type(limit) is not int or limit < 1:

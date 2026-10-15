@@ -22,6 +22,7 @@ agent  document_agent
 │   └── llm  Native Document Research  │     repeated once per research step
 ├── workflow  tools                    │
 │   └── tool  <tool name> × N          ┘
+│       └── llm  Relevance Scan × N          scan tool only: one per batch of 20 text blocks, run in parallel
 └── workflow  synthesize
     ├── llm  Document Answer
     └── llm  Document Answer Revision        when the answer check finds issues
@@ -31,8 +32,10 @@ One trace per document change, each archived when it ends:
 
 ```text
 workflow  ingest_document                    backend/preprocessing/documents.py, ingest_document
-└── llm  Document Enrichment                 when a semantic profile is requested
+├── llm  Document Enrichment                 when a semantic profile is requested
+└── llm  Search Hints × N                    when search hints are requested: one per 15 text blocks, in parallel
 workflow  save_profile                       backend/storage/documents.py, save_profile
+workflow  save_search_hints                  backend/storage/documents.py, save_search_hints
 workflow  delete_document                    backend/storage/documents.py, delete
 ```
 
@@ -84,7 +87,7 @@ One span per LangGraph node execution, from `tracing.traced_node` (applied in
 ## `llm` · one per Bedrock call
 
 Started in `LLM.converse` (`backend/agents/llm.py`). The span name is the `LLM`'s `tool_name`: `Ambiguity
-Assessment`, `Planner Reasoning`, `Native Document Research`, `Document Answer`, `Document Answer Revision` or `Document Enrichment`.
+Assessment`, `Planner Reasoning`, `Native Document Research`, `Document Answer`, `Document Answer Revision`, `Relevance Scan`, `Document Enrichment` or `Search Hints`.
 
 | Field | Type | Value |
 | --- | --- | --- |

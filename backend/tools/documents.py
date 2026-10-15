@@ -1,4 +1,5 @@
 """Selected-document tools, independent of agent orchestration."""
+from backend.retrieval.scan import scan_documents
 from backend.retrieval.search import search_documents
 from backend.tools.tables import execute_table_tool
 
@@ -18,12 +19,18 @@ def _document(docs, params):
     return docs[key]
 
 
-def execute_document_tool(name, params, docs):
+def execute_document_tool(name, params, docs, *, scan_llm=None):
+    """Run one document tool on the selected docs. scan_llm is the model the scan tool reads blocks with."""
     if name == 'list_documents':
         return {'documents':[doc.summary() for doc in docs.values()]}
     if name == 'search':
         subset = selected_documents(docs, params['document_ids']) if 'document_ids' in params else docs
         return search_documents(subset, params['query'], limit=params.get('limit',8))
+    if name == 'scan':
+        if scan_llm is None:
+            raise ValueError('scan is not available here')
+        subset = selected_documents(docs, params['document_ids']) if 'document_ids' in params else docs
+        return scan_documents(subset, params['query'], scan_llm, limit=params.get('limit', 8))
     if name == 'read_document':
         doc = _document(docs, params)
         offset, limit = params.get('offset',0), params.get('limit',8)

@@ -1,4 +1,4 @@
-"""Lexical retrieval over selected preprocessed documents."""
+"""Lexical retrieval over selected preprocessed documents, widened by upload-time search hints when present."""
 from collections import OrderedDict
 import re
 
@@ -37,26 +37,47 @@ def _units(doc):
             yield {'block_id': f"{sheet}!R{location['csv_record']}", 'text': row_text(row), 'location': location}
 
 
+def _hint_words(doc):
+    """block_id -> (words, casefolded hint phrases) from upload-time search hints, when the document has them."""
+    blocks = (doc.search_hints or {}).get('blocks') or {}
+    return {key: (set(re.findall(r'[\w]+', ' '.join(hints).casefold())), [h.casefold() for h in hints])
+            for key, hints in blocks.items()}
+
+
 def search_documents(documents, query, *, limit=8):
-    """Small-corpus lexical retrieval, restricted to the supplied selected documents."""
+    """Small-corpus lexical retrieval, restricted to the supplied selected documents.
+
+    Text blocks also match on their upload-time search hints (other words for what the block says). A hit still
+    returns only the block's own text; matched_hints lists the query words found only through hints.
+    """
     if not isinstance(query, str) or not query.strip():
         raise ValueError('query must be a nonempty string')
     if type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError('limit must be 1..20')
     terms = set(re.findall(r'[\w]+', query.casefold())) - STOP
+    phrase = query.casefold().strip()
     hits = []
     for doc in documents.values():
+        hinted = _hint_words(doc)
         for unit in _units(doc):
             text = unit['text'].casefold()
             words = set(re.findall(r'[\w]+', text))
-            score = len(terms & words)
-            if query.casefold() in text:
+            hint_words, hint_phrases = hinted.get(unit['block_id'], (set(), []))
+            via_hints = (terms & hint_words) - words
+            score = len(terms & words) + len(via_hints)
+            if phrase in text or any(phrase in h for h in hint_phrases):
                 score += len(terms) + 1
             if score:
-                hits.append({'document_id':doc.id, 'filename':doc.name, **unit, 'score':score})
+                hit = {'document_id':doc.id, 'filename':doc.name, **unit, 'score':score}
+                if via_hints:
+                    hit['matched_hints'] = sorted(via_hints)
+                hits.append(hit)
     hits.sort(key=lambda hit: (-hit['score'], hit['filename'], hit['block_id']))
+    hinted = any(doc.search_hints for doc in documents.values())
     return {'matches':hits[:limit], 'total_matching_blocks':len(hits),
             'truncated':len(hits)>limit,
-            'retrieval_method':'lexical over text blocks and all spreadsheet rows; no semantic matching. '
-                               'Use table tools for counts and totals.',
+            'retrieval_method':'lexical over text blocks and all spreadsheet rows'
+                               + (', plus upload-time search hints for text blocks' if hinted else '')
+                               + '; no semantic matching. Use scan when wording may differ. '
+                                 'Use table tools for counts and totals.',
             'warnings':{doc.name:doc.warnings for doc in documents.values() if doc.warnings}}

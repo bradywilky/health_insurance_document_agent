@@ -6,6 +6,7 @@ import streamlit as st
 from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
+from backend.agents.search_hints import make_hinter
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
 st.title('Document Upload Portal')
@@ -24,6 +25,10 @@ profile_at_upload = st.checkbox(
     'Generate a semantic profile (document type, status, dates, references, glossary)',
     help='Sends each file\'s full extracted text to Amazon Bedrock once at upload. The profile guides the '
          'answering agent but is never cited as evidence. Review it below.')
+hints_at_upload = st.checkbox(
+    'Generate search hints (other words for each passage)',
+    help='Sends each file\'s extracted text to Amazon Bedrock once at upload, about one call per 15 passages. '
+         'Keyword search then also finds passages worded differently from the question. Hints are never evidence.')
 
 
 def save_files(files):
@@ -32,7 +37,8 @@ def save_files(files):
             # ingest_document traces and archives the upload, including failures.
             with st.spinner(f'Processing {name}...'):
                 enrich = make_enricher() if profile_at_upload else None
-                doc = ingest_document(name, content, store=store, enrich=enrich)
+                hint = make_hinter() if hints_at_upload else None
+                doc = ingest_document(name, content, store=store, enrich=enrich, hint=hint)
             st.success(f'Saved {doc.name}')
             for warning in doc.warnings:
                 st.warning(f'{doc.name}: {warning}')
@@ -78,6 +84,17 @@ if key:
                 st.rerun()
             except Exception as exc:
                 st.error(f'Could not generate a profile: {type(exc).__name__}: {exc}')
+    hints = (doc.search_hints or {}).get('meta')
+    st.caption(f"Search hints: {hints['blocks_with_hints']} of {hints['blocks_total']} passages" if hints
+               else 'No search hints for this document yet.')
+    if doc.blocks and st.button('Regenerate search hints' if hints else 'Generate search hints',
+                                help='Sends the extracted text to Amazon Bedrock.'):
+        with st.spinner('Generating search hints...'):
+            try:
+                store.save_search_hints(key, make_hinter()(doc))
+                st.rerun()
+            except Exception as exc:
+                st.error(f'Could not generate search hints: {type(exc).__name__}: {exc}')
     if not profile:
         st.info('No semantic profile for this document yet.')
     else:
