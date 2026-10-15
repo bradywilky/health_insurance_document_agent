@@ -40,7 +40,29 @@ Preserve units and numerical precision.
 Tools:
 $search_tools
 - read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
-- table_tool: {"document_id":"ID","name":"list_sheets|get_sheet_schema|read_sheet|search_all_sheets|query_table|join_tables","parameters":{...}}.
+${table_tool}- calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
+  using numbers copied from the cited evidence or question.
+- date_calculate: {"label":"deadline","operation":"add_days","date":"2026-04-05","days":15} or operation
+  days_between/compare with "other_date". Use for deadlines and effective-date checks.
+- answer: {} finishes gathering evidence; a separate step writes the answer.
+You are the RESEARCH PLANNER, not the answer writer. Never write an answer or fabricate tool output.
+The answer tool takes an empty object and only signals completion to a separate answer writer.
+$coverage
+For payment questions distinguish scheduled/allowed amount, member cost sharing and insurer payment.
+For utilization questions distinguish authorization balances from annual benefit balances.
+Retrieve actual passages or records before answering. $index_note
+${table_rules}Never repeat an identical request.
+Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
+and date arithmetic or comparisons with date_calculate, before calling answer.
+Extraction warnings describe real coverage limits. A missing search hit does not prove a fact is absent.
+semantic_profile (when present) is an upload-time LLM summary: document type, status, dates, references to other
+documents, glossary and column roles. Use it to decide where to look$governs; never cite
+it, and retrieve the source passage or row before relying on any of it. "inferred" glossary meanings are guesses.
+Do not claim that extracted Word body text covers headers, footers, text boxes or tracked changes.
+Do not invent PDF pages or Word page citations.
+''')
+# Only included when a selected file is a spreadsheet (xlsx/xls/csv), so text-only questions never see table tools.
+TABLE_TOOL = '''- table_tool: {"document_id":"ID","name":"list_sheets|get_sheet_schema|read_sheet|search_all_sheets|query_table|join_tables","parameters":{...}}.
   read_sheet parameters: {"sheet_name":"name","offset":0,"limit":50}.
   query_table: {"sheet_name":"name","filters":[{"column":"name","op":"eq","value":"value"}],"select":["column"],"group_by":["column"],"aggregations":[{"column":"numeric","op":"sum","as":"total"}],"limit":50}.
   select and aggregations cannot be combined; optional fields may be omitted. Filter ops: eq,ne,gt,ge,lt,le,in,contains,is_null,not_null. Aggregates: sum,mean,min,max,count,nunique,count_rows.
@@ -53,23 +75,10 @@ $search_tools
   _sheet and _source_row; sheets lacking a referenced column are skipped and listed; group_by ["_sheet"] counts per tab.
   join_tables joins two sheets WITHIN this selected file: {"left_sheet":"name","right_sheet":"name","left_on":["key"],"right_on":["key"],"how":"left","relationship":"many_to_one","left_filters":[],"right_filters":[],"query":{}}. Duplicate right keys block many_to_one joins. Do not bypass diagnostics to force a total.
   Generated code execution is not available in this application.
-- calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
-  using numbers copied from the cited evidence or question.
-- date_calculate: {"label":"deadline","operation":"add_days","date":"2026-04-05","days":15} or operation
-  days_between/compare with "other_date". Use for deadlines and effective-date checks.
-- answer: {} finishes gathering evidence; a separate step writes the answer.
-You are the RESEARCH PLANNER, not the answer writer. Never write an answer or fabricate tool output.
-The answer tool takes an empty object and only signals completion to a separate answer writer.
-$coverage
-For payment questions distinguish scheduled/allowed amount, member cost sharing and insurer payment.
-For utilization questions distinguish authorization balances from annual benefit balances.
-Retrieve actual passages or records before answering. $index_note
-list_sheets is evidence of a workbook's sheets and columns, not of the values inside them. Its _same_columns and
+'''
+TABLE_RULES = '''list_sheets is evidence of a workbook's sheets and columns, not of the values inside them. Its _same_columns and
 _similar_columns already compare the data sheets' columns; use them rather than comparing column lists yourself.
-Use query_table for totals, not partial search snippets. Never repeat an identical request.
-Compute every derived amount (units x rate, deductible, coinsurance, balances, remaining counts) with calculate,
-and date arithmetic or comparisons with date_calculate, before calling answer.
-Extraction warnings describe real coverage limits. A missing search hit does not prove a fact is absent.
+Use query_table for totals, not partial search snippets.
 Spreadsheet data quality: column_hints and get_sheet_schema list all_values, possible_variant_groups
 (spellings that may be one entity), possible_missing_markers and possible_placeholder_values. Before filtering or
 grouping a text column, check its values. When variants plausibly name the same entity, combine them with recode
@@ -85,23 +94,19 @@ When the tab holding an item is unknown, or a question spans tabs (totals, looku
 sheets at once with "sheet_names": ["*"]. Never conclude an item is absent after checking only some tabs.
 frequent_values shows status words (e.g. "Out of Scope") stored inside name columns; filter on them, not is_null.
 Narrative tabs (about, assumptions, version history) explain statuses and changes; read them for "what does X mean".
-semantic_profile (when present) is an upload-time LLM summary: document type, status, dates, references to other
-documents, glossary and column roles. Use it to decide where to look$governs; never cite
-it, and retrieve the source passage or row before relying on any of it. "inferred" glossary meanings are guesses.
 For spreadsheets with truncated text, use table tools to inspect later rows and other sheets.
-Do not treat missing formula caches as zero or claim that extracted Word body text covers headers,
-footers, text boxes or tracked changes. Do not invent PDF pages or Word page citations.
-''')
+Do not treat missing formula caches as zero.
+'''
 SINGLE = {
     'source': 'the selected document',
     'conflicts': 'If passages, sections or rows conflict, report both.',
-    'search_tools': '- search: {"query":"terms or phrase","limit":8} covers the document\'s text and spreadsheet rows. '
+    'search_tools': '- search: {"query":"terms or phrase","limit":8} covers the document\'s text$rows. '
                     'Lexical retrieval, not semantic. Search alternative terms when needed.',
     'coverage': 'Before finishing, inspect every part of the document plausibly relevant to this question, including\n'
                 'amendments, benefit rules, authorization rules and claim-specific records. Never say a fact is\n'
                 'missing while a likely relevant section remains unread. If the document is short text, prefer\n'
                 'read_document over narrow searches.',
-    'index_note': "The selected_documents summary is not evidence of the document's contents;",
+    'index_note': "The selected_documents summary is not evidence of the document's contents.",
     'governs': '',
 }
 MULTIPLE = {
@@ -113,13 +118,21 @@ MULTIPLE = {
     'coverage': 'Before finishing, inspect all selected sources plausibly relevant to this question, including amendments,\n'
                 'benefit rules, authorization rules and claim-specific records. Never say a fact is missing while a likely\n'
                 'selected source remains unread. For short relevant text files prefer read_document over narrow searches.',
-    'index_note': 'The list_documents index is not evidence of document contents;',
+    'index_note': 'The list_documents index is not evidence of document contents.',
     'governs': ' and which selected document governs',
 }
 
 
-def system_prompt(single):
-    return SYSTEM.substitute(SINGLE if single else MULTIPLE)
+def system_prompt(single, tables=True):
+    """Planner instructions; table tools and spreadsheet rules appear only when a spreadsheet is selected."""
+    values = dict(SINGLE if single else MULTIPLE)
+    values['search_tools'] = Template(values['search_tools']).substitute(rows=' and spreadsheet rows' if tables else '')
+    return SYSTEM.substitute(values, table_tool=TABLE_TOOL if tables else '', table_rules=TABLE_RULES if tables else '')
+
+
+def table_documents(docs):
+    """IDs of selected spreadsheets (xlsx/xls/csv), the only files table_tool can query."""
+    return [d for d, doc in docs.items() if doc.table_folder is not None]
 
 
 def _call(system, payload, usage, *, phase='Document Research', model=None):
@@ -173,13 +186,14 @@ def node_init(state: DocumentState) -> dict:
     if not isinstance(question, str) or not question.strip():
         raise ValueError('Question cannot be empty')
     usage = state.get('usage') or Usage()
-    specs = tool_specs(docs)
+    tables = table_documents(docs)
+    specs = tool_specs(docs, tables)
     payload = {'question': question, 'selected_documents': [doc.summary() for doc in docs.values()],
                'history': bounded((state.get('history') or [])[-6:], max_chars=4000)}
     _, inference = get_model_config()
     llm = LLM(agent_name='health_insurance_document_agent', tool_name='Native Document Research',
               model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
-    turn_session = TurnSession(llm, system_prompt(len(docs) == 1)
+    turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables))
                                + '\nUse native tools; do not write tool requests as text.', payload, specs)
     return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
             'steps': 0, 'evidence': [], 'seen': {},
@@ -309,8 +323,9 @@ def node_tools(state: DocumentState) -> dict:
                     raise ValueError('Call answer alone on the next turn after reviewing tool results.')
                 if not any(has_content(e) for e in evidence):
                     raise ValueError('Retrieve supporting passages or records before finishing. Document summaries '
-                                     'are not evidence: use list_sheets or get_sheet_schema for workbook structure, '
-                                     'query_table for records, or read_document/search for text.')
+                                     'are not evidence: ' + ('use list_sheets or get_sheet_schema for workbook '
+                                     'structure, query_table for records, or read_document/search for text.'
+                                     if table_documents(state['docs']) else 'use read_document or search.'))
                 unexamined = _unexamined(state['docs'], evidence)
                 if unexamined and not coverage_prompted:
                     # One coverage prompt; a second answer is accepted and the gap is disclosed.
@@ -427,10 +442,12 @@ and the alternatives. If it lists none, do not mention readings or interpretatio
 def _prompt_version():
     """Hash of every instruction and tool definition the models see; recorded in each question trace."""
     from hashlib import sha256
-    parts = [system_prompt(True), system_prompt(False), writer_prompt(True), writer_prompt(False),
+    parts = [system_prompt(True), system_prompt(False), system_prompt(True, False), system_prompt(False, False),
+             writer_prompt(True), writer_prompt(False),
              INTERPRETATION_RULE, amb.ASSESS_SYSTEM, json.dumps(amb.ASSESS_SPEC, sort_keys=True),
              json.dumps(tool_specs(['<document>']), sort_keys=True),
-             json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True), reasoning.RULES, reasoning.NOTE]
+             json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True),
+             json.dumps(tool_specs(['<document>'], []), sort_keys=True), reasoning.RULES, reasoning.NOTE]
     return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 

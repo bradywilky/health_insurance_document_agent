@@ -3,9 +3,14 @@
 SOURCE = {'type':'string', 'pattern':'^(E[0-9]+|question)$'}
 
 
-def tool_specs(document_ids):
-    """Native tool definitions; a single selected document gets no listing tool or per-search document filter."""
+def tool_specs(document_ids, table_ids=None):
+    """Native tool definitions; a single selected document gets no listing tool or per-search document filter.
+
+    table_tool is offered only for table_ids (selected spreadsheets; None means every document) and is left out
+    when there are none.
+    """
     doc = {'type':'string', 'enum':list(document_ids)}
+    table_ids = list(document_ids) if table_ids is None else list(table_ids)
     single = len(document_ids) == 1
     def spec(name, description, properties=None, required=None):
         return {'toolSpec':{'name':name, 'description':description, 'inputSchema':{'json':{
@@ -17,16 +22,17 @@ def tool_specs(document_ids):
         search['document_ids'] = {'type':'array','items':doc,'minItems':1,'uniqueItems':True}
     scope = "the selected document's" if single else "selected documents'"
     listing = [] if single else [spec('list_documents','List selected documents; this is not content evidence.')]
+    rows = ' and spreadsheet rows' if table_ids else ''
+    tables = [spec('table_tool','Query an Excel/CSV using the table operations documented in the system prompt.',
+                   {'document_id':{'type':'string','enum':table_ids}, 'name':{'type':'string','enum':[
+                       'list_sheets','get_sheet_schema','read_sheet','search_all_sheets','query_table','join_tables']},
+                    'parameters':{'type':'object'}}, ['document_id','name','parameters'])] if table_ids else []
     return listing + [
-        spec('search',f'Search {scope} text and spreadsheet rows lexically. Empty results do not prove absence.',
+        spec('search',f'Search {scope} text{rows} lexically. Empty results do not prove absence.',
              search, ['query']),
         spec('read_document','Read consecutive source blocks. Follow next_offset for more content.',
              {'document_id':doc,'offset':{'type':'integer','minimum':0},
-              'limit':{'type':'integer','minimum':1,'maximum':20}}, ['document_id']),
-        spec('table_tool','Query an Excel/CSV using the table operations documented in the system prompt.',
-             {'document_id':doc, 'name':{'type':'string','enum':[
-                 'list_sheets','get_sheet_schema','read_sheet','search_all_sheets','query_table','join_tables']},
-              'parameters':{'type':'object'}}, ['document_id','name','parameters']),
+              'limit':{'type':'integer','minimum':1,'maximum':20}}, ['document_id'])] + tables + [
         spec('calculate','Exact decimal arithmetic. Write the expression with literal numbers copied from evidence, '
              'e.g. "2 * 88.00" or "(176.00 - 50.00) * 20 / 100", and list the evidence IDs (or "question") '
              'containing those numbers. Operators: + - * / ( ) min() max().',

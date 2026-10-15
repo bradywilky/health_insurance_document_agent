@@ -145,6 +145,23 @@ def test_unsupported_native_api_does_not_fall_back(monkeypatch):
     assert len(calls)==1
 
 
+def test_table_tool_is_offered_only_for_spreadsheets(native_script):
+    text = ingest_document('rates.txt', b'Rate USD 88.')
+    sheet = ingest_document('rates.csv', b'Code,Rate\nA1,88\n')
+    requests = native_script([{'tool':'read_document','parameters':{'document_id':text.id}},
+                              {'tool':'answer','parameters':{}}, 'USD 88 [E1].'])
+    run_document_agent({text.id:text}, [text.id], 'Rate?')
+    planner = requests[0]
+    system = planner['system'][0]['text']
+    assert not any(word in system for word in ('table_tool', 'query_table', 'sheet', 'spreadsheet'))
+    assert 'table_tool' not in [t['toolSpec']['name'] for t in planner['toolConfig']['tools']]
+    with pytest.raises(ValueError):
+        validate_action({'tool':'table_tool','parameters':{'document_id':text.id,'name':'list_sheets',
+                                                           'parameters':{}}}, tool_specs([text.id], []))
+    mixed = {s['toolSpec']['name']: s['toolSpec'] for s in tool_specs([text.id, sheet.id], [sheet.id])}
+    assert mixed['table_tool']['inputSchema']['json']['properties']['document_id']['enum'] == [sheet.id]
+
+
 def test_single_document_tools_and_prompt_drop_multi_document_features():
     from backend.agents.document_agent import system_prompt, writer_prompt
     single = {s['toolSpec']['name']: s['toolSpec'] for s in tool_specs(['only'])}
