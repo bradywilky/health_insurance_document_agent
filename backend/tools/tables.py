@@ -4,7 +4,7 @@ from backend.shared.serialization import sanitize_result
 from backend.shared.rows import narrative_rows
 from backend.shared.table import Table, concat
 from backend.storage.tables import load_table
-from backend.tools.table_operations import query_table, join_tables
+from backend.tools.table_operations import flat_conditions, query_table, join_tables
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,8 @@ def _load_for_query(load, name, meta):
 
 def _referenced_columns(params):
     names = set(params.get('select', [])) | set(params.get('group_by', []))
-    for key in ('filters', 'aggregations', 'recode', 'sort', 'derive'):
+    names |= {item.get('column') for item in flat_conditions(params.get('filters', []))}
+    for key in ('aggregations', 'recode', 'sort', 'derive'):
         names |= {item.get('column') for item in params.get(key, []) if isinstance(item, dict)}
     derived = {item.get('as') for item in params.get('derive', []) if isinstance(item, dict)}
     return {n for n in names if n and n not in {'_sheet', '_source_row'} | derived}

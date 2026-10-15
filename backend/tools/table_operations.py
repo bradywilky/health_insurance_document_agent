@@ -136,15 +136,43 @@ def _matches(frame, col, op, value):
     raise ValueError(f'Unsupported filter operator: {op}')
 
 
+def _condition_mask(frame, condition):
+    if not isinstance(condition, dict):
+        raise ValueError('Each filter must be an object')
+    _check_keys(condition, {'column', 'op', 'value'})
+    col, op = condition.get('column'), condition.get('op')
+    _columns(frame, [col])
+    return _matches(frame, col, op, condition.get('value'))
+
+
+def _filter_mask(frame, condition):
+    """A plain condition, or {"any": [conditions]} keeping rows that match at least one of them."""
+    if isinstance(condition, dict) and 'any' in condition:
+        _check_keys(condition, {'any'})
+        group = condition['any']
+        if not isinstance(group, list) or not group:
+            raise ValueError('"any" must be a nonempty list of filter conditions')
+        masks = [_condition_mask(frame, c) for c in group]
+        return [any(row) for row in zip(*masks)]
+    return _condition_mask(frame, condition)
+
+
+def flat_conditions(filters):
+    """Every plain condition in a filter list, including those inside "any" groups."""
+    for condition in filters if isinstance(filters, list) else []:
+        if isinstance(condition, dict) and isinstance(condition.get('any'), list):
+            yield from (c for c in condition['any'] if isinstance(c, dict))
+        elif isinstance(condition, dict):
+            yield condition
+
+
 def filter_rows(frame, filters):
+    """Filters are ANDed; an {"any": [...]} filter ORs the conditions inside it."""
     if not isinstance(filters, list):
         raise ValueError('filters must be a list')
     result = frame
     for condition in filters:
-        _check_keys(condition, {'column', 'op', 'value'})
-        col, op = condition['column'], condition['op']
-        _columns(result, [col])
-        mask = _matches(result, col, op, condition.get('value'))
+        mask = _filter_mask(result, condition)
         result = result.take(p for p, keep in enumerate(mask) if keep)
     return result
 
@@ -209,7 +237,7 @@ def _found_elsewhere(frame, condition):
 def _filter_diagnostics(frame, filters):
     """Point out likely spelling variants, missing markers, or a value that sits in another column."""
     notes = []
-    for condition in filters:
+    for condition in flat_conditions(filters):
         col, op, value = condition.get('column'), condition.get('op'), condition.get('value')
         if col not in frame.columns or col in frame.numeric:
             continue

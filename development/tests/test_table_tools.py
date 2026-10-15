@@ -40,7 +40,20 @@ def test_literal_filter_and_pagination_preserve_source_indices():
     assert result['next_offset'] is None
 
 
+def test_any_group_ors_conditions_and_ands_with_other_filters():
+    df = as_table(pd.DataFrame({'Name':['Blue Flare','Dark Pulse','Red Card','Tackle','Blue Card'],
+                                'Gen':['V','IV','VI','I','I']}))
+    colors = {'any':[{'column':'Name','op':'contains','value':'blue'},
+                     {'column':'Name','op':'contains','value':'red'}]}
+    result = query_table(df, {'filters':[colors], 'select':['Name']})
+    assert [r['Name'] for r in result['rows']] == ['Blue Flare','Red Card','Blue Card']
+    result = query_table(df, {'filters':[colors, {'column':'Gen','op':'ne','value':'I'}], 'select':['Name']})
+    assert [r['Name'] for r in result['rows']] == ['Blue Flare','Red Card']
+
+
 @pytest.mark.parametrize('params', [
+    {'filters':[{'any':[]}]}, {'filters':[{'any':[{'column':'missing','op':'eq','value':'a'}]}]},
+    {'filters':[{'any':[{'column':'x','op':'eq','value':1}], 'column':'x'}]},
     {'sql':'DROP TABLE anything'}, {'select':['missing']}, {'limit':0}, {'offset':-1},
     {'group_by':['x']}, {'filters':[{'column':'x','op':'execute','value':'bad'}]},
     {'aggregations':[{'column':'x','op':'median','as':'m'}]},

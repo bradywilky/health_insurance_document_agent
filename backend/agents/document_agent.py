@@ -44,6 +44,7 @@ $search_tools
   read_sheet parameters: {"sheet_name":"name","offset":0,"limit":50}.
   query_table: {"sheet_name":"name","filters":[{"column":"name","op":"eq","value":"value"}],"select":["column"],"group_by":["column"],"aggregations":[{"column":"numeric","op":"sum","as":"total"}],"limit":50}.
   select and aggregations cannot be combined; optional fields may be omitted. Filter ops: eq,ne,gt,ge,lt,le,in,contains,is_null,not_null. Aggregates: sum,mean,min,max,count,nunique,count_rows.
+  Filters are ANDed. For OR, put conditions in one group: {"any":[{"column":"Name","op":"contains","value":"Red"},{"column":"Name","op":"contains","value":"Blue"}]}.
   recode (applied before filters and grouping): [{"column":"city","map":{"THR":"Tehran","tehr@n":"Tehran"}}]
   maps exact column values to one value, or to null ({"nan":null}) for text missing markers.
   derive (applied after recode): [{"column":"Element Name","as":"prefix","split":" - ","part":0}] adds a column
