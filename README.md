@@ -193,7 +193,10 @@ Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the pe
 
 The CLI and chat expose the same deterministic table tools. Generated Python execution and
 sampled parallel summaries were removed with the duplicate table workflow. Search results
-can be truncated, and tool failures or step limits may yield incomplete answers. Repeated
+can be truncated, and tool failures or research limits may yield incomplete answers. Research
+stops after 16 steps, or after the step during which 2 minutes have passed or the question's model calls have
+used more than 1,000,000 tokens (`MAX_RESEARCH_SECONDS`, `MAX_TURN_TOKENS` in `document_agent.py`); the answer is
+then written from the evidence so far and the limit is listed as a limitation. Repeated
 identical calls reuse evidence. CLI calls are independent; Python callers can pass `history`.
 
 Deterministic `query_table` supports filters, grouping, sorting, pagination, decimal aggregates, and explicit unit conversions. `join_tables` checks relationship constraints and caps output size. Decimal arithmetic preserves loaded numeric values; it cannot restore precision already lost in a source workbook. Missing totals remain missing instead of silently becoming zero. The evidence pipeline bounds model context and retains tool parameters and source references. Its numeric display check is a guard against omitted exact values, not a semantic answer verifier.

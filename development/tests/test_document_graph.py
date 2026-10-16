@@ -48,3 +48,19 @@ def test_shared_tools_do_not_import_agents():
                 assert not (node.module or '').startswith('backend.agents')
             elif isinstance(node, ast.Import):
                 assert not any(alias.name.startswith('backend.agents') for alias in node.names)
+
+
+def test_time_and_token_limits_end_research_after_the_current_step(native_script, monkeypatch):
+    from backend.agents import document_agent
+    doc = ingest_document('rates.txt', b'Rate USD 88\n\nRate USD 90 from July')
+    # Each limit sends research straight to the answer after step one.
+    for name, value, message in [('MAX_RESEARCH_SECONDS', 0, 'time limit (0 seconds)'),
+                                 ('MAX_TURN_TOKENS', 10, 'Token limit (10 tokens)')]:
+        monkeypatch.setattr(document_agent, name, value)
+        # Without the limit, the planner's second request would get the writer's text and research would go on.
+        requests = native_script([{'tool':'read_document','parameters':{'document_id':doc.id,'limit':1}},
+                                  'USD 88.'])
+        result = run_document_agent({doc.id: doc}, [doc.id], 'Rate?')
+        assert len(requests) == 2 and result['answer'] == 'USD 88.'
+        assert any(message in warning for warning in result['limitations'])
+        monkeypatch.undo()

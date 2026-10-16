@@ -1,6 +1,7 @@
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
+import time
 from string import Template
 
 from backend.config.settings import get_model_config, MODELS
@@ -25,6 +26,9 @@ MAX_REPAIRS = 2
 # Consecutive text-only planner replies. Some models narrate after most tool results and then continue when
 # nudged, so these are counted apart from repairs, and only an unbroken run of them ends research.
 MAX_PROSE_REPLIES = 3
+# Checked after each research step: past either limit, research ends and the answer is written from the evidence so far.
+MAX_RESEARCH_SECONDS = 120  # wall clock since the question started
+MAX_TURN_TOKENS = 1_000_000  # input plus output tokens of every model call for this question, scans included
 PROSE_NUDGE = ('Your reply was text, not a tool call. Make the call you described now as a native tool call '
                '(several may go in one turn), or call answer if research is complete. Never write tool requests '
                'as text.')
@@ -168,6 +172,7 @@ class DocumentState(TypedDict, total=False):
     reasoning: bool
     reasoning_log: list
     steps: int
+    started: float  # time.monotonic() when the question started
     evidence: list
     seen: dict
     limitations: list
@@ -207,7 +212,7 @@ def node_init(state: DocumentState) -> dict:
                                + '\nUse native tools; do not write tool requests as text.', payload, specs)
     return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
             'scan_llm': scan_llm,
-            'steps': 0, 'evidence': [], 'seen': {},
+            'steps': 0, 'evidence': [], 'seen': {}, 'started': time.monotonic(),
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
             'stats': {'validation_errors': 0, 'repair_attempts': 0, 'prose_replies': 0,
@@ -407,6 +412,13 @@ def node_tools(state: DocumentState) -> dict:
             finished = True
         else:
             stats['repair_attempts'] += 1
+    tokens = state['usage'].input_tokens + state['usage'].output_tokens
+    if not finished and time.monotonic() - state['started'] >= MAX_RESEARCH_SECONDS:
+        limitations.append(f'Research time limit ({MAX_RESEARCH_SECONDS} seconds) reached; answer may be incomplete.')
+        finished = True
+    if not finished and tokens > MAX_TURN_TOKENS:
+        limitations.append(f'Token limit ({MAX_TURN_TOKENS:,} tokens) reached; answer may be incomplete.')
+        finished = True
     if state['steps'] >= MAX_STEPS and not finished:
         limitations.append('Research step limit reached; answer may be incomplete.')
         finished = True
