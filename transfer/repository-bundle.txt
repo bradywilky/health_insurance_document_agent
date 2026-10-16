@@ -116,7 +116,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 52208, "sha256": "82a1a2f3f1865f12352b23096c1d2f7e8dbdbf32b639b21c5cb337f865e06a3c"}
+{"path": "README.md", "characters": 52524, "sha256": "3bb5b2f0f6d14ad2de8e89a0577708d758eaf8e79967d571ff9132e5b997bb4a"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -312,7 +312,10 @@ Use the deployment's IAM role by leaving `AWS_PROFILE` unset. Do not copy the pe
 
 The CLI and chat expose the same deterministic table tools. Generated Python execution and
 sampled parallel summaries were removed with the duplicate table workflow. Search results
-can be truncated, and tool failures or step limits may yield incomplete answers. Repeated
+can be truncated, and tool failures or research limits may yield incomplete answers. Research
+stops after 16 steps, or after the step during which 2 minutes have passed or the question's model calls have
+used more than 1,000,000 tokens (`MAX_RESEARCH_SECONDS`, `MAX_TURN_TOKENS` in `document_agent.py`); the answer is
+then written from the evidence so far and the limit is listed as a limitation. Repeated
 identical calls reuse evidence. CLI calls are independent; Python callers can pass `history`.
 
 Deterministic `query_table` supports filters, grouping, sorting, pagination, decimal aggregates, and explicit unit conversions. `join_tables` checks relationship constraints and caps output size. Decimal arithmetic preserves loaded numeric values; it cannot restore precision already lost in a source workbook. Missing totals remain missing instead of silently becoming zero. The evidence pipeline bounds model context and retains tool parameters and source references. Its numeric display check is a guard against omitted exact values, not a semantic answer verifier.
@@ -1400,10 +1403,11 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 36528, "sha256": "8aa0a007cb50f1a57f2aee94d5e63d6257f26c4b47e8992cbaae1e17563bdd83"}
+{"path": "backend/agents/document_agent.py", "characters": 37414, "sha256": "d8af15bbf3f4f6359881ca6e9523e4642f458a1c8028c1b28f8d9637e77f4c14"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
+import time
 from string import Template
 
 from backend.config.settings import get_model_config, MODELS
@@ -1428,6 +1432,9 @@ MAX_REPAIRS = 2
 # Consecutive text-only planner replies. Some models narrate after most tool results and then continue when
 # nudged, so these are counted apart from repairs, and only an unbroken run of them ends research.
 MAX_PROSE_REPLIES = 3
+# Checked after each research step: past either limit, research ends and the answer is written from the evidence so far.
+MAX_RESEARCH_SECONDS = 120  # wall clock since the question started
+MAX_TURN_TOKENS = 1_000_000  # input plus output tokens of every model call for this question, scans included
 PROSE_NUDGE = ('Your reply was text, not a tool call. Make the call you described now as a native tool call '
                '(several may go in one turn), or call answer if research is complete. Never write tool requests '
                'as text.')
@@ -1571,6 +1578,7 @@ class DocumentState(TypedDict, total=False):
     reasoning: bool
     reasoning_log: list
     steps: int
+    started: float  # time.monotonic() when the question started
     evidence: list
     seen: dict
     limitations: list
@@ -1610,7 +1618,7 @@ def node_init(state: DocumentState) -> dict:
                                + '\nUse native tools; do not write tool requests as text.', payload, specs)
     return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
             'scan_llm': scan_llm,
-            'steps': 0, 'evidence': [], 'seen': {},
+            'steps': 0, 'evidence': [], 'seen': {}, 'started': time.monotonic(),
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
             'stats': {'validation_errors': 0, 'repair_attempts': 0, 'prose_replies': 0,
@@ -1810,6 +1818,13 @@ def node_tools(state: DocumentState) -> dict:
             finished = True
         else:
             stats['repair_attempts'] += 1
+    tokens = state['usage'].input_tokens + state['usage'].output_tokens
+    if not finished and time.monotonic() - state['started'] >= MAX_RESEARCH_SECONDS:
+        limitations.append(f'Research time limit ({MAX_RESEARCH_SECONDS} seconds) reached; answer may be incomplete.')
+        finished = True
+    if not finished and tokens > MAX_TURN_TOKENS:
+        limitations.append(f'Token limit ({MAX_TURN_TOKENS:,} tokens) reached; answer may be incomplete.')
+        finished = True
     if state['steps'] >= MAX_STEPS and not finished:
         limitations.append('Research step limit reached; answer may be incomplete.')
         finished = True
@@ -8091,7 +8106,7 @@ def test_table_evaluation_uses_document_graph(tmp_path, monkeypatch, native_scri
     assert 'SECRET_EXPECTATION' not in json.dumps(requests)
 
 ===== REPOSITORY FILE =====
-{"path": "development/tests/test_document_graph.py", "characters": 2532, "sha256": "2c3e07175198b2e7d4159bbeee5339c7e4878c66db320b391df5c7e428102de6"}
+{"path": "development/tests/test_document_graph.py", "characters": 3563, "sha256": "d3c908371837f186d3d54ec776762ba418dae05dd3cbf03c2fe63a99ef6ac5ef"}
 """Graph routing, bounded execution, and per-invocation isolation."""
 from backend.agents.document_agent import DOCUMENT_GRAPH, MAX_STEPS, run_document_agent
 from backend.preprocessing.documents import ingest_document
@@ -8142,6 +8157,22 @@ def test_shared_tools_do_not_import_agents():
                 assert not (node.module or '').startswith('backend.agents')
             elif isinstance(node, ast.Import):
                 assert not any(alias.name.startswith('backend.agents') for alias in node.names)
+
+
+def test_time_and_token_limits_end_research_after_the_current_step(native_script, monkeypatch):
+    from backend.agents import document_agent
+    doc = ingest_document('rates.txt', b'Rate USD 88\n\nRate USD 90 from July')
+    # Each limit sends research straight to the answer after step one.
+    for name, value, message in [('MAX_RESEARCH_SECONDS', 0, 'time limit (0 seconds)'),
+                                 ('MAX_TURN_TOKENS', 10, 'Token limit (10 tokens)')]:
+        monkeypatch.setattr(document_agent, name, value)
+        # Without the limit, the planner's second request would get the writer's text and research would go on.
+        requests = native_script([{'tool':'read_document','parameters':{'document_id':doc.id,'limit':1}},
+                                  'USD 88.'])
+        result = run_document_agent({doc.id: doc}, [doc.id], 'Rate?')
+        assert len(requests) == 2 and result['answer'] == 'USD 88.'
+        assert any(message in warning for warning in result['limitations'])
+        monkeypatch.undo()
 
 ===== REPOSITORY FILE =====
 {"path": "development/tests/test_document_protocol.py", "characters": 9675, "sha256": "854a1c92f79d5004565917637ba6baf829b1f64e75e8ddef41e7dc15a7502caf"}
