@@ -22,7 +22,8 @@ agent  document_agent
 │   └── llm  Native Document Research  │     repeated once per research step
 ├── workflow  tools                    │
 │   └── tool  <tool name> × N          ┘
-│       └── llm  Relevance Scan × N          scan tool only: one per batch of 20 text blocks, run in parallel
+│       ├── llm  Relevance Scan × N          scan tool only: one per batch of 20 text blocks, run in parallel
+│       └── embedding  Query Embedding       semantic_search tool only
 └── workflow  synthesize
     ├── llm  Document Answer
     └── llm  Document Answer Revision        when the answer check finds issues
@@ -33,9 +34,11 @@ One trace per document change, each archived when it ends:
 ```text
 workflow  ingest_document                    backend/preprocessing/documents.py, ingest_document
 ├── llm  Document Enrichment                 when a semantic profile is requested
-└── llm  Search Hints × N                    when search hints are requested: one per 15 text blocks, in parallel
+├── llm  Search Hints × N                    when search hints are requested: one per 15 text blocks, in parallel
+└── embedding  Passage Embedding × N         when embeddings are requested: one per text block, in parallel
 workflow  save_profile                       backend/storage/documents.py, save_profile
 workflow  save_search_hints                  backend/storage/documents.py, save_search_hints
+workflow  save_embeddings                    backend/storage/documents.py, save_embeddings
 workflow  delete_document                    backend/storage/documents.py, delete
 ```
 

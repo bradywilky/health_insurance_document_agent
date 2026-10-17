@@ -15,6 +15,7 @@ class Document:
     storage_ref: dict | None = None
     profile: dict | None = None
     search_hints: dict | None = None  # backend/agents/search_hints.py; routes search, never evidence
+    embeddings: dict | None = None  # backend/agents/embeddings.py; routes semantic search, never evidence
 
     def summary(self):
         result = {'document_id':self.id, 'filename':self.name, 'type':self.kind,

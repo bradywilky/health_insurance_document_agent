@@ -4,9 +4,10 @@ import re
 import time
 from string import Template
 
-from backend.config.settings import get_model_config, MODELS
+from backend.config.settings import get_model_config, MODELS, semantic_search_enabled
 import os
 from backend.agents.evidence import bounded, compact, numeric_display_check, bounded_items
+from backend.agents.embeddings import Embedder
 from backend.agents.llm import LLM, Usage
 from backend.tools.documents import selected_documents, execute_document_tool
 from langgraph.graph import StateGraph, START, END
@@ -47,7 +48,7 @@ $search_tools
   ones with reasons. It finds passages worded differently from the question but is slower and costlier than search.
   Use it when search misses or the wording is uncertain, or when the answer must be complete (every exclusion,
   limit or exception). Follow more_relevant with read_document.
-- read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
+${semantic_tool}- read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
 ${table_tool}- calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
   using numbers copied from the cited evidence or question.
 - date_calculate: {"label":"deadline","operation":"add_days","date":"2026-04-05","days":15} or operation
@@ -68,6 +69,13 @@ documents, glossary and column roles. Use it to decide where to look$governs; ne
 it, and retrieve the source passage or row before relying on any of it. "inferred" glossary meanings are guesses.
 Do not claim that extracted Word body text covers headers, footers, text boxes or tracked changes.
 Do not invent PDF pages or Word page citations.
+''')
+# Only included when semantic search is on (SEMANTIC_SEARCH) and a selected document has embeddings.
+SEMANTIC_TOOL = Template('''- semantic_search: {"query":"what the passages say","limit":8$scan_ids} returns the text blocks
+  closest in meaning to the query, from upload-time embeddings, each with a similarity score. Like scan it finds
+  passages worded differently from the question, but as fast as search. It always returns the closest blocks, even
+  when none is relevant: judge each one. Use scan when the answer must be complete. Documents listed in not_indexed
+  were not searched.
 ''')
 # Only included when a selected file is a spreadsheet (xlsx/xls/csv), so text-only questions never see table tools.
 TABLE_TOOL = '''- table_tool: {"document_id":"ID","name":"list_sheets|get_sheet_schema|read_sheet|search_all_sheets|query_table|join_tables","parameters":{...}}.
@@ -133,11 +141,18 @@ MULTIPLE = {
 }
 
 
-def system_prompt(single, tables=True):
-    """Planner instructions; table tools and spreadsheet rules appear only when a spreadsheet is selected."""
+def system_prompt(single, tables=True, semantic=False):
+    """Planner instructions; table tools and spreadsheet rules appear only when a spreadsheet is selected, and
+    semantic_search only when semantic is true."""
     values = dict(SINGLE if single else MULTIPLE)
     values['search_tools'] = Template(values['search_tools']).substitute(rows=' and spreadsheet rows' if tables else '')
-    return SYSTEM.substitute(values, table_tool=TABLE_TOOL if tables else '', table_rules=TABLE_RULES if tables else '')
+    return SYSTEM.substitute(values, table_tool=TABLE_TOOL if tables else '', table_rules=TABLE_RULES if tables else '',
+                             semantic_tool=SEMANTIC_TOOL.substitute(scan_ids=values['scan_ids']) if semantic else '')
+
+
+def semantic_documents(docs):
+    """True when semantic search is on and a selected document has embeddings to search."""
+    return semantic_search_enabled() and any(doc.embeddings for doc in docs.values())
 
 
 def table_documents(docs):
@@ -164,6 +179,7 @@ class DocumentState(TypedDict, total=False):
     docs: dict
     turn_session: TurnSession
     scan_llm: LLM
+    embedder: Embedder | None
     specs: list
     actions: list
     request_error: str | None
@@ -199,7 +215,8 @@ def node_init(state: DocumentState) -> dict:
         raise ValueError('Question cannot be empty')
     usage = state.get('usage') or Usage()
     tables = table_documents(docs)
-    specs = tool_specs(docs, tables)
+    semantic = semantic_documents(docs)
+    specs = tool_specs(docs, tables, semantic)
     payload = {'question': question, 'selected_documents': [doc.summary() for doc in docs.values()],
                'history': bounded((state.get('history') or [])[-6:], max_chars=4000)}
     _, inference = get_model_config()
@@ -208,10 +225,12 @@ def node_init(state: DocumentState) -> dict:
     # The scan tool's model reads blocks in parallel; its calls count toward this question's usage.
     scan_llm = LLM(agent_name='health_insurance_document_agent', tool_name='Relevance Scan',
                    model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
-    turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables))
+    # semantic_search embeds each query with the model the documents were embedded with; calls count toward usage.
+    embedder = Embedder(usage_meter=usage) if semantic else None
+    turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables), semantic)
                                + '\nUse native tools; do not write tool requests as text.', payload, specs)
     return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
-            'scan_llm': scan_llm,
+            'scan_llm': scan_llm, 'embedder': embedder,
             'steps': 0, 'evidence': [], 'seen': {}, 'started': time.monotonic(),
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
@@ -297,7 +316,8 @@ def node_reason(state: DocumentState) -> dict:
               usage_meter=state['usage'])
     session = state['turn_session']
     try:
-        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1), session.messages)
+        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1,
+                                                      semantic=state.get('embedder') is not None), session.messages)
     except (ValueError, KeyError, TypeError):
         # Fail open: the planner runs without a plan for this step.
         stats['reasoning_failures'] += 1
@@ -381,7 +401,8 @@ def node_tools(state: DocumentState) -> dict:
                         results.append({'error': str(exc)})
                         continue
                 else:
-                    data = execute_document_tool(name, params, state['docs'], scan_llm=state.get('scan_llm'))
+                    data = execute_document_tool(name, params, state['docs'], scan_llm=state.get('scan_llm'),
+                                                 embedder=state.get('embedder'))
                 failed = data.get('error') or (data.get('table_result') or {}).get('error')
                 if failed:
                     tracing.mark_error(tool_span, failed)
@@ -466,11 +487,13 @@ def _prompt_version():
     """Hash of every instruction and tool definition the models see; recorded in each question trace."""
     from hashlib import sha256
     parts = [system_prompt(True), system_prompt(False), system_prompt(True, False), system_prompt(False, False),
+             system_prompt(True, semantic=True), system_prompt(False, semantic=True),
              writer_prompt(True), writer_prompt(False),
              INTERPRETATION_RULE, amb.ASSESS_SYSTEM, json.dumps(amb.ASSESS_SPEC, sort_keys=True),
              json.dumps(tool_specs(['<document>']), sort_keys=True),
              json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True),
-             json.dumps(tool_specs(['<document>'], []), sort_keys=True), reasoning.RULES, reasoning.NOTE]
+             json.dumps(tool_specs(['<document>'], []), sort_keys=True),
+             json.dumps(tool_specs(['<document>', '<other>'], [], True), sort_keys=True), reasoning.RULES, reasoning.NOTE]
     return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 

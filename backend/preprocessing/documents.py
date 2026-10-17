@@ -25,11 +25,14 @@ def _add_text(doc, text, location):
                            'location':location})
 
 
-def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=None, table_options=None) -> Document:
+def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=None, embed=None,
+                    table_options=None) -> Document:
     """Extract a document's searchable text (and, for spreadsheets, per-sheet tables), then optionally profile it,
-    add search hints and save it.
+    add search hints, embed its blocks and save it.
 
     hint           e.g. search_hints.make_hinter(): per-block search hints for keyword search
+
+    embed          e.g. embeddings.make_embedder(): per-block vectors for semantic search
 
     table_options  spreadsheet preprocessing options: encoding, delimiter (CSV) and sheet overrides
 
@@ -41,9 +44,9 @@ def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=
         tracing.annotate(current, metadata={
             'filename': name, 'kind': Path(name).suffix.lower(), 'bytes': len(content or b''),
             'content_sha256': sha256(content or b'').hexdigest(), 'profile_requested': enrich is not None,
-            'search_hints_requested': hint is not None,
+            'search_hints_requested': hint is not None, 'embeddings_requested': embed is not None,
             'saved': store is not None, 'group_name': getattr(store, 'group', None)})
-        doc = _ingest(name, content, store, enrich, hint, table_options)
+        doc = _ingest(name, content, store, enrich, hint, embed, table_options)
         profile = doc.profile or {}
         tracing.annotate(current, metadata={'document': document_summary(doc),
                                             'profile_generated': bool(profile),
@@ -51,7 +54,7 @@ def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=
         return doc
 
 
-def _ingest(name, content, store, enrich, hint, table_options):
+def _ingest(name, content, store, enrich, hint, embed, table_options):
     name = name.replace('\\','/').rsplit('/',1)[-1]
     extension = Path(name).suffix.lower()
     if extension not in SUPPORTED:
@@ -117,6 +120,12 @@ def _ingest(name, content, store, enrich, hint, table_options):
             doc.search_hints = hint(doc)
         except Exception as exc:
             doc.warnings.append(f'Search hints not generated: {type(exc).__name__}: {exc}')
+    if embed is not None and doc.blocks:
+        # Optional passage embeddings (backend/agents/embeddings.py). Sends the extracted text to the model.
+        try:
+            doc.embeddings = embed(doc)
+        except Exception as exc:
+            doc.warnings.append(f'Embeddings not generated: {type(exc).__name__}: {exc}')
     if store is not None:
         store.save(doc, content)
     return doc

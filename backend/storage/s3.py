@@ -23,7 +23,7 @@ def configured_store(*, read_only=False):
     """
     names = ('DOCUMENTS_STORAGE', 'DOCUMENTS_GROUP_NAME', 'DOCUMENTS_S3_PREFIX_PPDOCS', 'DOCUMENTS_LOCAL_DIR',
              'DOCUMENTS_S3_BUCKET', 'DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_KMS_KEY_ID', 'AWS_PROFILE',
-             'AWS_REGION', 'AWS_DEFAULT_REGION')
+             'AWS_REGION', 'AWS_DEFAULT_REGION', 'VECTOR_STORE', 'S3_VECTORS_BUCKET', 'S3_VECTORS_INDEX')
     return _store(tuple((name, os.getenv(name)) for name in names), read_only)
 
 
@@ -33,12 +33,14 @@ def _store(settings, read_only):
     mode = (env['DOCUMENTS_STORAGE'] or 'local').strip().lower()
     if mode not in {'local', 's3'}:
         raise ValueError('DOCUMENTS_STORAGE must be local or s3')
+    from backend.retrieval.semantic import configured_vectors
+    vectors = configured_vectors()  # None unless VECTOR_STORE=s3vectors
     group = (env['DOCUMENTS_GROUP_NAME'] or '').strip() or None
     preprocessed = (env['DOCUMENTS_S3_PREFIX_PPDOCS'] or '').strip() or PREPROCESSED
     if mode == 'local':
         from backend.storage.filesystem import LocalDocumentStore
         return LocalDocumentStore(env["DOCUMENTS_LOCAL_DIR"] or "data/document_library", group=group,
-                                  preprocessed=preprocessed, read_only=read_only)
+                                  preprocessed=preprocessed, read_only=read_only, vectors=vectors)
     bucket = (env['DOCUMENTS_S3_BUCKET'] or '').strip()
     if not bucket:
         raise ValueError('DOCUMENTS_S3_BUCKET is required in s3 mode')
@@ -48,4 +50,4 @@ def _store(settings, read_only):
         retries={'mode':'standard', 'total_max_attempts':3}))
     return S3DocumentStore(client, bucket, env['DOCUMENTS_S3_PREFIX_BASE'] or PREFIX_BASE, group=group,
                            preprocessed=preprocessed, kms_key_id=env['DOCUMENTS_S3_KMS_KEY_ID'] or None,
-                           read_only=read_only)
+                           read_only=read_only, vectors=vectors)

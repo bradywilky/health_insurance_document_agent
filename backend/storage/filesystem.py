@@ -62,10 +62,12 @@ class DirectoryClient:
 
 
 class LocalDocumentStore(ObjectDocumentStore):
-    def __init__(self, directory="data/document_library", *, group=None, preprocessed=PREPROCESSED, read_only=False):
+    def __init__(self, directory="data/document_library", *, group=None, preprocessed=PREPROCESSED, read_only=False,
+                 vectors=None):
         root = Path(directory).expanduser()
         if not root.is_absolute():
             root = Path(__file__).resolve().parents[2] / root
         self.directory = root.resolve()
         super().__init__(DirectoryClient(self.directory, read_only=read_only),
-                         "local", prefix="", group=group, preprocessed=preprocessed, read_only=read_only)
+                         "local", prefix="", group=group, preprocessed=preprocessed, read_only=read_only,
+                         vectors=vectors)

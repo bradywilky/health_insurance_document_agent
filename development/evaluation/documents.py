@@ -2,6 +2,7 @@
 import argparse
 from backend.agents.enrichment import make_enricher
 from backend.agents.search_hints import make_hinter
+from backend.agents.embeddings import make_embedder
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,9 @@ def main():
                         help='Generate semantic profiles (one extra model call per document chunk) before asking')
     parser.add_argument('--hints', action='store_true',
                         help='Generate search hints (one extra model call per 15 text blocks) before asking')
+    parser.add_argument('--embeddings', action='store_true',
+                        help='Embed text blocks (one embedding call per block) before asking; the semantic_search '
+                             'tool is offered only with SEMANTIC_SEARCH=true')
     parser.add_argument('--fixtures', type=Path,
                         help='Generated fixture directory containing questions.json and upload files')
     args=parser.parse_args()
@@ -55,7 +59,8 @@ def main():
             raise ValueError('Fixture path escapes the fixture directory')
         docs.append(ingest_document(path.name,path.read_bytes(),
                                     enrich=make_enricher() if args.enrich else None,
-                                    hint=make_hinter() if args.hints else None))
+                                    hint=make_hinter() if args.hints else None,
+                                    embed=make_embedder() if args.embeddings else None))
     documents={d.id:d for d in docs}
     if args.enrich:
         save_profiles(docs, args.output)

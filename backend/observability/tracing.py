@@ -11,6 +11,7 @@ agent     document_agent                 one per question: request and session I
 workflow  init | assess | plan | tools | synthesize
           ingest_document | delete_document | save_profile   one per document change
 llm       one per Bedrock call           model, step, tokens, stop reason, tool calls requested
+embedding one per Bedrock embedding call model, dimensions, tokens (passages at upload, semantic_search queries)
 tool      one per tool execution         evidence ID, document IDs, match and row counts
 
 TRACE_CONTENT=true  also record prompts, responses, the question, the answer, and tool parameters and results.
@@ -97,7 +98,7 @@ class Span:
 
 @contextmanager
 def span(kind, name, *, archive=None, **options):
-    """Start a span of `kind` (agent, workflow, llm, tool), a child of the span open in this context.
+    """Start a span of `kind` (agent, workflow, llm, embedding, tool), a child of the span open in this context.
 
     archive: on a root span, the trace archive that receives the finished trace (archive.configured_archive()).
     Exceptions are recorded on the span and re-raised."""

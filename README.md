@@ -67,7 +67,7 @@ The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with a
 
 `backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
 
-This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and embedding-based retrieval are not implemented; see Search hints and relevance scan. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. The returned `sources` identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
+This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR and cross-file table joins are not implemented. Embedding-based retrieval is optional and off by default; see Semantic search. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. The returned `sources` identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
 
 **Load Bingle-Dingle examples** loads eight Bingle-Dingle health-insurance documents: provider agreement, rate schedule, executed amendment, processing guide, unexecuted draft, benefit summary, authorization rules, and claim packet. Bingle-Dingle Insurance is a regional health insurer offering the Meadow product. The documents cover provider terms, benefits, authorization, and claim-specific records.
 
@@ -290,7 +290,8 @@ store.delete(filename)                                        # remove its prepr
 `ingest_document` also takes `enrich=make_enricher()` (backend/agents/enrichment.py) to add a semantic profile,
 and `store.save_profile(manifest_key, profile)` stores a reviewed one. `hint=make_hinter()`
 (backend/agents/search_hints.py) adds search hints, and `store.save_search_hints(manifest_key, hints)` adds them to a
-saved document. `load` and `delete` accept a filename or the
+saved document. `embed=make_embedder()` (backend/agents/embeddings.py) embeds every text block for semantic search,
+and `store.save_embeddings(manifest_key, embeddings)` adds embeddings to a saved document. `load` and `delete` accept a filename or the
 full `storage_ref['manifest_key']`. `delete` removes the manifest first, so the document leaves the list at once;
 deleting a document that is already gone does nothing. Without a store, `ingest_document` only extracts.
 
@@ -519,6 +520,51 @@ Two optional pieces close that gap:
   exceptions are not lost. It is slower and costlier than search, so the planner uses it when search misses or
   when an answer must be complete. One call is capped at `SCAN_MAX_BLOCKS` (default 600) text blocks. Spreadsheet
   data rows are not scanned; table tools cover them. Scan calls count toward the question's usage.
+
+## Semantic search (optional, off by default)
+
+Keyword search matches words; semantic search matches meaning. Think of each passage as a pin on a map where
+passages about the same thing sit close together: at upload, a Bedrock embedding model turns every text block into
+coordinates (a vector), and at question time the question gets coordinates too, so the nearest pins are the
+passages that mean the most similar thing, whatever words they use ("ER visit" lands next to "emergency room
+services").
+
+It has three parts, all behind one switch, `SEMANTIC_SEARCH=true`:
+
+- **Embeddings at upload** (`backend/agents/embeddings.py`). One Bedrock call per text block, in parallel
+  (`EMBEDDING_WORKERS`, default 8), with `EMBEDDING_MODEL_ID` (default `amazon.titan-embed-text-v2:0`) at
+  `EMBEDDING_DIMENSIONS` (256, 512 or 1024; default 1024). The upload portal shows an "Embed passages" checkbox and,
+  under each saved document, a Generate embeddings button. Failed blocks are listed in the embeddings' `meta`; a
+  failure never blocks an upload. Spreadsheet data rows are not embedded; table tools cover them.
+- **Vector storage**, chosen by `VECTOR_STORE`:
+  - `local` (default): the vectors are saved as `embeddings.json` beside the document and compared in memory.
+    Needs no service besides the embedding model; fine for development and libraries of a few thousand blocks.
+  - `s3vectors`: the vectors go to an Amazon S3 Vectors index (`S3_VECTORS_BUCKET`, `S3_VECTORS_INDEX`), and
+    `embeddings.json` keeps only their keys, so replacing or deleting a document removes its vectors. One index
+    serves every group: each vector carries its group folder (`library`) and `document_id` as metadata, and every
+    query is filtered to the caller's group and selected documents. Block text is never stored in the index.
+- **The `semantic_search` tool** (`backend/retrieval/semantic.py`). Offered to the planner only when the switch is on
+  and a selected document has embeddings. It embeds the query and returns the closest text blocks with a
+  `similarity` score. It always returns the closest blocks even when none is relevant, so the planner judges each.
+  Documents without usable embeddings (none yet, a different embedding model, or vectors in an index that is not
+  configured) are listed in `not_indexed`. Query embeddings count toward the question's usage.
+
+With the switch off nothing changes: no embedding calls, no tool, and saved embeddings are ignored. Documents
+uploaded before it was turned on have no embeddings until someone clicks Generate embeddings for them.
+
+To create the S3 Vectors bucket and index (cosine distance, dimension equal to `EMBEDDING_DIMENSIONS`):
+
+```bash
+aws s3vectors create-vector-bucket --vector-bucket-name <bucket>
+```
+
+```bash
+aws s3vectors create-index --vector-bucket-name <bucket> --index-name <index> --data-type float32 --dimension 1024 --distance-metric cosine --metadata-configuration "nonFilterableMetadataKeys=block_id,filename"
+```
+
+The answering and upload roles need `bedrock:InvokeModel` on the embedding model, and `s3vectors:PutVectors`,
+`s3vectors:DeleteVectors`, `s3vectors:QueryVectors` and `s3vectors:GetVectors` on the index (query with metadata
+filters needs GetVectors too).
 
 ## Semantic profiles (optional, at upload)
 

@@ -7,6 +7,9 @@ Each group (one organization's users) has its own folder; everyone in a group se
     <prefix><group>/documents/preprocessed/<filename>/extracted.json          text blocks, warnings, sheet metadata
     <prefix><group>/documents/preprocessed/<filename>/<sheet>.csv             one per sheet, for spreadsheets
     <prefix><group>/documents/preprocessed/<filename>/semantic_profile.json   when a profile was generated
+    <prefix><group>/documents/preprocessed/<filename>/search_hints.json       when search hints were generated
+    <prefix><group>/documents/preprocessed/<filename>/embeddings.json         when passages were embedded: the
+                                                                              vectors, or their S3 Vectors keys
 
 The same code serves S3 and the local document library (backend/storage/filesystem.py).
 """
@@ -71,7 +74,7 @@ class ObjectDocumentStore:
     requires_group = False
 
     def __init__(self, client, bucket, prefix='', *, group=None, preprocessed=PREPROCESSED, kms_key_id=None,
-                 read_only=False):
+                 read_only=False, vectors=None):
         if not bucket or '/' in bucket or bucket != bucket.strip():
             raise ValueError('S3 bucket must be a bucket name, not an s3:// URI')
         base = _segments(prefix, 'S3 prefix')
@@ -84,6 +87,8 @@ class ObjectDocumentStore:
         self.library = '/'.join(folders[:-1])
         self.kms_key_id = kms_key_id
         self.read_only = read_only
+        # backend/retrieval/semantic.py S3VectorIndex, or None to keep vectors in embeddings.json.
+        self.vectors = vectors
         self.group = None if group is None else check_group_name(group)
         self.prefix = self.base_prefix + (self.group + '/' if self.group else '')
 
@@ -139,6 +144,13 @@ class ObjectDocumentStore:
         root = f'{self.preprocessed}{doc.name}/'
         # A filename identifies one current document. Invalidate completion before replacing it.
         self._remove_outputs(root)
+        embeddings = None
+        if doc.embeddings:
+            try:
+                embeddings = self._stored_embeddings(doc.id, doc.name, doc.embeddings)
+            except Exception as exc:
+                # Like a failed hint batch, a vector index failure never blocks an upload.
+                doc.warnings.append(f'Embeddings not saved: {type(exc).__name__}: {exc}')
         self._write(self._raw_key(doc.name), content, mimetypes.guess_type(doc.name)[0] or 'application/octet-stream')
         if doc.table_folder:
             for sheet in doc.table_metadata['sheets'].values():
@@ -150,11 +162,13 @@ class ObjectDocumentStore:
             self._json(root + 'semantic_profile.json', doc.profile)
         if doc.search_hints:
             self._json(root + 'search_hints.json', doc.search_hints)
+        if embeddings:
+            self._json(root + 'embeddings.json', embeddings)
         # Publish the manifest last. Failed uploads do not appear in the saved-file picker.
         key = root + 'manifest.json'
         manifest = {'schema_version':2, 'document_id':doc.id, 'filename':doc.name,
                     'kind':doc.kind, 'has_tables':bool(doc.table_folder), 'has_profile':bool(doc.profile),
-                    'has_search_hints':bool(doc.search_hints)}
+                    'has_search_hints':bool(doc.search_hints), 'has_embeddings':bool(embeddings)}
         self._json(key, manifest)
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':key}
         return doc.storage_ref
@@ -195,15 +209,42 @@ class ObjectDocumentStore:
             doc.profile = self._read_json(root + 'semantic_profile.json')
         if manifest.get('has_search_hints'):
             doc.search_hints = self._read_json(root + 'search_hints.json')
+        if manifest.get('has_embeddings'):
+            doc.embeddings = self._read_json(root + 'embeddings.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
         return doc
 
     def _remove_outputs(self, root):
-        """Manifest first, so a half-removed document never appears complete; then the rest of its folder."""
+        """Manifest first, so a half-removed document never appears complete; then the rest of its folder, then
+        its vectors in the S3 Vectors index."""
+        vector_keys = self._vector_keys(root)
         self.client.delete_object(Bucket=self.bucket, Key=root + 'manifest.json')
         pages = self.client.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=root)
         for key in [obj['Key'] for page in pages for obj in page.get('Contents', [])]:
             self.client.delete_object(Bucket=self.bucket, Key=key)
+        if vector_keys:
+            self.vectors.delete(vector_keys)
+
+    def _stored_embeddings(self, document_id, filename, embeddings):
+        """What embeddings.json holds: the vectors themselves, or with an S3 Vectors index, the keys they were put
+        under in this group's folder."""
+        if self.vectors is None:
+            return embeddings
+        keys = self.vectors.put(self.prefix, document_id, filename, embeddings['vectors'])
+        return {'meta': {**embeddings['meta'], 'vector_store': self.vectors.name, 'library': self.prefix,
+                         'index': f'{self.vectors.bucket}/{self.vectors.index}'}, 'keys': keys}
+
+    def _vector_keys(self, root):
+        """S3 Vectors keys of the document saved at root; read before its files are removed."""
+        if self.vectors is None:
+            return []
+        try:
+            if not self._read_json(root + 'manifest.json').get('has_embeddings'):
+                return []
+            return self._read_json(root + 'embeddings.json').get('keys', [])
+        except Exception:
+            # Nothing saved there yet. Vectors left behind never match: search maps hits to current blocks.
+            return []
 
     def delete(self, filename):
         """Remove a saved document (by filename or manifest key): its preprocessed folder, then its original.
@@ -243,6 +284,23 @@ class ObjectDocumentStore:
                 raise ValueError('Search hints must be an object with blocks')
             self._json(root + 'search_hints.json', hints)
             self._json(manifest_key, {**manifest, 'has_search_hints': True})
+
+    def save_embeddings(self, manifest_key, embeddings):
+        """Store generated embeddings for an already saved document, replacing any earlier ones."""
+        if self.read_only:
+            raise PermissionError("This document store is read-only")
+        with _trace('save_embeddings', manifest_key=manifest_key, group_name=self.group):
+            root = self._root(manifest_key)
+            manifest = self._read_json(manifest_key)
+            if not isinstance(embeddings, dict) or not isinstance(embeddings.get('vectors'), dict):
+                raise ValueError('Embeddings must be an object with vectors')
+            previous = self._vector_keys(root)
+            stored = self._stored_embeddings(manifest['document_id'], manifest['filename'], embeddings)
+            self._json(root + 'embeddings.json', stored)
+            self._json(manifest_key, {**manifest, 'has_embeddings': True})
+            stale = sorted(set(previous) - set(stored.get('keys', [])))
+            if stale:
+                self.vectors.delete(stale)
 
     def list_documents(self, limit=100):
         if type(limit) is not int or limit < 1:
