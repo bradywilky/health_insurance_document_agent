@@ -1,6 +1,6 @@
 REPOSITORY-TEXT-BUNDLE-V1
 ===== REPOSITORY FILE =====
-{"path": ".env.example", "characters": 2817, "sha256": "54a8a21885c043f39103a25c3c063379e804f7834f1fa16dd2b665024037a10d"}
+{"path": ".env.example", "characters": 3255, "sha256": "e2186d71d8e6ff87ebd59f3002f8a06068cb7c0f8f610b28b50491a526e51c1f"}
 # Replace with your own local profile name. Never add credentials here.
 AWS_PROFILE=dev-profile
 AWS_DEFAULT_REGION=us-east-1
@@ -12,6 +12,15 @@ TABLES_MODEL=maverick
 # PLANNER_REASONING=true
 # Model for semantic profiles generated at upload (default maverick).
 # ENRICHMENT_MODEL=maverick
+# Semantic search (README "Semantic search"): embed passages at upload and offer the semantic_search tool.
+# Off by default; needs Bedrock access to the embedding model.
+# SEMANTIC_SEARCH=true
+# EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0
+# EMBEDDING_DIMENSIONS=1024
+# local keeps vectors beside each document (embeddings.json); s3vectors uses an Amazon S3 Vectors index.
+# VECTOR_STORE=local
+# S3_VECTORS_BUCKET=
+# S3_VECTORS_INDEX=
 # Optional deployment-specific inference profile ID or ARN:
 # BEDROCK_MODEL_ID=
 BEDROCK_MAX_TOKENS=4096
@@ -116,7 +125,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 52524, "sha256": "3bb5b2f0f6d14ad2de8e89a0577708d758eaf8e79967d571ff9132e5b997bb4a"}
+{"path": "README.md", "characters": 55974, "sha256": "5022944ee0f8bf32ac28d972e0025db23b947d4e472268c916b97b4b3cb7d90b"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -186,7 +195,7 @@ The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with a
 
 `backend/preprocessing/documents.py` handles document extraction and chunking. `backend/retrieval/search.py` searches the extracted blocks. `backend/agents/document_agent.py` limits every tool to the selected document IDs and reuses the existing Bedrock wrapper. Table questions use validated filters, aggregates and within-workbook joins. Generated Python execution is disabled in this chat interface. `apps/chat/app.py` keeps chat and active selections in session memory; selected excerpts and conversation context are sent to Bedrock. Setting `DOCUMENTS_STORAGE=s3` and `DOCUMENTS_S3_BUCKET` enables persistent originals and preprocessed content through `backend/storage/s3.py`. The default `DOCUMENTS_STORAGE=local` persists files in `data/document_library` and makes no S3 calls. Both apps share this directory; set `DOCUMENTS_LOCAL_DIR` to override it (relative paths resolve from the project root). Uploading and preprocessing do not call Bedrock.
 
-This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR, cross-file table joins, and embedding-based retrieval are not implemented; see Search hints and relevance scan. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. The returned `sources` identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
+This is a localhost development application, without user authentication. Optional S3 storage is scoped to the server-configured bucket and prefix. File selection is question scope, not a replacement for authorization. A shared deployment needs server-enforced user/document permissions, hardened ingestion, resource limits, and persistent versioned source storage. Automatic bucket discovery, OCR and cross-file table joins are not implemented. Embedding-based retrieval is optional and off by default; see Semantic search. PDF layout and Word headers, footers, text boxes, and tracked changes may not extract completely. The returned `sources` identify retrieved evidence; they do not independently prove that a model interpreted it correctly.
 
 **Load Bingle-Dingle examples** loads eight Bingle-Dingle health-insurance documents: provider agreement, rate schedule, executed amendment, processing guide, unexecuted draft, benefit summary, authorization rules, and claim packet. Bingle-Dingle Insurance is a regional health insurer offering the Meadow product. The documents cover provider terms, benefits, authorization, and claim-specific records.
 
@@ -409,7 +418,8 @@ store.delete(filename)                                        # remove its prepr
 `ingest_document` also takes `enrich=make_enricher()` (backend/agents/enrichment.py) to add a semantic profile,
 and `store.save_profile(manifest_key, profile)` stores a reviewed one. `hint=make_hinter()`
 (backend/agents/search_hints.py) adds search hints, and `store.save_search_hints(manifest_key, hints)` adds them to a
-saved document. `load` and `delete` accept a filename or the
+saved document. `embed=make_embedder()` (backend/agents/embeddings.py) embeds every text block for semantic search,
+and `store.save_embeddings(manifest_key, embeddings)` adds embeddings to a saved document. `load` and `delete` accept a filename or the
 full `storage_ref['manifest_key']`. `delete` removes the manifest first, so the document leaves the list at once;
 deleting a document that is already gone does nothing. Without a store, `ingest_document` only extracts.
 
@@ -638,6 +648,51 @@ Two optional pieces close that gap:
   exceptions are not lost. It is slower and costlier than search, so the planner uses it when search misses or
   when an answer must be complete. One call is capped at `SCAN_MAX_BLOCKS` (default 600) text blocks. Spreadsheet
   data rows are not scanned; table tools cover them. Scan calls count toward the question's usage.
+
+## Semantic search (optional, off by default)
+
+Keyword search matches words; semantic search matches meaning. Think of each passage as a pin on a map where
+passages about the same thing sit close together: at upload, a Bedrock embedding model turns every text block into
+coordinates (a vector), and at question time the question gets coordinates too, so the nearest pins are the
+passages that mean the most similar thing, whatever words they use ("ER visit" lands next to "emergency room
+services").
+
+It has three parts, all behind one switch, `SEMANTIC_SEARCH=true`:
+
+- **Embeddings at upload** (`backend/agents/embeddings.py`). One Bedrock call per text block, in parallel
+  (`EMBEDDING_WORKERS`, default 8), with `EMBEDDING_MODEL_ID` (default `amazon.titan-embed-text-v2:0`) at
+  `EMBEDDING_DIMENSIONS` (256, 512 or 1024; default 1024). The upload portal shows an "Embed passages" checkbox and,
+  under each saved document, a Generate embeddings button. Failed blocks are listed in the embeddings' `meta`; a
+  failure never blocks an upload. Spreadsheet data rows are not embedded; table tools cover them.
+- **Vector storage**, chosen by `VECTOR_STORE`:
+  - `local` (default): the vectors are saved as `embeddings.json` beside the document and compared in memory.
+    Needs no service besides the embedding model; fine for development and libraries of a few thousand blocks.
+  - `s3vectors`: the vectors go to an Amazon S3 Vectors index (`S3_VECTORS_BUCKET`, `S3_VECTORS_INDEX`), and
+    `embeddings.json` keeps only their keys, so replacing or deleting a document removes its vectors. One index
+    serves every group: each vector carries its group folder (`library`) and `document_id` as metadata, and every
+    query is filtered to the caller's group and selected documents. Block text is never stored in the index.
+- **The `semantic_search` tool** (`backend/retrieval/semantic.py`). Offered to the planner only when the switch is on
+  and a selected document has embeddings. It embeds the query and returns the closest text blocks with a
+  `similarity` score. It always returns the closest blocks even when none is relevant, so the planner judges each.
+  Documents without usable embeddings (none yet, a different embedding model, or vectors in an index that is not
+  configured) are listed in `not_indexed`. Query embeddings count toward the question's usage.
+
+With the switch off nothing changes: no embedding calls, no tool, and saved embeddings are ignored. Documents
+uploaded before it was turned on have no embeddings until someone clicks Generate embeddings for them.
+
+To create the S3 Vectors bucket and index (cosine distance, dimension equal to `EMBEDDING_DIMENSIONS`):
+
+```bash
+aws s3vectors create-vector-bucket --vector-bucket-name <bucket>
+```
+
+```bash
+aws s3vectors create-index --vector-bucket-name <bucket> --index-name <index> --data-type float32 --dimension 1024 --distance-metric cosine --metadata-configuration "nonFilterableMetadataKeys=block_id,filename"
+```
+
+The answering and upload roles need `bedrock:InvokeModel` on the embedding model, and `s3vectors:PutVectors`,
+`s3vectors:DeleteVectors`, `s3vectors:QueryVectors` and `s3vectors:GetVectors` on the index (query with metadata
+filters needs GetVectors too).
 
 ## Semantic profiles (optional, at upload)
 
@@ -1097,7 +1152,7 @@ elif typed:
 {"path": "apps/upload/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
 
 ===== REPOSITORY FILE =====
-{"path": "apps/upload/app.py", "characters": 8165, "sha256": "d2af77ee6c2c969342229becb2c37ab1a7c7660063cc701935a3fcc4dcd7ef99"}
+{"path": "apps/upload/app.py", "characters": 9569, "sha256": "c95d45cf1ad624ce08f9d42856739227a7bf336e1eb32a41cb5e9c3fe741c61c"}
 """Document upload portal. Run: streamlit run apps/upload/app.py --server.port 8502"""
 from pathlib import Path
 from dotenv import load_dotenv
@@ -1107,6 +1162,8 @@ from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
 from backend.agents.search_hints import make_hinter
+from backend.agents.embeddings import make_embedder
+from backend.config.settings import semantic_search_enabled
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
 st.title('Document Upload Portal')
@@ -1129,6 +1186,11 @@ hints_at_upload = st.checkbox(
     'Generate search hints (other words for each passage)',
     help='Sends each file\'s extracted text to Amazon Bedrock once at upload, about one call per 15 passages. '
          'Keyword search then also finds passages worded differently from the question. Hints are never evidence.')
+# Shown only with SEMANTIC_SEARCH=true; environments without a Bedrock embedding model leave it off.
+embed_at_upload = semantic_search_enabled() and st.checkbox(
+    'Embed passages for semantic search', value=True,
+    help='Sends each passage to the Bedrock embedding model once at upload (one call per passage). The answering '
+         'agent can then find passages by meaning, not only by shared words.')
 
 
 def save_files(files):
@@ -1138,7 +1200,8 @@ def save_files(files):
             with st.spinner(f'Processing {name}...'):
                 enrich = make_enricher() if profile_at_upload else None
                 hint = make_hinter() if hints_at_upload else None
-                doc = ingest_document(name, content, store=store, enrich=enrich, hint=hint)
+                embed = make_embedder() if embed_at_upload else None
+                doc = ingest_document(name, content, store=store, enrich=enrich, hint=hint, embed=embed)
             st.success(f'Saved {doc.name}')
             for warning in doc.warnings:
                 st.warning(f'{doc.name}: {warning}')
@@ -1195,6 +1258,18 @@ if key:
                 st.rerun()
             except Exception as exc:
                 st.error(f'Could not generate search hints: {type(exc).__name__}: {exc}')
+    if semantic_search_enabled():
+        embedded = (doc.embeddings or {}).get('meta')
+        st.caption(f"Embeddings: {embedded['blocks_embedded']} of {embedded['blocks_total']} passages "
+                   f"({embedded['model_id']})" if embedded else 'No embeddings for this document yet.')
+        if doc.blocks and st.button('Regenerate embeddings' if embedded else 'Generate embeddings',
+                                    help='Sends each passage to the Bedrock embedding model.'):
+            with st.spinner('Embedding passages...'):
+                try:
+                    store.save_embeddings(key, make_embedder()(doc))
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f'Could not generate embeddings: {type(exc).__name__}: {exc}')
     if not profile:
         st.info('No semantic profile for this document yet.')
     else:
@@ -1403,16 +1478,17 @@ def answer_issues(answer, evidence, question):
     return issues
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_agent.py", "characters": 37414, "sha256": "d8af15bbf3f4f6359881ca6e9523e4642f458a1c8028c1b28f8d9637e77f4c14"}
+{"path": "backend/agents/document_agent.py", "characters": 39140, "sha256": "daf1ebfcf8040ad93e3a865508c7f41355c791cca60a5b9b8302cd48b16bbadd"}
 """Bounded selected-document research loop, sharing the existing Bedrock LLM wrapper."""
 import json
 import re
 import time
 from string import Template
 
-from backend.config.settings import get_model_config, MODELS
+from backend.config.settings import get_model_config, MODELS, semantic_search_enabled
 import os
 from backend.agents.evidence import bounded, compact, numeric_display_check, bounded_items
+from backend.agents.embeddings import Embedder
 from backend.agents.llm import LLM, Usage
 from backend.tools.documents import selected_documents, execute_document_tool
 from langgraph.graph import StateGraph, START, END
@@ -1453,7 +1529,7 @@ $search_tools
   ones with reasons. It finds passages worded differently from the question but is slower and costlier than search.
   Use it when search misses or the wording is uncertain, or when the answer must be complete (every exclusion,
   limit or exception). Follow more_relevant with read_document.
-- read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
+${semantic_tool}- read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
 ${table_tool}- calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
   using numbers copied from the cited evidence or question.
 - date_calculate: {"label":"deadline","operation":"add_days","date":"2026-04-05","days":15} or operation
@@ -1474,6 +1550,13 @@ documents, glossary and column roles. Use it to decide where to look$governs; ne
 it, and retrieve the source passage or row before relying on any of it. "inferred" glossary meanings are guesses.
 Do not claim that extracted Word body text covers headers, footers, text boxes or tracked changes.
 Do not invent PDF pages or Word page citations.
+''')
+# Only included when semantic search is on (SEMANTIC_SEARCH) and a selected document has embeddings.
+SEMANTIC_TOOL = Template('''- semantic_search: {"query":"what the passages say","limit":8$scan_ids} returns the text blocks
+  closest in meaning to the query, from upload-time embeddings, each with a similarity score. Like scan it finds
+  passages worded differently from the question, but as fast as search. It always returns the closest blocks, even
+  when none is relevant: judge each one. Use scan when the answer must be complete. Documents listed in not_indexed
+  were not searched.
 ''')
 # Only included when a selected file is a spreadsheet (xlsx/xls/csv), so text-only questions never see table tools.
 TABLE_TOOL = '''- table_tool: {"document_id":"ID","name":"list_sheets|get_sheet_schema|read_sheet|search_all_sheets|query_table|join_tables","parameters":{...}}.
@@ -1539,11 +1622,18 @@ MULTIPLE = {
 }
 
 
-def system_prompt(single, tables=True):
-    """Planner instructions; table tools and spreadsheet rules appear only when a spreadsheet is selected."""
+def system_prompt(single, tables=True, semantic=False):
+    """Planner instructions; table tools and spreadsheet rules appear only when a spreadsheet is selected, and
+    semantic_search only when semantic is true."""
     values = dict(SINGLE if single else MULTIPLE)
     values['search_tools'] = Template(values['search_tools']).substitute(rows=' and spreadsheet rows' if tables else '')
-    return SYSTEM.substitute(values, table_tool=TABLE_TOOL if tables else '', table_rules=TABLE_RULES if tables else '')
+    return SYSTEM.substitute(values, table_tool=TABLE_TOOL if tables else '', table_rules=TABLE_RULES if tables else '',
+                             semantic_tool=SEMANTIC_TOOL.substitute(scan_ids=values['scan_ids']) if semantic else '')
+
+
+def semantic_documents(docs):
+    """True when semantic search is on and a selected document has embeddings to search."""
+    return semantic_search_enabled() and any(doc.embeddings for doc in docs.values())
 
 
 def table_documents(docs):
@@ -1570,6 +1660,7 @@ class DocumentState(TypedDict, total=False):
     docs: dict
     turn_session: TurnSession
     scan_llm: LLM
+    embedder: Embedder | None
     specs: list
     actions: list
     request_error: str | None
@@ -1605,7 +1696,8 @@ def node_init(state: DocumentState) -> dict:
         raise ValueError('Question cannot be empty')
     usage = state.get('usage') or Usage()
     tables = table_documents(docs)
-    specs = tool_specs(docs, tables)
+    semantic = semantic_documents(docs)
+    specs = tool_specs(docs, tables, semantic)
     payload = {'question': question, 'selected_documents': [doc.summary() for doc in docs.values()],
                'history': bounded((state.get('history') or [])[-6:], max_chars=4000)}
     _, inference = get_model_config()
@@ -1614,10 +1706,12 @@ def node_init(state: DocumentState) -> dict:
     # The scan tool's model reads blocks in parallel; its calls count toward this question's usage.
     scan_llm = LLM(agent_name='health_insurance_document_agent', tool_name='Relevance Scan',
                    model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
-    turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables))
+    # semantic_search embeds each query with the model the documents were embedded with; calls count toward usage.
+    embedder = Embedder(usage_meter=usage) if semantic else None
+    turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables), semantic)
                                + '\nUse native tools; do not write tool requests as text.', payload, specs)
     return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
-            'scan_llm': scan_llm,
+            'scan_llm': scan_llm, 'embedder': embedder,
             'steps': 0, 'evidence': [], 'seen': {}, 'started': time.monotonic(),
             'limitations': [f'{doc.name}: {warning}' for doc in docs.values() for warning in doc.warnings],
             'finished': False, 'coverage_prompted': False, 'calculation_prompted': False,
@@ -1703,7 +1797,8 @@ def node_reason(state: DocumentState) -> dict:
               usage_meter=state['usage'])
     session = state['turn_session']
     try:
-        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1), session.messages)
+        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1,
+                                                      semantic=state.get('embedder') is not None), session.messages)
     except (ValueError, KeyError, TypeError):
         # Fail open: the planner runs without a plan for this step.
         stats['reasoning_failures'] += 1
@@ -1787,7 +1882,8 @@ def node_tools(state: DocumentState) -> dict:
                         results.append({'error': str(exc)})
                         continue
                 else:
-                    data = execute_document_tool(name, params, state['docs'], scan_llm=state.get('scan_llm'))
+                    data = execute_document_tool(name, params, state['docs'], scan_llm=state.get('scan_llm'),
+                                                 embedder=state.get('embedder'))
                 failed = data.get('error') or (data.get('table_result') or {}).get('error')
                 if failed:
                     tracing.mark_error(tool_span, failed)
@@ -1872,11 +1968,13 @@ def _prompt_version():
     """Hash of every instruction and tool definition the models see; recorded in each question trace."""
     from hashlib import sha256
     parts = [system_prompt(True), system_prompt(False), system_prompt(True, False), system_prompt(False, False),
+             system_prompt(True, semantic=True), system_prompt(False, semantic=True),
              writer_prompt(True), writer_prompt(False),
              INTERPRETATION_RULE, amb.ASSESS_SYSTEM, json.dumps(amb.ASSESS_SPEC, sort_keys=True),
              json.dumps(tool_specs(['<document>']), sort_keys=True),
              json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True),
-             json.dumps(tool_specs(['<document>'], []), sort_keys=True), reasoning.RULES, reasoning.NOTE]
+             json.dumps(tool_specs(['<document>'], []), sort_keys=True),
+             json.dumps(tool_specs(['<document>', '<other>'], [], True), sort_keys=True), reasoning.RULES, reasoning.NOTE]
     return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 
@@ -2010,17 +2108,17 @@ def run_document_agent_stream(documents, document_ids, question, *, history=None
                        ('steps', 'finished', 'stats', 'limitations', 'reasoning_log') if k in update}}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/agents/document_protocol.py", "characters": 5869, "sha256": "dfb52d403bbb73e3772ab023aa5f19ef24cc31f91ce99f65fa8915195115efec"}
+{"path": "backend/agents/document_protocol.py", "characters": 6322, "sha256": "a079a6ab98d6aec719c5c77ced920db0e72ba1aad3503dceb64d00944b350d40"}
 """Document tool schemas, evidence eligibility and source coverage."""
 
 SOURCE = {'type':'string', 'pattern':'^(E[0-9]+|question)$'}
 
 
-def tool_specs(document_ids, table_ids=None):
+def tool_specs(document_ids, table_ids=None, semantic=False):
     """Native tool definitions; a single selected document gets no listing tool or per-search document filter.
 
     table_tool is offered only for table_ids (selected spreadsheets; None means every document) and is left out
-    when there are none.
+    when there are none. semantic_search is offered only when semantic is true.
     """
     doc = {'type':'string', 'enum':list(document_ids)}
     table_ids = list(document_ids) if table_ids is None else list(table_ids)
@@ -2040,9 +2138,12 @@ def tool_specs(document_ids, table_ids=None):
                    {'document_id':{'type':'string','enum':table_ids}, 'name':{'type':'string','enum':[
                        'list_sheets','get_sheet_schema','read_sheet','search_all_sheets','query_table','join_tables']},
                     'parameters':{'type':'object'}}, ['document_id','name','parameters'])] if table_ids else []
+    semantic_search = [spec('semantic_search', f'Find the text blocks of {scope} text closest in meaning to query, '
+                            'even when worded differently. As fast as search. Returns the closest blocks even when '
+                            'none is relevant.', search, ['query'])] if semantic else []
     return listing + [
         spec('search',f'Search {scope} text{rows} lexically. Empty results do not prove absence.',
-             search, ['query']),
+             search, ['query'])] + semantic_search + [
         spec('scan','Have a model read every text block and return the ones relevant to '
              'query, with a reason each. Finds passages worded differently from the question. Slower and costlier '
              'than search: use it when search misses, or when the answer must be complete.',
@@ -2076,7 +2177,7 @@ def has_content(record):
         return False
     if record['tool']=='read_document':
         return bool(data.get('blocks'))
-    if record['tool'] in {'search','scan'}:
+    if record['tool'] in {'search','scan','semantic_search'}:
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
         result = data.get('table_result',{})
@@ -2100,11 +2201,115 @@ def examined_documents(evidence):
             examined.update(record['data'].get('scanned_document_ids', []))
         if not has_content(record):
             continue
-        if record['tool'] in {'search', 'scan'}:
+        if record['tool'] in {'search', 'scan', 'semantic_search'}:
             examined.update(match['document_id'] for match in record['data']['matches'])
         else:
             examined.add(record['data']['document_id'])
     return examined
+
+===== REPOSITORY FILE =====
+{"path": "backend/agents/embeddings.py", "characters": 5192, "sha256": "4cb12ca05c088823a368311e41b6a9c0a6a7255dc8b7e305ad1adedf67edff1d"}
+"""Optional passage embeddings for semantic search, made once per document at upload.
+
+Each text block is turned into a vector (a list of numbers that stands for its meaning) by a Bedrock embedding model,
+Amazon Titan Text Embeddings V2 by default. Questions are embedded the same way at search time, and the blocks whose
+vectors point the same way as the question's are its closest matches in meaning (backend/retrieval/semantic.py).
+Off unless SEMANTIC_SEARCH=true (backend/config/settings.py).
+"""
+from base64 import b64decode, b64encode
+from datetime import datetime, timezone
+import json
+import os
+
+import numpy as np
+
+from backend.observability import tracing
+from backend.shared.parallel import parallel_map
+
+EMBEDDINGS_VERSION = 1
+DEFAULT_MODEL = 'amazon.titan-embed-text-v2:0'
+DIMENSIONS = (256, 512, 1024)  # the sizes Titan Text Embeddings V2 returns
+MAX_INPUT_CHARS = 20000  # well under Titan V2's 8,192-token limit; blocks are at most 1,600 characters
+
+
+def encode(vector):
+    """Base64 of float32 values: a quarter the size of JSON numbers, so a long document's vectors stay small."""
+    return b64encode(np.asarray(vector, dtype='<f4').tobytes()).decode('ascii')
+
+
+def decode(text):
+    return np.frombuffer(b64decode(text), dtype='<f4')
+
+
+class Embedder:
+    """Embeds text with a Bedrock embedding model; model calls count toward usage_meter when given."""
+
+    def __init__(self, model_id=None, dimensions=None, usage_meter=None):
+        self.model_id = model_id or os.getenv('EMBEDDING_MODEL_ID') or DEFAULT_MODEL
+        self.dimensions = dimensions or int(os.getenv('EMBEDDING_DIMENSIONS', '1024'))
+        if self.dimensions not in DIMENSIONS:
+            raise ValueError(f'EMBEDDING_DIMENSIONS must be one of {list(DIMENSIONS)}')
+        self.usage_meter = usage_meter
+
+    def _bedrock(self):
+        if not hasattr(self, '_client'):
+            import boto3
+            from botocore.config import Config
+            session = boto3.Session(profile_name=os.getenv('AWS_PROFILE') or None)
+            self._client = session.client('bedrock-runtime',
+                region_name=os.getenv('AWS_REGION') or session.region_name or 'us-east-1',
+                config=Config(connect_timeout=10, read_timeout=60,
+                              retries={'mode': 'adaptive',
+                                       'total_max_attempts': int(os.getenv('BEDROCK_MAX_ATTEMPTS', '6'))}))
+        return self._client
+
+    def embed(self, text, *, purpose='Embedding'):
+        """A unit-length vector for text (Titan normalizes it, so a dot product is the cosine similarity)."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError('Text to embed must be nonempty')
+        body = {'inputText': text[:MAX_INPUT_CHARS], 'dimensions': self.dimensions, 'normalize': True}
+        with tracing.span('embedding', purpose, model_name=self.model_id,
+                          model_provider=tracing.MODEL_PROVIDER) as current:
+            response = self._bedrock().invoke_model(modelId=self.model_id, body=json.dumps(body),
+                                                    contentType='application/json', accept='application/json')
+            reply = json.loads(response['body'].read())
+            tokens = reply.get('inputTextTokenCount', 0)
+            tracing.annotate(current, metadata={'dimensions': self.dimensions},
+                             metrics={'input_tokens': tokens, 'total_tokens': tokens})
+        if self.usage_meter is not None:
+            self.usage_meter.add({'inputTokens': tokens})
+        return reply['embedding']
+
+
+def embed_document(doc, embedder, *, workers=None):
+    """{'vectors': {block_id: encoded vector}, 'meta': ...} for every text block; one Bedrock call per block.
+
+    Raises ValueError when no block could be embedded; failed blocks are listed in meta and left out of search.
+    """
+    if not doc.blocks:
+        raise ValueError('No text blocks to embed')
+    workers = workers or int(os.getenv('EMBEDDING_WORKERS', '8'))
+    blocks = [b for b in doc.blocks if b['text'].strip()]
+    vectors, failed = {}, []
+    results = parallel_map(lambda b: embedder.embed(b['text'], purpose='Passage Embedding'), blocks, workers)
+    for block, result in zip(blocks, results):
+        if isinstance(result, Exception):
+            failed.append({'block_id': block['block_id'], 'error': f'{type(result).__name__}: {result}'[:300]})
+        else:
+            vectors[block['block_id']] = encode(result)
+    if not vectors:
+        raise ValueError(f"No passages embedded: {failed[0]['error'] if failed else 'all blocks are empty'}")
+    return {'vectors': vectors, 'meta': {
+        'embeddings_version': EMBEDDINGS_VERSION, 'model_id': embedder.model_id,
+        'dimensions': embedder.dimensions, 'vector_store': 'local',
+        'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'blocks_total': len(doc.blocks), 'blocks_embedded': len(vectors), 'failed_blocks': failed}}
+
+
+def make_embedder():
+    """Callable for ingest_document(embed=...), using EMBEDDING_MODEL_ID and EMBEDDING_DIMENSIONS."""
+    embedder = Embedder()
+    return lambda doc: embed_document(doc, embedder)
 
 ===== REPOSITORY FILE =====
 {"path": "backend/agents/enrichment.py", "characters": 15521, "sha256": "0bed30e7a530a3dcc96448f4ea1ef759d63a9b4a901f304969786a259a9d2e22"}
@@ -2821,7 +3026,7 @@ class TurnSession:
 """Config components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/config/settings.py", "characters": 772, "sha256": "47a90fb108f7f74d327b332f4f5236f8e304ff79b6a86c41d773d6e517e59629"}
+{"path": "backend/config/settings.py", "characters": 1135, "sha256": "57930a61da4e421bc2829248baf2c3f552f8e526a4341dbbb153ea53a1f3d2e4"}
 """Bedrock model choices and inference settings, read from the environment."""
 import os
 
@@ -2842,6 +3047,14 @@ def get_model_config():
         "maxTokens": int(os.getenv("BEDROCK_MAX_TOKENS", "4096")),
         "temperature": 0.0,
     }
+
+
+def semantic_search_enabled():
+    """SEMANTIC_SEARCH=true turns on passage embeddings at upload and the semantic_search tool (default off).
+
+    Needs a Bedrock embedding model (EMBEDDING_MODEL_ID); see backend/retrieval/semantic.py for where vectors live.
+    """
+    return os.getenv('SEMANTIC_SEARCH', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 ===== REPOSITORY FILE =====
 {"path": "backend/entrypoint.py", "characters": 14160, "sha256": "e04a860b6ccea29b513954a5662806b84d36d8e696ac270b1c692e4e803910a0"}
@@ -3086,7 +3299,7 @@ def _response(status, result, error, loaded, request_id, trace_id, session_id, q
     }
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/SPANS.md", "characters": 13356, "sha256": "34d6bc656ff7834cf47c690350527fa1cb0ee9639b3dbe526e0918dd1948ae83"}
+{"path": "backend/observability/SPANS.md", "characters": 13626, "sha256": "e3e5b333bfbcf23a935dc437f6c1af857132baa4d31b911f0c30013e6504ba1d"}
 # Trace spans
 
 Every span the application records, and every field each one carries. The same spans go to Datadog LLM
@@ -3111,7 +3324,8 @@ agent  document_agent
 │   └── llm  Native Document Research  │     repeated once per research step
 ├── workflow  tools                    │
 │   └── tool  <tool name> × N          ┘
-│       └── llm  Relevance Scan × N          scan tool only: one per batch of 20 text blocks, run in parallel
+│       ├── llm  Relevance Scan × N          scan tool only: one per batch of 20 text blocks, run in parallel
+│       └── embedding  Query Embedding       semantic_search tool only
 └── workflow  synthesize
     ├── llm  Document Answer
     └── llm  Document Answer Revision        when the answer check finds issues
@@ -3122,9 +3336,11 @@ One trace per document change, each archived when it ends:
 ```text
 workflow  ingest_document                    backend/preprocessing/documents.py, ingest_document
 ├── llm  Document Enrichment                 when a semantic profile is requested
-└── llm  Search Hints × N                    when search hints are requested: one per 15 text blocks, in parallel
+├── llm  Search Hints × N                    when search hints are requested: one per 15 text blocks, in parallel
+└── embedding  Passage Embedding × N         when embeddings are requested: one per text block, in parallel
 workflow  save_profile                       backend/storage/documents.py, save_profile
 workflow  save_search_hints                  backend/storage/documents.py, save_search_hints
+workflow  save_embeddings                    backend/storage/documents.py, save_embeddings
 workflow  delete_document                    backend/storage/documents.py, delete
 ```
 
@@ -3512,7 +3728,7 @@ def evidence_summary(evidence):
     return out
 
 ===== REPOSITORY FILE =====
-{"path": "backend/observability/tracing.py", "characters": 9634, "sha256": "61d06dd4550e99615f03a8d7263faba987ed2b25bbd83ebe212bfcf832284d4b"}
+{"path": "backend/observability/tracing.py", "characters": 9758, "sha256": "6f6bf7a745c386438372a0e1bd800f9745a4b0182caaaf10667b10a4071ba5b9"}
 """Traces for questions, graph steps, Bedrock calls, tool executions and document changes.
 
 Every span is recorded here and, when Datadog LLM Observability is enabled, also sent to Datadog with the same
@@ -3526,6 +3742,7 @@ agent     document_agent                 one per question: request and session I
 workflow  init | assess | plan | tools | synthesize
           ingest_document | delete_document | save_profile   one per document change
 llm       one per Bedrock call           model, step, tokens, stop reason, tool calls requested
+embedding one per Bedrock embedding call model, dimensions, tokens (passages at upload, semantic_search queries)
 tool      one per tool execution         evidence ID, document IDs, match and row counts
 
 TRACE_CONTENT=true  also record prompts, responses, the question, the answer, and tool parameters and results.
@@ -3612,7 +3829,7 @@ class Span:
 
 @contextmanager
 def span(kind, name, *, archive=None, **options):
-    """Start a span of `kind` (agent, workflow, llm, tool), a child of the span open in this context.
+    """Start a span of `kind` (agent, workflow, llm, embedding, tool), a child of the span open in this context.
 
     archive: on a root span, the trace archive that receives the finished trace (archive.configured_archive()).
     Exceptions are recorded on the span and re-raised."""
@@ -3741,7 +3958,7 @@ def _drop_none(values):
 """Preprocessing components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/preprocessing/documents.py", "characters": 7819, "sha256": "139d7af2b5eccc2509ceb435b2fa40fb3424baef6826ad1bd29b30f96763a38c"}
+{"path": "backend/preprocessing/documents.py", "characters": 8343, "sha256": "d539de83516a7b0c34ceeab68a97514d0eb9f1809239839335d81e48fdcf335c"}
 """Document ingestion and optional persistence for selected document Q&A."""
 from backend.shared.models import Document
 from backend.shared.rows import narrative_rows, row_location, row_text
@@ -3769,11 +3986,14 @@ def _add_text(doc, text, location):
                            'location':location})
 
 
-def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=None, table_options=None) -> Document:
+def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=None, embed=None,
+                    table_options=None) -> Document:
     """Extract a document's searchable text (and, for spreadsheets, per-sheet tables), then optionally profile it,
-    add search hints and save it.
+    add search hints, embed its blocks and save it.
 
     hint           e.g. search_hints.make_hinter(): per-block search hints for keyword search
+
+    embed          e.g. embeddings.make_embedder(): per-block vectors for semantic search
 
     table_options  spreadsheet preprocessing options: encoding, delimiter (CSV) and sheet overrides
 
@@ -3785,9 +4005,9 @@ def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=
         tracing.annotate(current, metadata={
             'filename': name, 'kind': Path(name).suffix.lower(), 'bytes': len(content or b''),
             'content_sha256': sha256(content or b'').hexdigest(), 'profile_requested': enrich is not None,
-            'search_hints_requested': hint is not None,
+            'search_hints_requested': hint is not None, 'embeddings_requested': embed is not None,
             'saved': store is not None, 'group_name': getattr(store, 'group', None)})
-        doc = _ingest(name, content, store, enrich, hint, table_options)
+        doc = _ingest(name, content, store, enrich, hint, embed, table_options)
         profile = doc.profile or {}
         tracing.annotate(current, metadata={'document': document_summary(doc),
                                             'profile_generated': bool(profile),
@@ -3795,7 +4015,7 @@ def ingest_document(name: str, content: bytes, *, store=None, enrich=None, hint=
         return doc
 
 
-def _ingest(name, content, store, enrich, hint, table_options):
+def _ingest(name, content, store, enrich, hint, embed, table_options):
     name = name.replace('\\','/').rsplit('/',1)[-1]
     extension = Path(name).suffix.lower()
     if extension not in SUPPORTED:
@@ -3861,6 +4081,12 @@ def _ingest(name, content, store, enrich, hint, table_options):
             doc.search_hints = hint(doc)
         except Exception as exc:
             doc.warnings.append(f'Search hints not generated: {type(exc).__name__}: {exc}')
+    if embed is not None and doc.blocks:
+        # Optional passage embeddings (backend/agents/embeddings.py). Sends the extracted text to the model.
+        try:
+            doc.embeddings = embed(doc)
+        except Exception as exc:
+            doc.warnings.append(f'Embeddings not generated: {type(exc).__name__}: {exc}')
     if store is not None:
         store.save(doc, content)
     return doc
@@ -4318,6 +4544,158 @@ def search_documents(documents, query, *, limit=8):
             'warnings':{doc.name:doc.warnings for doc in documents.values() if doc.warnings}}
 
 ===== REPOSITORY FILE =====
+{"path": "backend/retrieval/semantic.py", "characters": 8040, "sha256": "b86e5429b2911008c74a532a8ef3404aabf8c299d023d49b2739822ab5fd7cb9"}
+"""Semantic search: the text blocks closest in meaning to a query, found by comparing embeddings
+(backend/agents/embeddings.py) instead of shared words.
+
+Where a saved document's vectors live is chosen by VECTOR_STORE:
+
+    local      (default) in embeddings.json beside the document, compared in memory at search time. Needs no AWS
+               service besides the Bedrock embedding model; suits development and small libraries.
+    s3vectors  in an Amazon S3 Vectors index (S3_VECTORS_BUCKET, S3_VECTORS_INDEX). embeddings.json then keeps only
+               the vector keys, so replacing or deleting the document can remove them.
+
+Every vector in the index carries its group folder (`library`) and document_id as filterable metadata, and a query
+is always filtered to the caller's group and selected documents. Block text is never stored in the index: a match
+returns the block from the loaded document, so the index only routes search.
+"""
+from functools import lru_cache
+import os
+
+import numpy as np
+
+from backend.agents.embeddings import decode
+
+PUT_BATCH = 500  # S3 Vectors accepts at most 500 vectors per PutVectors call and 500 keys per DeleteVectors call
+
+
+class S3VectorIndex:
+    """One Amazon S3 Vectors index shared by every group; vectors are keyed and filtered by group folder."""
+    name = 's3vectors'
+
+    def __init__(self, client, bucket, index):
+        if not bucket or not index:
+            raise ValueError('S3_VECTORS_BUCKET and S3_VECTORS_INDEX are required when VECTOR_STORE=s3vectors')
+        self.client, self.bucket, self.index = client, bucket, index
+
+    def put(self, library, document_id, filename, vectors):
+        """Store a document's vectors; returns their keys (library + document ID + block ID, unique per group)."""
+        items = [{'key': f'{library}{document_id}/{block_id}', 'data': {'float32': decode(vector).tolist()},
+                  'metadata': {'library': library, 'document_id': document_id, 'block_id': block_id,
+                               'filename': filename}}
+                 for block_id, vector in vectors.items()]
+        for start in range(0, len(items), PUT_BATCH):
+            self.client.put_vectors(vectorBucketName=self.bucket, indexName=self.index,
+                                    vectors=items[start:start + PUT_BATCH])
+        return [item['key'] for item in items]
+
+    def delete(self, keys):
+        for start in range(0, len(keys), PUT_BATCH):
+            self.client.delete_vectors(vectorBucketName=self.bucket, indexName=self.index,
+                                       keys=keys[start:start + PUT_BATCH])
+
+    def query(self, library, document_ids, vector, top_k):
+        """[(document_id, block_id, similarity)] among the given documents of one group, closest first."""
+        reply = self.client.query_vectors(
+            vectorBucketName=self.bucket, indexName=self.index, topK=top_k,
+            queryVector={'float32': [float(x) for x in vector]}, returnMetadata=True, returnDistance=True,
+            filter={'$and': [{'library': {'$eq': library}}, {'document_id': {'$in': list(document_ids)}}]})
+        # The index is created with the cosine distance metric: similarity = 1 - distance.
+        return [(hit['metadata']['document_id'], hit['metadata']['block_id'], 1 - hit['distance'])
+                for hit in reply.get('vectors', [])]
+
+
+def configured_vectors():
+    """The S3 Vectors index VECTOR_STORE selects, or None for local vectors saved beside each document."""
+    names = ('VECTOR_STORE', 'S3_VECTORS_BUCKET', 'S3_VECTORS_INDEX', 'AWS_PROFILE', 'AWS_REGION',
+             'AWS_DEFAULT_REGION')
+    return _vectors(tuple((name, os.getenv(name)) for name in names))
+
+
+@lru_cache(maxsize=4)
+def _vectors(settings):
+    env = dict(settings)
+    mode = (env['VECTOR_STORE'] or 'local').strip().lower()
+    if mode not in {'local', 's3vectors'}:
+        raise ValueError('VECTOR_STORE must be local or s3vectors')
+    if mode == 'local':
+        return None
+    import boto3
+    from botocore.config import Config
+    session = boto3.Session(profile_name=env['AWS_PROFILE'] or None,
+                            region_name=env['AWS_REGION'] or env['AWS_DEFAULT_REGION'] or 'us-east-1')
+    client = session.client('s3vectors', config=Config(connect_timeout=5, read_timeout=60,
+                                                       retries={'mode': 'standard', 'total_max_attempts': 3}))
+    return S3VectorIndex(client, (env['S3_VECTORS_BUCKET'] or '').strip(), (env['S3_VECTORS_INDEX'] or '').strip())
+
+
+def _unusable(doc, embedder, index):
+    """Why doc's embeddings cannot be compared with this query, or None when they can."""
+    meta = (doc.embeddings or {}).get('meta')
+    if not meta:
+        return 'no embeddings; generate them in the upload portal'
+    if (meta.get('model_id'), meta.get('dimensions')) != (embedder.model_id, embedder.dimensions):
+        return (f"embedded with {meta.get('model_id')} ({meta.get('dimensions')} dimensions), not "
+                f'{embedder.model_id} ({embedder.dimensions}); regenerate its embeddings')
+    if 'vectors' not in doc.embeddings and index is None:
+        return 'its vectors are in an S3 Vectors index, but VECTOR_STORE is not s3vectors'
+    return None
+
+
+def _local_hits(doc, vector):
+    vectors = doc.embeddings['vectors']
+    ids = list(vectors)
+    matrix = np.stack([decode(vectors[i]) for i in ids])
+    # Titan returns unit-length vectors, so the dot product is the cosine similarity.
+    return [(doc.id, block_id, float(score)) for block_id, score in zip(ids, matrix @ vector)]
+
+
+def semantic_search_documents(documents, query, embedder, *, limit=8, index=None):
+    """The blocks of the selected documents closest in meaning to query, most similar first.
+
+    index: the S3 Vectors index for documents whose vectors live there (configured_vectors()); documents carrying
+    their own vectors are compared in memory. Documents without usable embeddings are listed in not_indexed.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError('query must be a nonempty string')
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError('limit must be 1..20')
+    not_indexed, local, remote = [], [], {}
+    for doc in documents.values():
+        reason = _unusable(doc, embedder, index)
+        if reason:
+            not_indexed.append({'document_id': doc.id, 'filename': doc.name, 'reason': reason})
+        elif 'vectors' in doc.embeddings:
+            local.append(doc)
+        else:
+            remote.setdefault(doc.embeddings['meta']['library'], []).append(doc.id)
+    hits = []
+    if local or remote:
+        vector = np.asarray(embedder.embed(query, purpose='Query Embedding'), dtype='<f4')
+        for doc in local:
+            hits += _local_hits(doc, vector)
+        for library, ids in remote.items():
+            hits += index.query(library, ids, vector, limit)
+    hits.sort(key=lambda hit: -hit[2])
+    blocks = {doc.id: {b['block_id']: b for b in doc.blocks} for doc in documents.values()}
+    matches = []
+    for document_id, block_id, score in hits:
+        block = blocks.get(document_id, {}).get(block_id)
+        if block is not None:  # vectors of a replaced document version never match its current blocks
+            matches.append({'document_id': document_id, 'filename': documents[document_id].name, **block,
+                            'similarity': round(score, 4)})
+        if len(matches) == limit:
+            break
+    output = {'matches': matches,
+              'retrieval_method': 'semantic: text blocks ranked by closeness in meaning to the query (similarity '
+                                  '0..1). The closest blocks are returned even when none is relevant, so judge each '
+                                  'one. Spreadsheet data rows are not embedded; use table tools for them.',
+              'warnings': {doc.name: doc.warnings for doc in documents.values() if doc.warnings}}
+    if not_indexed:
+        output['not_indexed'] = not_indexed
+    return output
+
+===== REPOSITORY FILE =====
 {"path": "backend/shared/__init__.py", "characters": 25, "sha256": "3677fc3d4ff812994ea264e29f249d8fc1848e2aeb9972190f625cb5180f85bb"}
 """Shared components."""
 
@@ -4354,7 +4732,7 @@ def sheet_index(metadata):
     return index
 
 ===== REPOSITORY FILE =====
-{"path": "backend/shared/models.py", "characters": 1104, "sha256": "e27f70b60504e389b090756a379ecf586220c7c498ee294b5a8e45a0cdafb16d"}
+{"path": "backend/shared/models.py", "characters": 1211, "sha256": "e54064a2fd4643f8f96460a33d4593db711c8abb22fa943ea47d09228342c9e1"}
 """Document records shared by ingestion, storage and agents."""
 from dataclasses import dataclass, field
 
@@ -4372,6 +4750,7 @@ class Document:
     storage_ref: dict | None = None
     profile: dict | None = None
     search_hints: dict | None = None  # backend/agents/search_hints.py; routes search, never evidence
+    embeddings: dict | None = None  # backend/agents/embeddings.py; routes semantic search, never evidence
 
     def summary(self):
         result = {'document_id':self.id, 'filename':self.name, 'type':self.kind,
@@ -4744,7 +5123,7 @@ def similar_values(requested, counts):
 """Storage components."""
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/documents.py", "characters": 13695, "sha256": "dec8c65e26004ac82ba5dcbb9ecb2b28376303c94cccdee4450bfb72b9e0b587"}
+{"path": "backend/storage/documents.py", "characters": 17108, "sha256": "ccccced27ee419f6ec8a2fc9cd3d348d02996ef1c48bbb4d833cefff087ca6a3"}
 """Saved documents, separated by group: save, list, load and delete.
 
 Each group (one organization's users) has its own folder; everyone in a group sees all of its documents.
@@ -4754,6 +5133,9 @@ Each group (one organization's users) has its own folder; everyone in a group se
     <prefix><group>/documents/preprocessed/<filename>/extracted.json          text blocks, warnings, sheet metadata
     <prefix><group>/documents/preprocessed/<filename>/<sheet>.csv             one per sheet, for spreadsheets
     <prefix><group>/documents/preprocessed/<filename>/semantic_profile.json   when a profile was generated
+    <prefix><group>/documents/preprocessed/<filename>/search_hints.json       when search hints were generated
+    <prefix><group>/documents/preprocessed/<filename>/embeddings.json         when passages were embedded: the
+                                                                              vectors, or their S3 Vectors keys
 
 The same code serves S3 and the local document library (backend/storage/filesystem.py).
 """
@@ -4818,7 +5200,7 @@ class ObjectDocumentStore:
     requires_group = False
 
     def __init__(self, client, bucket, prefix='', *, group=None, preprocessed=PREPROCESSED, kms_key_id=None,
-                 read_only=False):
+                 read_only=False, vectors=None):
         if not bucket or '/' in bucket or bucket != bucket.strip():
             raise ValueError('S3 bucket must be a bucket name, not an s3:// URI')
         base = _segments(prefix, 'S3 prefix')
@@ -4831,6 +5213,8 @@ class ObjectDocumentStore:
         self.library = '/'.join(folders[:-1])
         self.kms_key_id = kms_key_id
         self.read_only = read_only
+        # backend/retrieval/semantic.py S3VectorIndex, or None to keep vectors in embeddings.json.
+        self.vectors = vectors
         self.group = None if group is None else check_group_name(group)
         self.prefix = self.base_prefix + (self.group + '/' if self.group else '')
 
@@ -4886,6 +5270,13 @@ class ObjectDocumentStore:
         root = f'{self.preprocessed}{doc.name}/'
         # A filename identifies one current document. Invalidate completion before replacing it.
         self._remove_outputs(root)
+        embeddings = None
+        if doc.embeddings:
+            try:
+                embeddings = self._stored_embeddings(doc.id, doc.name, doc.embeddings)
+            except Exception as exc:
+                # Like a failed hint batch, a vector index failure never blocks an upload.
+                doc.warnings.append(f'Embeddings not saved: {type(exc).__name__}: {exc}')
         self._write(self._raw_key(doc.name), content, mimetypes.guess_type(doc.name)[0] or 'application/octet-stream')
         if doc.table_folder:
             for sheet in doc.table_metadata['sheets'].values():
@@ -4897,11 +5288,13 @@ class ObjectDocumentStore:
             self._json(root + 'semantic_profile.json', doc.profile)
         if doc.search_hints:
             self._json(root + 'search_hints.json', doc.search_hints)
+        if embeddings:
+            self._json(root + 'embeddings.json', embeddings)
         # Publish the manifest last. Failed uploads do not appear in the saved-file picker.
         key = root + 'manifest.json'
         manifest = {'schema_version':2, 'document_id':doc.id, 'filename':doc.name,
                     'kind':doc.kind, 'has_tables':bool(doc.table_folder), 'has_profile':bool(doc.profile),
-                    'has_search_hints':bool(doc.search_hints)}
+                    'has_search_hints':bool(doc.search_hints), 'has_embeddings':bool(embeddings)}
         self._json(key, manifest)
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':key}
         return doc.storage_ref
@@ -4942,15 +5335,42 @@ class ObjectDocumentStore:
             doc.profile = self._read_json(root + 'semantic_profile.json')
         if manifest.get('has_search_hints'):
             doc.search_hints = self._read_json(root + 'search_hints.json')
+        if manifest.get('has_embeddings'):
+            doc.embeddings = self._read_json(root + 'embeddings.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
         return doc
 
     def _remove_outputs(self, root):
-        """Manifest first, so a half-removed document never appears complete; then the rest of its folder."""
+        """Manifest first, so a half-removed document never appears complete; then the rest of its folder, then
+        its vectors in the S3 Vectors index."""
+        vector_keys = self._vector_keys(root)
         self.client.delete_object(Bucket=self.bucket, Key=root + 'manifest.json')
         pages = self.client.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=root)
         for key in [obj['Key'] for page in pages for obj in page.get('Contents', [])]:
             self.client.delete_object(Bucket=self.bucket, Key=key)
+        if vector_keys:
+            self.vectors.delete(vector_keys)
+
+    def _stored_embeddings(self, document_id, filename, embeddings):
+        """What embeddings.json holds: the vectors themselves, or with an S3 Vectors index, the keys they were put
+        under in this group's folder."""
+        if self.vectors is None:
+            return embeddings
+        keys = self.vectors.put(self.prefix, document_id, filename, embeddings['vectors'])
+        return {'meta': {**embeddings['meta'], 'vector_store': self.vectors.name, 'library': self.prefix,
+                         'index': f'{self.vectors.bucket}/{self.vectors.index}'}, 'keys': keys}
+
+    def _vector_keys(self, root):
+        """S3 Vectors keys of the document saved at root; read before its files are removed."""
+        if self.vectors is None:
+            return []
+        try:
+            if not self._read_json(root + 'manifest.json').get('has_embeddings'):
+                return []
+            return self._read_json(root + 'embeddings.json').get('keys', [])
+        except Exception:
+            # Nothing saved there yet. Vectors left behind never match: search maps hits to current blocks.
+            return []
 
     def delete(self, filename):
         """Remove a saved document (by filename or manifest key): its preprocessed folder, then its original.
@@ -4991,6 +5411,23 @@ class ObjectDocumentStore:
             self._json(root + 'search_hints.json', hints)
             self._json(manifest_key, {**manifest, 'has_search_hints': True})
 
+    def save_embeddings(self, manifest_key, embeddings):
+        """Store generated embeddings for an already saved document, replacing any earlier ones."""
+        if self.read_only:
+            raise PermissionError("This document store is read-only")
+        with _trace('save_embeddings', manifest_key=manifest_key, group_name=self.group):
+            root = self._root(manifest_key)
+            manifest = self._read_json(manifest_key)
+            if not isinstance(embeddings, dict) or not isinstance(embeddings.get('vectors'), dict):
+                raise ValueError('Embeddings must be an object with vectors')
+            previous = self._vector_keys(root)
+            stored = self._stored_embeddings(manifest['document_id'], manifest['filename'], embeddings)
+            self._json(root + 'embeddings.json', stored)
+            self._json(manifest_key, {**manifest, 'has_embeddings': True})
+            stale = sorted(set(previous) - set(stored.get('keys', [])))
+            if stale:
+                self.vectors.delete(stale)
+
     def list_documents(self, limit=100):
         if type(limit) is not int or limit < 1:
             raise ValueError('limit must be a positive integer')
@@ -5012,7 +5449,7 @@ class ObjectDocumentStore:
         return items
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/filesystem.py", "characters": 2803, "sha256": "23dde33218df0b9c915657310b9057cc88532e0a298324807a140f9d420df16c"}
+{"path": "backend/storage/filesystem.py", "characters": 2876, "sha256": "8074573fa50f5a733fbbea236dc0b2bdb70bfdfb4037db826692a19808b6a85c"}
 """Persistent local object storage shared by the upload and chat processes."""
 from pathlib import Path
 import os
@@ -5077,13 +5514,15 @@ class DirectoryClient:
 
 
 class LocalDocumentStore(ObjectDocumentStore):
-    def __init__(self, directory="data/document_library", *, group=None, preprocessed=PREPROCESSED, read_only=False):
+    def __init__(self, directory="data/document_library", *, group=None, preprocessed=PREPROCESSED, read_only=False,
+                 vectors=None):
         root = Path(directory).expanduser()
         if not root.is_absolute():
             root = Path(__file__).resolve().parents[2] / root
         self.directory = root.resolve()
         super().__init__(DirectoryClient(self.directory, read_only=read_only),
-                         "local", prefix="", group=group, preprocessed=preprocessed, read_only=read_only)
+                         "local", prefix="", group=group, preprocessed=preprocessed, read_only=read_only,
+                         vectors=vectors)
 
 ===== REPOSITORY FILE =====
 {"path": "backend/storage/local.py", "characters": 1659, "sha256": "aec5b15ee5c6806fc10053d41ceff31d2713700f6ef9f83868ac89326a08624b"}
@@ -5124,7 +5563,7 @@ def exported_document(path):
     return doc
 
 ===== REPOSITORY FILE =====
-{"path": "backend/storage/s3.py", "characters": 2674, "sha256": "dabc6e681690cd9df3c0f0779f1e74b45e4818f9925da46c43ce292807d7bec1"}
+{"path": "backend/storage/s3.py", "characters": 2900, "sha256": "58ed9d12240502301d80f9e252b5fea923b5cbb62495dd1f6d8fce59b7292040"}
 """S3 adapter and local/S3 document-store configuration."""
 from functools import lru_cache
 import os
@@ -5150,7 +5589,7 @@ def configured_store(*, read_only=False):
     """
     names = ('DOCUMENTS_STORAGE', 'DOCUMENTS_GROUP_NAME', 'DOCUMENTS_S3_PREFIX_PPDOCS', 'DOCUMENTS_LOCAL_DIR',
              'DOCUMENTS_S3_BUCKET', 'DOCUMENTS_S3_PREFIX_BASE', 'DOCUMENTS_S3_KMS_KEY_ID', 'AWS_PROFILE',
-             'AWS_REGION', 'AWS_DEFAULT_REGION')
+             'AWS_REGION', 'AWS_DEFAULT_REGION', 'VECTOR_STORE', 'S3_VECTORS_BUCKET', 'S3_VECTORS_INDEX')
     return _store(tuple((name, os.getenv(name)) for name in names), read_only)
 
 
@@ -5160,12 +5599,14 @@ def _store(settings, read_only):
     mode = (env['DOCUMENTS_STORAGE'] or 'local').strip().lower()
     if mode not in {'local', 's3'}:
         raise ValueError('DOCUMENTS_STORAGE must be local or s3')
+    from backend.retrieval.semantic import configured_vectors
+    vectors = configured_vectors()  # None unless VECTOR_STORE=s3vectors
     group = (env['DOCUMENTS_GROUP_NAME'] or '').strip() or None
     preprocessed = (env['DOCUMENTS_S3_PREFIX_PPDOCS'] or '').strip() or PREPROCESSED
     if mode == 'local':
         from backend.storage.filesystem import LocalDocumentStore
         return LocalDocumentStore(env["DOCUMENTS_LOCAL_DIR"] or "data/document_library", group=group,
-                                  preprocessed=preprocessed, read_only=read_only)
+                                  preprocessed=preprocessed, read_only=read_only, vectors=vectors)
     bucket = (env['DOCUMENTS_S3_BUCKET'] or '').strip()
     if not bucket:
         raise ValueError('DOCUMENTS_S3_BUCKET is required in s3 mode')
@@ -5175,7 +5616,7 @@ def _store(settings, read_only):
         retries={'mode':'standard', 'total_max_attempts':3}))
     return S3DocumentStore(client, bucket, env['DOCUMENTS_S3_PREFIX_BASE'] or PREFIX_BASE, group=group,
                            preprocessed=preprocessed, kms_key_id=env['DOCUMENTS_S3_KMS_KEY_ID'] or None,
-                           read_only=read_only)
+                           read_only=read_only, vectors=vectors)
 
 ===== REPOSITORY FILE =====
 {"path": "backend/storage/tables.py", "characters": 1981, "sha256": "749101c6b1985be629e686bd8688d8ba3c7aa0f1ee5f0491632bb29faf35ab4d"}
@@ -5359,10 +5800,11 @@ def date_calculate(params):
             'method': 'deterministic calendar arithmetic; compare reports date relative to other_date'}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/tools/documents.py", "characters": 3221, "sha256": "77e97bbfca3e632f8345d570c94f9a995f372ddb59c926ff426f30273192b989"}
+{"path": "backend/tools/documents.py", "characters": 3809, "sha256": "d580a32eab06151397caeccc1ad6db3ff654055b40afba8d20cca359c6d2ca54"}
 """Selected-document tools, independent of agent orchestration."""
 from backend.retrieval.scan import scan_documents
 from backend.retrieval.search import search_documents
+from backend.retrieval.semantic import configured_vectors, semantic_search_documents
 from backend.tools.tables import execute_table_tool
 
 def selected_documents(documents, ids):
@@ -5381,8 +5823,9 @@ def _document(docs, params):
     return docs[key]
 
 
-def execute_document_tool(name, params, docs, *, scan_llm=None):
-    """Run one document tool on the selected docs. scan_llm is the model the scan tool reads blocks with."""
+def execute_document_tool(name, params, docs, *, scan_llm=None, embedder=None):
+    """Run one document tool on the selected docs. scan_llm is the model the scan tool reads blocks with;
+    embedder (backend/agents/embeddings.py) embeds semantic_search queries."""
     if name == 'list_documents':
         return {'documents':[doc.summary() for doc in docs.values()]}
     if name == 'search':
@@ -5393,6 +5836,12 @@ def execute_document_tool(name, params, docs, *, scan_llm=None):
             raise ValueError('scan is not available here')
         subset = selected_documents(docs, params['document_ids']) if 'document_ids' in params else docs
         return scan_documents(subset, params['query'], scan_llm, limit=params.get('limit', 8))
+    if name == 'semantic_search':
+        if embedder is None:
+            raise ValueError('semantic_search is not available here')
+        subset = selected_documents(docs, params['document_ids']) if 'document_ids' in params else docs
+        return semantic_search_documents(subset, params['query'], embedder, limit=params.get('limit', 8),
+                                         index=configured_vectors())
     if name == 'read_document':
         doc = _document(docs, params)
         offset, limit = params.get('offset',0), params.get('limit',8)
@@ -6391,11 +6840,12 @@ if __name__ == '__main__':
     main()
 
 ===== REPOSITORY FILE =====
-{"path": "development/evaluation/documents.py", "characters": 4777, "sha256": "9babe2c0e8f5487da8a5919d571552efb242ce860c08edb57dff74fdd0f19494"}
+{"path": "development/evaluation/documents.py", "characters": 5173, "sha256": "9187b67cd9ce3e8db4ddc5f87b946a834102f23c55fe17950bd6595a3702fdc3"}
 """Run the synthetic selected-document evaluation with real Bedrock inference."""
 import argparse
 from backend.agents.enrichment import make_enricher
 from backend.agents.search_hints import make_hinter
+from backend.agents.embeddings import make_embedder
 import json
 import os
 from pathlib import Path
@@ -6427,6 +6877,9 @@ def main():
                         help='Generate semantic profiles (one extra model call per document chunk) before asking')
     parser.add_argument('--hints', action='store_true',
                         help='Generate search hints (one extra model call per 15 text blocks) before asking')
+    parser.add_argument('--embeddings', action='store_true',
+                        help='Embed text blocks (one embedding call per block) before asking; the semantic_search '
+                             'tool is offered only with SEMANTIC_SEARCH=true')
     parser.add_argument('--fixtures', type=Path,
                         help='Generated fixture directory containing questions.json and upload files')
     args=parser.parse_args()
@@ -6449,7 +6902,8 @@ def main():
             raise ValueError('Fixture path escapes the fixture directory')
         docs.append(ingest_document(path.name,path.read_bytes(),
                                     enrich=make_enricher() if args.enrich else None,
-                                    hint=make_hinter() if args.hints else None))
+                                    hint=make_hinter() if args.hints else None,
+                                    embed=make_embedder() if args.embeddings else None))
     documents={d.id:d for d in docs}
     if args.enrich:
         save_profiles(docs, args.output)
@@ -10436,6 +10890,226 @@ def test_delete_removes_outputs_and_original_within_the_group(store):
     assert scoped.list_documents() == []
     assert not [k for (_, k) in store.client.objects if k.startswith(scoped.prefix)]
     assert [d['filename'] for d in store.for_group('other.org').list_documents()] == ['rules.txt']
+
+===== REPOSITORY FILE =====
+{"path": "development/tests/test_semantic_search.py", "characters": 11628, "sha256": "f65809e9f311448b40a113a87562610cd92797f48caeefca9e0ec62ee79b2bca"}
+"""Semantic search: upload-time passage embeddings, local and S3 Vectors storage, and the semantic_search tool.
+
+Embeddings and the S3 Vectors service are faked; vectors point along a few made-up topics.
+"""
+import io
+import json
+import math
+
+import pytest
+
+from backend.agents import document_agent
+from backend.agents.document_agent import run_document_agent
+from backend.agents.document_protocol import examined_documents
+from backend.agents.embeddings import Embedder, embed_document
+from backend.agents.llm import Usage
+from backend.preprocessing.documents import ingest_document
+from backend.retrieval.semantic import S3VectorIndex, semantic_search_documents
+from backend.storage.filesystem import LocalDocumentStore
+
+BENEFITS = (b'Emergency room services are covered after a USD 150 copay.\n\n'
+            b'Ambulance transport requires prior authorization.\n\n'
+            b'Coverage ends on the last day of the month after termination.')
+TOPICS = [('emergency', 'er visit'), ('ambulance',), ('coverage ends', 'cancel')]
+
+
+class FakeEmbedder:
+    """Unit vectors over TOPICS (plus a 'none of these' axis), like a model that knows ER means emergency room."""
+    model_id, dimensions = 'test-embed', 4
+
+    def __init__(self, fail_on=None):
+        self.calls, self.fail_on = [], fail_on
+
+    def embed(self, text, *, purpose='Embedding'):
+        self.calls.append((purpose, text))
+        if self.fail_on and self.fail_on in text:
+            raise ValueError('throttled')
+        lowered = text.casefold()
+        vector = [float(any(word in lowered for word in words)) for words in TOPICS] + [0.1]
+        norm = math.sqrt(sum(x * x for x in vector))
+        return [x / norm for x in vector]
+
+
+class FakeS3Vectors:
+    """The PutVectors, DeleteVectors and QueryVectors calls of an S3 Vectors client, with $and/$eq/$in filters."""
+
+    def __init__(self):
+        self.vectors, self.queries = {}, []
+
+    def put_vectors(self, *, vectorBucketName, indexName, vectors):
+        assert (vectorBucketName, indexName) == ('vector-bucket', 'passages') and len(vectors) <= 500
+        self.vectors.update({v['key']: v for v in vectors})
+
+    def delete_vectors(self, *, vectorBucketName, indexName, keys):
+        for key in keys:
+            self.vectors.pop(key, None)
+
+    def query_vectors(self, *, vectorBucketName, indexName, topK, queryVector, filter, returnMetadata,
+                      returnDistance):
+        self.queries.append(filter)
+        def matches(meta, rule):
+            if '$and' in rule:
+                return all(matches(meta, r) for r in rule['$and'])
+            [(field, test)] = rule.items()
+            return meta[field] == test['$eq'] if '$eq' in test else meta[field] in test['$in']
+        query = queryVector['float32']
+        hits = [{'key': key, 'metadata': v['metadata'],
+                 'distance': 1 - sum(a * b for a, b in zip(query, v['data']['float32']))}
+                for key, v in self.vectors.items() if matches(v['metadata'], filter)]
+        return {'vectors': sorted(hits, key=lambda h: h['distance'])[:topK]}
+
+
+def embedded(name='benefits.txt', content=BENEFITS, **kwargs):
+    return ingest_document(name, content, embed=lambda d: embed_document(d, FakeEmbedder()), **kwargs)
+
+
+def test_semantic_search_finds_blocks_by_meaning_from_saved_local_vectors(tmp_path):
+    store = LocalDocumentStore(tmp_path)
+    doc = embedded(store=store)
+    assert doc.embeddings['meta']['blocks_embedded'] == 3 and doc.embeddings['meta']['model_id'] == 'test-embed'
+    loaded = store.load(doc.storage_ref['manifest_key'])
+    assert loaded.embeddings == doc.embeddings and set(loaded.embeddings['vectors']) == {'B1', 'B2', 'B3'}
+    embedder = FakeEmbedder()
+    result = semantic_search_documents({loaded.id: loaded}, 'ER visit cost?', embedder, limit=2)
+    assert [m['block_id'] for m in result['matches']] == ['B1', 'B2']
+    assert result['matches'][0]['text'].startswith('Emergency room') and result['matches'][0]['similarity'] > 0.9
+    assert embedder.calls == [('Query Embedding', 'ER visit cost?')] and 'not_indexed' not in result
+    assert examined_documents([{'tool': 'semantic_search', 'parameters': {}, 'data': result}]) == {loaded.id}
+
+
+def test_documents_without_matching_embeddings_are_reported_not_searched():
+    plain = ingest_document('plain.txt', b'Dental cleanings twice a year.')
+    doc = embedded()
+    other_model = FakeEmbedder()
+    other_model.model_id = 'another-model'
+    result = semantic_search_documents({plain.id: plain, doc.id: doc}, 'ambulance', other_model)
+    assert result['matches'] == [] and other_model.calls == []  # nothing searchable, so no query embedding
+    reasons = {item['filename']: item['reason'] for item in result['not_indexed']}
+    assert 'no embeddings' in reasons['plain.txt'] and 'another-model' not in reasons['plain.txt']
+    assert 'regenerate its embeddings' in reasons['benefits.txt']
+    with pytest.raises(ValueError, match='limit'):
+        semantic_search_documents({doc.id: doc}, 'ambulance', FakeEmbedder(), limit=21)
+
+
+def test_failed_block_embeddings_are_listed_and_never_block_an_upload():
+    doc = ingest_document('benefits.txt', BENEFITS,
+                          embed=lambda d: embed_document(d, FakeEmbedder(fail_on='Ambulance'), workers=2))
+    assert set(doc.embeddings['vectors']) == {'B1', 'B3'}
+    assert doc.embeddings['meta']['failed_blocks'] == [{'block_id': 'B2', 'error': 'ValueError: throttled'}]
+    failed = ingest_document('benefits.txt', BENEFITS,
+                             embed=lambda d: embed_document(d, FakeEmbedder(fail_on=' ')))
+    assert failed.embeddings is None
+    assert any(w.startswith('Embeddings not generated: ValueError: No passages embedded') for w in failed.warnings)
+
+
+def test_s3_vectors_hold_the_vectors_scoped_by_group_and_follow_replacements_and_deletes(tmp_path):
+    client = FakeS3Vectors()
+    index = S3VectorIndex(client, 'vector-bucket', 'passages')
+    shared = LocalDocumentStore(tmp_path, vectors=index)
+    acme, other = shared.for_group('acme.com'), shared.for_group('other.org')
+    doc = embedded(store=acme)
+    embedded(store=other)  # the same file in another group: same document ID, separate vectors
+    assert sorted(client.vectors) == sorted([f'acme.com/{doc.id}/B{n}' for n in (1, 2, 3)]
+                                            + [f'other.org/{doc.id}/B{n}' for n in (1, 2, 3)])
+    assert client.vectors[f'acme.com/{doc.id}/B2']['metadata'] == {
+        'library': 'acme.com/', 'document_id': doc.id, 'block_id': 'B2', 'filename': 'benefits.txt'}
+    loaded = acme.load('benefits.txt')
+    assert 'vectors' not in loaded.embeddings and len(loaded.embeddings['keys']) == 3
+    assert loaded.embeddings['meta']['library'] == 'acme.com/'
+    result = semantic_search_documents({loaded.id: loaded}, 'ambulance', FakeEmbedder(), limit=1, index=index)
+    assert [m['block_id'] for m in result['matches']] == ['B2'] and result['matches'][0]['similarity'] > 0.9
+    assert client.queries[-1] == {'$and': [{'library': {'$eq': 'acme.com/'}},
+                                           {'document_id': {'$in': [loaded.id]}}]}
+    # Without the index configured, those documents cannot be searched.
+    assert 'not s3vectors' in semantic_search_documents({loaded.id: loaded}, 'ambulance',
+                                                        FakeEmbedder())['not_indexed'][0]['reason']
+    # Saving a new version under the same filename removes the old version's vectors.
+    new = embedded(content=BENEFITS + b'\n\nDental is excluded.', store=acme)
+    assert sorted(k for k in client.vectors if k.startswith('acme.com/')) == \
+        sorted(f'acme.com/{new.id}/B{n}' for n in (1, 2, 3, 4))
+    acme.delete('benefits.txt')
+    assert all(k.startswith('other.org/') for k in client.vectors) and len(client.vectors) == 3
+
+
+def test_a_vector_index_failure_keeps_the_upload_without_embeddings(tmp_path):
+    class Down(FakeS3Vectors):
+        def put_vectors(self, **kwargs):
+            raise ConnectionError('index unreachable')
+    store = LocalDocumentStore(tmp_path, vectors=S3VectorIndex(Down(), 'vector-bucket', 'passages'))
+    embedded(store=store)
+    loaded = store.load('benefits.txt')
+    assert loaded.embeddings is None
+    assert 'Embeddings not saved: ConnectionError: index unreachable' in loaded.warnings
+
+
+def test_save_embeddings_adds_them_to_a_saved_document(tmp_path):
+    store = LocalDocumentStore(tmp_path)
+    doc = ingest_document('benefits.txt', BENEFITS, store=store)
+    assert store.load('benefits.txt').embeddings is None
+    store.save_embeddings(doc.storage_ref['manifest_key'], embed_document(doc, FakeEmbedder()))
+    assert store.list_documents()[0]['has_embeddings']
+    assert set(store.load('benefits.txt').embeddings['vectors']) == {'B1', 'B2', 'B3'}
+
+
+def test_bedrock_embedder_sends_titan_requests_and_counts_usage(monkeypatch):
+    class Bedrock:
+        def __init__(self):
+            self.requests = []
+
+        def invoke_model(self, **kwargs):
+            self.requests.append(kwargs)
+            return {'body': io.BytesIO(json.dumps({'embedding': [0.6, 0.8], 'inputTextTokenCount': 7}).encode())}
+    monkeypatch.delenv('EMBEDDING_MODEL_ID', raising=False)
+    usage = Usage()
+    embedder = Embedder(dimensions=256, usage_meter=usage)
+    embedder._client = Bedrock()
+    assert embedder.embed('ER visit') == [0.6, 0.8]
+    [request] = embedder._client.requests
+    assert request['modelId'] == 'amazon.titan-embed-text-v2:0'
+    assert json.loads(request['body']) == {'inputText': 'ER visit', 'dimensions': 256, 'normalize': True}
+    assert usage.totals() == {'llm_calls': 1, 'input_tokens': 7, 'output_tokens': 0}
+    with pytest.raises(ValueError, match='EMBEDDING_DIMENSIONS'):
+        Embedder(dimensions=300)
+
+
+def read_and_answer(doc):
+    return [{'tool': 'read_document', 'parameters': {'document_id': doc.id}}, {'tool': 'answer', 'parameters': {}},
+            f"{doc.blocks[0]['text']} [E1]."]
+
+
+def offered(request):
+    return [t['toolSpec']['name'] for t in request['toolConfig']['tools']]
+
+
+def test_agent_offers_semantic_search_only_when_enabled_and_documents_are_embedded(native_script, monkeypatch):
+    doc = embedded()
+    embedder = FakeEmbedder()
+    monkeypatch.setattr(document_agent, 'Embedder', lambda usage_meter=None: embedder)
+    monkeypatch.delenv('SEMANTIC_SEARCH', raising=False)
+    requests = native_script(read_and_answer(doc))
+    run_document_agent({doc.id: doc}, [doc.id], 'Is an ER visit covered?')
+    assert 'semantic_search' not in offered(requests[0])
+    assert 'semantic_search' not in requests[0]['system'][0]['text']
+
+    monkeypatch.setenv('SEMANTIC_SEARCH', 'true')
+    plain = ingest_document('plain.txt', b'Dental cleanings twice a year.')
+    requests = native_script(read_and_answer(plain))
+    run_document_agent({plain.id: plain}, [plain.id], 'Is an ER visit covered?')
+    assert 'semantic_search' not in offered(requests[0])
+
+    requests = native_script([{'tool': 'semantic_search', 'parameters': {'query': 'ER visit', 'limit': 1}},
+                              {'tool': 'answer', 'parameters': {}},
+                              'Emergency room services are covered after a USD 150 copay [E1].'])
+    result = run_document_agent({doc.id: doc}, [doc.id], 'Is an ER visit covered?')
+    assert 'semantic_search' in offered(requests[0]) and '- semantic_search:' in requests[0]['system'][0]['text']
+    [evidence] = [e for e in result['evidence'] if e['tool'] == 'semantic_search']
+    assert [m['block_id'] for m in evidence['data']['matches']] == ['B1']
+    assert embedder.calls == [('Query Embedding', 'ER visit')]
 
 ===== REPOSITORY FILE =====
 {"path": "development/tests/test_table_tools.py", "characters": 8199, "sha256": "91b3025a20b3b2c16cf9bfa9b9b3a7f2d850a8ac003f77e071ebef860be3163c"}
