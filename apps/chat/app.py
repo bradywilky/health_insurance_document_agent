@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 import uuid
 import streamlit as st
-from backend.entrypoint import ask_question_local
+from backend.entrypoint import ask_question, ask_question_local
 from backend.storage.s3 import configured_store
 from backend.config.settings import MODELS
 from development.observability import capture
@@ -59,6 +59,10 @@ with st.sidebar:
         help='Off answers directly. State assumptions answers the most likely reading and names it. '
              'Ask when ambiguous offers the possible readings for you to choose when they would give '
              'different answers. The last two add one model call per question.')]
+    production_path = st.toggle(
+        'Use production entry point', key='production_path',
+        help='Call ask_question with saved filenames, as the Lambda does, so the documents are reloaded from '
+             'storage. Off calls ask_question_local with the documents loaded here and shows step progress.')
     if os.getenv('BEDROCK_MODEL_ID'):
         st.info('BEDROCK_MODEL_ID is set and overrides this model choice.')
     st.button('Clear selection and chat', on_click=clear_session)
@@ -146,10 +150,17 @@ def ask(question, clarification=None):
         st.markdown(shown)
     with st.chat_message('assistant'):
         status = st.empty()
-        # The documents were loaded above for display; pass them so they are not loaded twice.
-        response = ask_question_local(question, documents=docs, history=history, session_id=st.session_state.session_id,
-                                clarification=clarification, model=model, ambiguity=ambiguity, app_id='chat',
-                                on_step=lambda _:status.caption('Checking the selected sources…'))
+        options = dict(history=history, session_id=st.session_state.session_id, clarification=clarification,
+                       model=model, ambiguity=ambiguity, app_id='chat')
+        if production_path:
+            # Same call the Lambda makes; it has no progress hook.
+            status.caption('Answering through ask_question…')
+            response = ask_question(question, document_filenames=[saved[key]['filename'] for key in keys],
+                                    group_name=store.group, **options)
+        else:
+            # The documents were loaded above for display; pass them so they are not loaded twice.
+            response = ask_question_local(question, documents=docs, **options,
+                                          on_step=lambda _:status.caption('Checking the selected sources…'))
         status.empty()
         if response['trace_id']:
             response['llm_trace'] = capture.summarize(capture.trace(response['trace_id']))
