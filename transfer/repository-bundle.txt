@@ -125,7 +125,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 55974, "sha256": "5022944ee0f8bf32ac28d972e0025db23b947d4e472268c916b97b4b3cb7d90b"}
+{"path": "README.md", "characters": 56516, "sha256": "ec1fe7ff2cfbdaeedcb0fb696d59f31761f958baeff6ce7a8789071237727218"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -188,6 +188,14 @@ In a second terminal, start the upload portal:
 ```powershell
 .\.venv\Scripts\python -m streamlit run apps/upload/app.py --server.port 8502
 ```
+
+To compare models on many questions at once, start the batch tester:
+
+```powershell
+.\.venv\Scripts\python -m streamlit run apps/batch_test/app.py --server.port 8503
+```
+
+Upload a one-column CSV of questions (an optional `question` header is ignored), choose saved files and one or more models, and click **Run**. The download has one row per question and, for each model, `<model> answer`, `status`, `latency_s` (wall clock), `llm_calls`, `input_tokens` and `output_tokens` columns. Questions run one at a time with ambiguity handling off.
 
 Open http://127.0.0.1:8502 to upload and preprocess files, or click **Load Bingle-Dingle examples** there. Open http://127.0.0.1:8501 for chat, click **Refresh saved files**, and use **Files to answer from** to select sources. Changing selected files or model clears the conversation to keep comparisons independent.
 
@@ -926,6 +934,131 @@ def lambda_handler(event, context):
     )
     logger.info('Response request=%s status=%s', response['request_id'], response['status'])
     return response
+
+===== REPOSITORY FILE =====
+{"path": "apps/batch_test/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+
+===== REPOSITORY FILE =====
+{"path": "apps/batch_test/app.py", "characters": 5310, "sha256": "de80216ad8dcb178efd0a8de635eb8125746280c04528071d89711919d5127a0"}
+"""Batch questions across models. Run: streamlit run apps/batch_test/app.py --server.port 8503
+
+Upload a one-column CSV of questions, choose saved documents and models, and download a CSV with one row per
+question and, for each model, its answer, status, latency and token counts.
+"""
+import io
+import time
+from dotenv import load_dotenv
+load_dotenv()
+import pandas as pd
+import streamlit as st
+from backend.entrypoint import ask_question_local
+from backend.storage.s3 import configured_store
+from backend.config.settings import MODELS
+
+METRICS = ('status', 'latency_s', 'llm_calls', 'input_tokens', 'output_tokens')
+
+
+def read_questions(upload):
+    """Questions from the first column of a CSV, skipping blanks and a 'question' or 'questions' header row."""
+    frame = pd.read_csv(upload, header=None, dtype=str, keep_default_na=False)
+    questions = [q.strip() for q in frame.iloc[:, 0] if q.strip()]
+    if questions and questions[0].lower() in {'question', 'questions'}:
+        questions = questions[1:]
+    return questions
+
+
+def answer_one(question, docs, model):
+    """One question through the local entry point, with wall-clock latency and token usage."""
+    start = time.perf_counter()
+    response = ask_question_local(question, documents=docs, model=model, app_id='batch_test')
+    latency = time.perf_counter() - start
+    usage = response['usage']
+    return {'answer': response['answer'] or response['message'], 'status': response['status'],
+            'latency_s': round(latency, 2), 'llm_calls': usage['llm_calls'],
+            'input_tokens': usage['input_tokens'], 'output_tokens': usage['output_tokens']}
+
+
+def run_batch(questions, docs, models, on_progress=None):
+    """One row per question; columns '<model> answer' and '<model> <metric>' for each model."""
+    rows, total, done = [], len(questions) * len(models), 0
+    for question in questions:
+        row = {'question': question}
+        for model in models:
+            result = answer_one(question, docs, model)
+            row[f'{model} answer'] = result['answer']
+            row.update({f'{model} {metric}': result[metric] for metric in METRICS})
+            done += 1
+            if on_progress:
+                on_progress(done, total, question, model)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def summary(results, models):
+    """Per-model totals and averages for a quick comparison."""
+    return pd.DataFrame([{
+        'model': model,
+        'answered': int((results[f'{model} status'] == 'answered').sum()),
+        'mean latency_s': round(results[f'{model} latency_s'].mean(), 2),
+        'total latency_s': round(results[f'{model} latency_s'].sum(), 2),
+        'mean llm_calls': round(results[f'{model} llm_calls'].mean(), 2),
+        'total input_tokens': int(results[f'{model} input_tokens'].sum()),
+        'total output_tokens': int(results[f'{model} output_tokens'].sum()),
+    } for model in models])
+
+
+st.set_page_config(page_title='Batch Test', layout='wide')
+st.title('Batch Test')
+st.caption('Run a list of questions against several models and download the answers with latency and tokens.')
+try:
+    store = configured_store(read_only=True)
+    saved = {item['manifest_key']: item for item in store.list_documents()}
+except Exception as exc:
+    st.error(f'Cannot list saved documents: {exc}')
+    st.stop()
+
+upload = st.file_uploader('Questions CSV', type=['csv'],
+                          help='One column, one question per row. A "question" header row is ignored.')
+keys = st.multiselect('Files to answer from', list(saved), format_func=lambda key: saved[key]['filename'],
+                      max_selections=10, help='Add files through the upload portal.')
+models = st.multiselect('Models', list(MODELS), default=list(MODELS)[:1])
+
+questions = []
+if upload:
+    try:
+        questions = read_questions(upload)
+    except Exception as exc:
+        st.error(f'Could not read the CSV: {exc}')
+    if questions:
+        st.caption(f'{len(questions)} questions loaded.')
+        with st.expander('Preview questions'):
+            st.dataframe(pd.DataFrame({'question': questions}), hide_index=True)
+
+ready = bool(questions and keys and models)
+if st.button('Run', type='primary', disabled=not ready):
+    try:
+        docs = [store.load(key) for key in keys]
+    except Exception as exc:
+        st.error(f'Could not open saved files: {exc}')
+        st.stop()
+    progress = st.progress(0.0, text='Starting…')
+    st.session_state.batch_results = run_batch(
+        questions, docs, models,
+        on_progress=lambda done, total, question, model: progress.progress(
+            done / total, text=f'{done}/{total} · {model} · {question[:80]}'))
+    st.session_state.batch_models = models
+    progress.empty()
+
+if 'batch_results' in st.session_state:
+    results, ran = st.session_state.batch_results, st.session_state.batch_models
+    st.subheader('Summary')
+    st.dataframe(summary(results, ran), hide_index=True)
+    st.subheader('Results')
+    st.dataframe(results, hide_index=True)
+    buffer = io.StringIO()
+    results.to_csv(buffer, index=False)
+    st.download_button('Download CSV', buffer.getvalue(), file_name='batch_test_results.csv', mime='text/csv')
+st.caption('Questions and selected excerpts are sent to Amazon Bedrock. Each question is answered independently.')
 
 ===== REPOSITORY FILE =====
 {"path": "apps/chat/__init__.py", "characters": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
@@ -8496,6 +8629,51 @@ def test_model_switch_clears_history(monkeypatch):
     next(s for s in app.selectbox if s.label=='Model').set_value('claude-haiku-4.5').run()
     assert app.session_state['messages']==[]
     assert not app.exception
+
+===== REPOSITORY FILE =====
+{"path": "development/tests/test_batch_test_app.py", "characters": 1766, "sha256": "da1bee0725ac534652ff9c2ef5ec43cb547da7ffe79f2a0644e9f0b92c943757"}
+import io
+from pathlib import Path
+import pytest
+
+from streamlit.testing.v1 import AppTest
+from apps.batch_test.app import read_questions, run_batch
+from backend.preprocessing.documents import ingest_document
+from backend.storage.s3 import configured_store
+
+APP = Path(__file__).resolve().parents[2] / 'apps' / 'batch_test' / 'app.py'
+
+
+@pytest.fixture(autouse=True)
+def local_storage_for_tests(monkeypatch, tmp_path):
+    monkeypatch.setenv('DOCUMENTS_STORAGE', 'local')
+    monkeypatch.setenv('DOCUMENTS_LOCAL_DIR', str(tmp_path))
+
+
+def test_read_questions_skips_header_and_blanks():
+    csv = io.StringIO('question\nWhat is the rate?\n\n"Who pays, and when?"\n')
+    assert read_questions(csv) == ['What is the rate?', 'Who pays, and when?']
+
+
+def test_run_batch_has_answer_and_metric_columns_per_model(native_script):
+    doc = ingest_document('rates.txt', b'Plan Alpha member rate is USD 88 per month.', store=configured_store())
+    turns = [{'tool': 'search', 'parameters': {'query': 'Alpha rate'}}, {'tool': 'answer', 'parameters': {}},
+             'The member rate is USD 88 [E1].']
+    native_script(turns * 2)
+    results = run_batch(['What is the member rate for plan Alpha?'], [doc], ['maverick', 'nova-2-lite'])
+    row = results.iloc[0]
+    for model in ('maverick', 'nova-2-lite'):
+        assert row[f'{model} status'] == 'answered'
+        assert 'USD 88' in row[f'{model} answer']
+        assert row[f'{model} llm_calls'] == 3
+        assert row[f'{model} input_tokens'] == 30 and row[f'{model} output_tokens'] == 15
+        assert row[f'{model} latency_s'] >= 0
+
+
+def test_app_run_button_needs_questions_documents_and_models():
+    app = AppTest.from_file(str(APP)).run(timeout=20)
+    assert not app.exception
+    assert app.button[0].disabled
 
 ===== REPOSITORY FILE =====
 {"path": "development/tests/test_cli.py", "characters": 3188, "sha256": "7f76bd703e42862ed8e9ed0b799f3bc1360430dfe986d563008db8de86248046"}

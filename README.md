@@ -61,6 +61,14 @@ In a second terminal, start the upload portal:
 .\.venv\Scripts\python -m streamlit run apps/upload/app.py --server.port 8502
 ```
 
+To compare models on many questions at once, start the batch tester:
+
+```powershell
+.\.venv\Scripts\python -m streamlit run apps/batch_test/app.py --server.port 8503
+```
+
+Upload a one-column CSV of questions (an optional `question` header is ignored), choose saved files and one or more models, and click **Run**. The download has one row per question and, for each model, `<model> answer`, `status`, `latency_s` (wall clock), `llm_calls`, `input_tokens` and `output_tokens` columns. Questions run one at a time with ambiguity handling off.
+
 Open http://127.0.0.1:8502 to upload and preprocess files, or click **Load Bingle-Dingle examples** there. Open http://127.0.0.1:8501 for chat, click **Refresh saved files**, and use **Files to answer from** to select sources. Changing selected files or model clears the conversation to keep comparisons independent.
 
 The interface accepts text PDFs, DOCX, XLSX, XLS, CSV, TXT, and Markdown, with at most 10 files per upload batch or chat selection and 20 MB per file. PDF references use page numbers; Word references use paragraph/table locations; spreadsheets preserve sheet and row references. Extraction warnings and the retrieved evidence appear alongside answers. Choose Maverick or Claude Haiku/Sonnet/Opus 4.5; `BEDROCK_MODEL_ID`, if set, overrides that choice.
