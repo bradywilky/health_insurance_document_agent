@@ -574,6 +574,17 @@ The answering and upload roles need `bedrock:InvokeModel` on the embedding model
 `s3vectors:DeleteVectors`, `s3vectors:QueryVectors` and `s3vectors:GetVectors` on the index (query with metadata
 filters needs GetVectors too).
 
+### Spreadsheet row search (experimental)
+
+The tools above never embed spreadsheet data rows. To try semantic search over them, run
+`development/notebooks/row_embeddings.ipynb` for a saved spreadsheet. It cuts the data sheets into chunks (`row`: one
+row per chunk as `column: value` lines; `row_group`: N rows as CSV with the header once), embeds each chunk, and
+saves `row_embeddings.json` (chunk text, sheet, Excel rows and base64 float32 vector) beside the document, through the
+configured store, local or S3. Whenever a selected spreadsheet has that file, the planner is offered
+`semantic_row_search`, which returns the closest chunks as evidence. Running the notebook is the opt-in, so
+`SEMANTIC_SEARCH` is not checked. Row embeddings always stay in the file, even with `VECTOR_STORE=s3vectors`, and
+re-uploading the spreadsheet removes them.
+
 ## Semantic profiles (optional, at upload)
 
 The upload portal's **Generate a semantic profile** option (off by default) makes one Bedrock call per
@@ -720,15 +731,22 @@ response = ask_question(
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
     app_id="my-service",         # which application called; a Datadog tag
+    retrieval_option=0,          # 0: research agent with tools; 1: whole files in one prompt
 )
 ```
+
+`retrieval_option` picks how content reaches the model. `0` (default) is the research agent: the model searches,
+reads and queries the files with tools over several calls. `1` puts every selected file's preprocessed content
+(text blocks plus each data sheet's CSV) into one prompt and answers in a single call
+(`backend/agents/full_context.py`); it needs `ambiguity="off"` and returns `invalid_request` when the files exceed
+about 600,000 characters. New options get the next number in `RETRIEVAL_OPTIONS`.
 
 | `status` | `status_code` | Meaning |
 | --- | --- | --- |
 | `answered` | 200 | `answer` holds the answer; `sources`, `limitations` and `interpretation` support it |
 | `needs_clarification` | 200 | `answer` is a clarifying question; resend `clarification.original_question` with `clarification=` one of `clarification.options` or the user's own wording |
 | `no_evidence` | 204 | nothing relevant was retrieved; `message` explains |
-| `invalid_request` | 400 | no question, more than 10 documents, unknown model or ambiguity mode, malformed history |
+| `invalid_request` | 400 | no question, more than 10 documents, unknown model, ambiguity mode or retrieval option, malformed history, files too large for retrieval option 1 |
 | `documents_unavailable` | 404 | a document key could not be loaded |
 | `model_unavailable` | 503 | Bedrock throttled, timed out or was unreachable after retries |
 | `error` | 500 | anything else; `error` has the type and message, and the log has the stack trace |
@@ -744,7 +762,7 @@ null). Displays such as the chat app's metrics are built from these fields.
 never pass S3 paths. A missing or invalid `group_name` with S3 storage is an `invalid_request`.
 
 The Lambda event is `{"question", "session_id", "user_id", "group_name", "document_filenames", "chat_history",
-"clarification", "args": {"model", "ambiguity", "app_id"}}`, and the handler returns the response unchanged. It logs only
+"clarification", "args": {"model", "ambiguity", "app_id", "retrieval_option"}}`, and the handler returns the response unchanged. It logs only
 identifiers, because questions and history can contain PHI. The document store and trace archive come from the
 environment; each is created on the first request and reused while the Lambda stays warm.
 

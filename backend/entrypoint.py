@@ -16,12 +16,19 @@ model_unavailable     Bedrock throttled, timed out or was unreachable after retr
 error                 anything else; `error` holds the exception type and message
 
 STATUS_CODES maps each status to an HTTP-style code for API callers.
+
+retrieval_option picks how content reaches the model (RETRIEVAL_OPTIONS):
+
+0  agent         the research loop: the model searches, reads and queries the files with tools, then answers
+1  full_context  every selected file's preprocessed content goes into one prompt and the model answers in one call
+                 (backend/agents/full_context.py); invalid_request when the files are too large to fit
 """
 import logging
 import uuid
 
 from backend.agents import ambiguity as amb
 from backend.agents import document_agent
+from backend.agents import full_context
 from backend.agents.llm import Usage
 from backend.config.settings import MODELS
 from backend.observability import tracing
@@ -34,6 +41,7 @@ MAX_DOCUMENTS = 10
 MAX_QUESTION_CHARS = 4000
 STATUS_CODES = {'answered': 200, 'needs_clarification': 200, 'no_evidence': 204, 'invalid_request': 400,
                 'documents_unavailable': 404, 'model_unavailable': 503, 'error': 500}
+RETRIEVAL_OPTIONS = {0: 'agent', 1: 'full_context'}
 MESSAGES = {
     'no_evidence': 'I could not retrieve supporting content from the selected files. '
                    'Try a different question or inspect extraction warnings.',
@@ -53,7 +61,7 @@ class RequestError(ValueError):
 
 
 def ask_question(question, *, document_filenames, group_name=None, history=None, session_id=None, user_id=None,
-                 clarification=None, model=None, ambiguity='off', app_id='api'):
+                 clarification=None, model=None, ambiguity='off', app_id='api', retrieval_option=0):
     """Production entry point: answer `question` from saved documents. Never raises; see the module docstring.
 
     document_filenames  saved filenames, e.g. 'rates.txt' (1 to MAX_DOCUMENTS), read from
@@ -66,17 +74,18 @@ def ask_question(question, *, document_filenames, group_name=None, history=None,
     model          a key of backend.config.settings.MODELS; default from TABLES_MODEL
     ambiguity      'off' (answer directly), 'assumptions' (state the reading used) or 'ask'
     app_id         which application called; a tag on the trace
+    retrieval_option  how content reaches the model: a key of RETRIEVAL_OPTIONS (see the module docstring)
 
     Documents are read from the store the environment configures (backend/storage/s3.py), and the trace is saved
     to the configured archive (backend/observability/archive.py); both are reused across requests.
     """
     return _run(question, selected=document_filenames, load=lambda: _load(document_filenames, group_name),
                 history=history, session_id=session_id, user_id=user_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app_id=app_id, group=group_name)
+                ambiguity=ambiguity, app_id=app_id, group=group_name, retrieval_option=retrieval_option)
 
 
 def ask_question_local(question, *, documents, history=None, session_id=None, user_id=None, clarification=None,
-                       model=None, ambiguity='off', app_id='local', on_step=None):
+                       model=None, ambiguity='off', app_id='local', on_step=None, retrieval_option=0):
     """Development entry point for the Streamlit app, the command-line tool and tests. Same behavior and response
     as ask_question, but takes already-loaded Document objects and adds development hooks:
 
@@ -85,11 +94,11 @@ def ask_question_local(question, *, documents, history=None, session_id=None, us
     """
     return _run(question, selected=documents, load=lambda: list(documents), history=history,
                 session_id=session_id, user_id=user_id, clarification=clarification, model=model,
-                ambiguity=ambiguity, app_id=app_id, on_step=on_step)
+                ambiguity=ambiguity, app_id=app_id, on_step=on_step, retrieval_option=retrieval_option)
 
 
 def _run(question, *, selected, load, history, session_id, user_id, clarification, model, ambiguity, app_id,
-         group=None, on_step=None):
+         group=None, on_step=None, retrieval_option=0):
     """Validate, load and run the agent inside one trace, which is archived when it ends."""
     usage = Usage()
     loaded, result, error, status = [], None, None, 'error'
@@ -99,20 +108,27 @@ def _run(question, *, selected, load, history, session_id, user_id, clarificatio
         text = question if isinstance(question, str) else ''
         tracing.annotate(root, metadata={
             'request_id': request_id, 'ambiguity_mode': ambiguity, 'model': model, 'group_name': group,
+            'retrieval_option': retrieval_option,
             'code_version': code_version(), 'prompt_version': document_agent.PROMPT_VERSION,
             'question_sha256': digest(text), 'question_chars': len(text), 'clarified': bool(clarification)},
             tags={'app_id': app_id, 'user_id': user_id})
         tracing.annotate_content(root, input_data={'question': question, 'clarification': clarification})
         try:
             question, history, clarification = _validate(question, history, clarification, model, ambiguity,
-                                                         selected)
+                                                         selected, retrieval_option)
             loaded = load()
             tracing.annotate(root, metadata={'documents': [document_summary(d) for d in loaded]})
-            # Module attribute, so tests can replace the agent.
-            result = document_agent.run_document_agent(
-                {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, usage=usage,
-                on_step=on_step, model=model, ambiguity=ambiguity, clarification=clarification)
+            if retrieval_option == 1:
+                result = full_context.run_full_context(loaded, question, history=history, usage=usage, model=model,
+                                                       clarification=clarification)
+            else:
+                # Module attribute, so tests can replace the agent.
+                result = document_agent.run_document_agent(
+                    {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, usage=usage,
+                    on_step=on_step, model=model, ambiguity=ambiguity, clarification=clarification)
             status = result.get('status') or 'answered'
+        except full_context.ContextTooLarge as exc:
+            status, error = 'invalid_request', str(exc)
         except RequestError as exc:
             status, error = exc.status, str(exc)
         except Exception as exc:
@@ -143,7 +159,7 @@ def classify(exc):
     return 'error'
 
 
-def _validate(question, history, clarification, model, ambiguity, selected):
+def _validate(question, history, clarification, model, ambiguity, selected, retrieval_option=0):
     if not isinstance(question, str) or not question.strip():
         raise RequestError('invalid_request', 'A question is required.')
     if len(question) > MAX_QUESTION_CHARS:
@@ -152,6 +168,10 @@ def _validate(question, history, clarification, model, ambiguity, selected):
         raise RequestError('invalid_request', f'model must be one of {list(MODELS)}.')
     if ambiguity not in amb.MODES:
         raise RequestError('invalid_request', f'ambiguity must be one of {list(amb.MODES)}.')
+    if type(retrieval_option) is not int or retrieval_option not in RETRIEVAL_OPTIONS:
+        raise RequestError('invalid_request', f'retrieval_option must be one of {RETRIEVAL_OPTIONS}.')
+    if retrieval_option == 1 and ambiguity != 'off':
+        raise RequestError('invalid_request', "retrieval_option 1 answers directly; use ambiguity 'off'.")
     if not isinstance(selected, (list, tuple)) or not selected:
         raise RequestError('invalid_request', 'Select at least one document.')
     if len(selected) > MAX_DOCUMENTS:

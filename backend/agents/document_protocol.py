@@ -3,11 +3,12 @@
 SOURCE = {'type':'string', 'pattern':'^(E[0-9]+|question)$'}
 
 
-def tool_specs(document_ids, table_ids=None, semantic=False):
+def tool_specs(document_ids, table_ids=None, semantic=False, semantic_rows=False):
     """Native tool definitions; a single selected document gets no listing tool or per-search document filter.
 
     table_tool is offered only for table_ids (selected spreadsheets; None means every document) and is left out
-    when there are none. semantic_search is offered only when semantic is true.
+    when there are none. semantic_search is offered only when semantic is true, and semantic_row_search only when
+    semantic_rows is.
     """
     doc = {'type':'string', 'enum':list(document_ids)}
     table_ids = list(document_ids) if table_ids is None else list(table_ids)
@@ -30,9 +31,12 @@ def tool_specs(document_ids, table_ids=None, semantic=False):
     semantic_search = [spec('semantic_search', f'Find the text blocks of {scope} text closest in meaning to query, '
                             'even when worded differently. As fast as search. Returns the closest blocks even when '
                             'none is relevant.', search, ['query'])] if semantic else []
+    row_search = [spec('semantic_row_search', 'Find the spreadsheet data rows closest in meaning to query, even when '
+                       'worded differently, from embedded row chunks. Returns the closest chunks even when none is '
+                       'relevant; not for totals or complete lists.', search, ['query'])] if semantic_rows else []
     return listing + [
         spec('search',f'Search {scope} text{rows} lexically. Empty results do not prove absence.',
-             search, ['query'])] + semantic_search + [
+             search, ['query'])] + semantic_search + row_search + [
         spec('scan','Have a model read every text block and return the ones relevant to '
              'query, with a reason each. Finds passages worded differently from the question. Slower and costlier '
              'than search: use it when search misses, or when the answer must be complete.',
@@ -66,7 +70,7 @@ def has_content(record):
         return False
     if record['tool']=='read_document':
         return bool(data.get('blocks'))
-    if record['tool'] in {'search','scan','semantic_search'}:
+    if record['tool'] in {'search','scan','semantic_search','semantic_row_search'}:
         return bool(data.get('matches'))
     if record['tool']=='table_tool':
         result = data.get('table_result',{})
@@ -90,7 +94,7 @@ def examined_documents(evidence):
             examined.update(record['data'].get('scanned_document_ids', []))
         if not has_content(record):
             continue
-        if record['tool'] in {'search', 'scan', 'semantic_search'}:
+        if record['tool'] in {'search', 'scan', 'semantic_search', 'semantic_row_search'}:
             examined.update(match['document_id'] for match in record['data']['matches'])
         else:
             examined.add(record['data']['document_id'])

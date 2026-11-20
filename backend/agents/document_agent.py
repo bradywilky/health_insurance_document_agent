@@ -48,7 +48,7 @@ $search_tools
   ones with reasons. It finds passages worded differently from the question but is slower and costlier than search.
   Use it when search misses or the wording is uncertain, or when the answer must be complete (every exclusion,
   limit or exception). Follow more_relevant with read_document.
-${semantic_tool}- read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
+${semantic_tool}${row_tool}- read_document: {"document_id":"ID","offset":0,"limit":8} reads consecutive text blocks. Paginate to see more.
 ${table_tool}- calculate: {"label":"allowed amount","expression":"2 * 88.00","sources":["E2","question"]} exact arithmetic
   using numbers copied from the cited evidence or question.
 - date_calculate: {"label":"deadline","operation":"add_days","date":"2026-04-05","days":15} or operation
@@ -76,6 +76,13 @@ SEMANTIC_TOOL = Template('''- semantic_search: {"query":"what the passages say",
   passages worded differently from the question, but as fast as search. It always returns the closest blocks, even
   when none is relevant: judge each one. Use scan when the answer must be complete. Documents listed in not_indexed
   were not searched.
+''')
+# Only included when a selected spreadsheet has row embeddings (row_embeddings.json).
+ROW_TOOL = Template('''- semantic_row_search: {"query":"what the rows describe","limit":8$scan_ids} returns the spreadsheet
+  data-row chunks closest in meaning to the query, each with its sheet, source rows, text and a similarity score.
+  Use it to find the rows about an item when the wording or column is uncertain. It always returns the closest
+  chunks, even when none is relevant: judge each one. A chunk is a few rows, never a whole sheet, so use
+  table_tool query_table for totals, counts and complete lists. Spreadsheets listed in not_indexed were not searched.
 ''')
 # Only included when a selected file is a spreadsheet (xlsx/xls/csv), so text-only questions never see table tools.
 TABLE_TOOL = '''- table_tool: {"document_id":"ID","name":"list_sheets|get_sheet_schema|read_sheet|search_all_sheets|query_table|join_tables","parameters":{...}}.
@@ -141,18 +148,25 @@ MULTIPLE = {
 }
 
 
-def system_prompt(single, tables=True, semantic=False):
-    """Planner instructions; table tools and spreadsheet rules appear only when a spreadsheet is selected, and
-    semantic_search only when semantic is true."""
+def system_prompt(single, tables=True, semantic=False, semantic_rows=False):
+    """Planner instructions; table tools and spreadsheet rules appear only when a spreadsheet is selected,
+    semantic_search only when semantic is true, and semantic_row_search only when semantic_rows is."""
     values = dict(SINGLE if single else MULTIPLE)
     values['search_tools'] = Template(values['search_tools']).substitute(rows=' and spreadsheet rows' if tables else '')
     return SYSTEM.substitute(values, table_tool=TABLE_TOOL if tables else '', table_rules=TABLE_RULES if tables else '',
-                             semantic_tool=SEMANTIC_TOOL.substitute(scan_ids=values['scan_ids']) if semantic else '')
+                             semantic_tool=SEMANTIC_TOOL.substitute(scan_ids=values['scan_ids']) if semantic else '',
+                             row_tool=ROW_TOOL.substitute(scan_ids=values['scan_ids']) if semantic_rows else '')
 
 
 def semantic_documents(docs):
     """True when semantic search is on and a selected document has embeddings to search."""
     return semantic_search_enabled() and any(doc.embeddings for doc in docs.values())
+
+
+def row_documents(docs):
+    """True when a selected spreadsheet has row embeddings. Making them is the opt-in, so SEMANTIC_SEARCH is not
+    checked."""
+    return any(doc.row_embeddings for doc in docs.values())
 
 
 def table_documents(docs):
@@ -215,8 +229,8 @@ def node_init(state: DocumentState) -> dict:
         raise ValueError('Question cannot be empty')
     usage = state.get('usage') or Usage()
     tables = table_documents(docs)
-    semantic = semantic_documents(docs)
-    specs = tool_specs(docs, tables, semantic)
+    semantic, semantic_rows = semantic_documents(docs), row_documents(docs)
+    specs = tool_specs(docs, tables, semantic, semantic_rows)
     payload = {'question': question, 'selected_documents': [doc.summary() for doc in docs.values()],
                'history': bounded((state.get('history') or [])[-6:], max_chars=4000)}
     _, inference = get_model_config()
@@ -225,9 +239,9 @@ def node_init(state: DocumentState) -> dict:
     # The scan tool's model reads blocks in parallel; its calls count toward this question's usage.
     scan_llm = LLM(agent_name='health_insurance_document_agent', tool_name='Relevance Scan',
                    model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
-    # semantic_search embeds each query with the model the documents were embedded with; calls count toward usage.
-    embedder = Embedder(usage_meter=usage) if semantic else None
-    turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables), semantic)
+    # Semantic tools embed each query with the model the documents were embedded with; calls count toward usage.
+    embedder = Embedder(usage_meter=usage) if semantic or semantic_rows else None
+    turn_session = TurnSession(llm, system_prompt(len(docs) == 1, bool(tables), semantic, semantic_rows)
                                + '\nUse native tools; do not write tool requests as text.', payload, specs)
     return {'docs': docs, 'model': model, 'usage': usage, 'specs': specs, 'turn_session': turn_session,
             'scan_llm': scan_llm, 'embedder': embedder,
@@ -315,9 +329,11 @@ def node_reason(state: DocumentState) -> dict:
               model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[state['model']], params=inference,
               usage_meter=state['usage'])
     session = state['turn_session']
+    offered = {spec['toolSpec']['name'] for spec in state['specs']}
     try:
-        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1,
-                                                      semantic=state.get('embedder') is not None), session.messages)
+        plan = reasoning.next_step(llm, system_prompt(len(state['docs']) == 1, semantic='semantic_search' in offered,
+                                                      semantic_rows='semantic_row_search' in offered),
+                                   session.messages)
     except (ValueError, KeyError, TypeError):
         # Fail open: the planner runs without a plan for this step.
         stats['reasoning_failures'] += 1
@@ -488,12 +504,14 @@ def _prompt_version():
     from hashlib import sha256
     parts = [system_prompt(True), system_prompt(False), system_prompt(True, False), system_prompt(False, False),
              system_prompt(True, semantic=True), system_prompt(False, semantic=True),
+             system_prompt(True, semantic_rows=True), system_prompt(False, semantic_rows=True),
              writer_prompt(True), writer_prompt(False),
              INTERPRETATION_RULE, amb.ASSESS_SYSTEM, json.dumps(amb.ASSESS_SPEC, sort_keys=True),
              json.dumps(tool_specs(['<document>']), sort_keys=True),
              json.dumps(tool_specs(['<document>', '<other>']), sort_keys=True),
              json.dumps(tool_specs(['<document>'], []), sort_keys=True),
-             json.dumps(tool_specs(['<document>', '<other>'], [], True), sort_keys=True), reasoning.RULES, reasoning.NOTE]
+             json.dumps(tool_specs(['<document>', '<other>'], [], True), sort_keys=True),
+             json.dumps(tool_specs(['<document>'], semantic_rows=True), sort_keys=True), reasoning.RULES, reasoning.NOTE]
     return 'p-' + sha256('\0'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 

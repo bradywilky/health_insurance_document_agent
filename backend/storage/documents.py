@@ -10,6 +10,8 @@ Each group (one organization's users) has its own folder; everyone in a group se
     <prefix><group>/documents/preprocessed/<filename>/search_hints.json       when search hints were generated
     <prefix><group>/documents/preprocessed/<filename>/embeddings.json         when passages were embedded: the
                                                                               vectors, or their S3 Vectors keys
+    <prefix><group>/documents/preprocessed/<filename>/row_embeddings.json     when spreadsheet rows were chunked and
+                                                                              embedded: each chunk's text and vector
 
 The same code serves S3 and the local document library (backend/storage/filesystem.py).
 """
@@ -211,6 +213,8 @@ class ObjectDocumentStore:
             doc.search_hints = self._read_json(root + 'search_hints.json')
         if manifest.get('has_embeddings'):
             doc.embeddings = self._read_json(root + 'embeddings.json')
+        if manifest.get('has_row_embeddings'):
+            doc.row_embeddings = self._read_json(root + 'row_embeddings.json')
         doc.storage_ref = {'bucket':self.bucket, 'manifest_key':manifest_key}
         return doc
 
@@ -301,6 +305,21 @@ class ObjectDocumentStore:
             stale = sorted(set(previous) - set(stored.get('keys', [])))
             if stale:
                 self.vectors.delete(stale)
+
+    def save_row_embeddings(self, manifest_key, row_embeddings):
+        """Store embedded spreadsheet row chunks (embed_rows) for an already saved document, replacing any earlier
+        ones. Always kept in row_embeddings.json, whatever VECTOR_STORE says."""
+        if self.read_only:
+            raise PermissionError("This document store is read-only")
+        with _trace('save_row_embeddings', manifest_key=manifest_key, group_name=self.group):
+            root = self._root(manifest_key)
+            manifest = self._read_json(manifest_key)
+            if not manifest.get('has_tables'):
+                raise ValueError('Row embeddings need a spreadsheet')
+            if not isinstance(row_embeddings, dict) or not isinstance(row_embeddings.get('chunks'), list):
+                raise ValueError('Row embeddings must be an object with chunks')
+            self._json(root + 'row_embeddings.json', row_embeddings)
+            self._json(manifest_key, {**manifest, 'has_row_embeddings': True})
 
     def list_documents(self, limit=100):
         if type(limit) is not int or limit < 1:

@@ -150,10 +150,63 @@ def test_lambda_handler_maps_the_event(native_script, store, saved):
 def test_production_signature_has_no_development_hooks():
     production = set(inspect.signature(ask_question).parameters)
     assert production == {'question', 'document_filenames', 'group_name', 'history', 'session_id', 'user_id',
-                          'clarification', 'model', 'ambiguity', 'app_id'}
+                          'clarification', 'model', 'ambiguity', 'app_id', 'retrieval_option'}
     assert {'documents', 'on_step'} <= set(inspect.signature(ask_question_local).parameters)
 
 
 def test_local_entry_point_validates_the_same_way():
     response = ask_question_local('Rate?', documents=[])
     assert response['status'] == 'invalid_request' and 'at least one document' in response['message']
+
+
+def test_retrieval_option_1_answers_from_the_whole_file_in_one_call(native_script, store, monkeypatch):
+    import io
+    import pandas as pd
+    out = io.BytesIO()
+    pd.DataFrame({'Plan': ['Alpha', 'Beta'], 'Rate': [88, 90]}).to_excel(out, sheet_name='Rates', index=False)
+    ingest_document('rates.xlsx', out.getvalue(), store=store)
+    requests = native_script(['Plan Beta costs 90 (sheet Rates).'])
+    response = ask_question('What does Beta cost?', document_filenames=['rates.xlsx'], retrieval_option=1)
+    assert response['status'] == 'answered' and response['answer'] == 'Plan Beta costs 90 (sheet Rates).'
+    [request] = requests  # one model call, no tools
+    assert 'toolConfig' not in request
+    prompt = request['messages'][0]['content'][0]['text']
+    assert '# Document: rates.xlsx' in prompt and 'Plan,Rate\nAlpha,88\nBeta,90' in prompt
+    assert prompt.endswith('Based on the above, What does Beta cost?')
+    assert response['usage']['llm_calls'] == 1 and response['protocol']['retrieval_option'] == 1
+    [source] = response['sources']
+    assert source['tool'] == 'full_context' and source['passages'] == []
+
+    from backend.agents import full_context
+    monkeypatch.setattr(full_context, 'MAX_CONTEXT_CHARS', 10)
+    response = ask_question('What does Beta cost?', document_filenames=['rates.xlsx'], retrieval_option=1)
+    assert response['status'] == 'invalid_request' and 'Use retrieval option 0' in response['message']
+
+
+@pytest.mark.parametrize('kwargs, message', [
+    ({'retrieval_option': 7}, 'retrieval_option must be one of'),
+    ({'retrieval_option': '1'}, 'retrieval_option must be one of'),
+    ({'retrieval_option': 1, 'ambiguity': 'ask'}, "use ambiguity 'off'"),
+])
+def test_invalid_retrieval_options_are_rejected(kwargs, message, isolated_archive):
+    response = ask_question('Rate?', document_filenames=['k'], app_id='test', **kwargs)
+    assert response['status'] == 'invalid_request' and message in response['message']
+
+
+def test_retrieval_option_1_reads_word_paragraphs_and_tables(native_script, store):
+    import io
+    from docx import Document as WordDocument
+    word = WordDocument()
+    word.add_paragraph('Plan Alpha covers emergency care.')
+    table = word.add_table(rows=2, cols=2)
+    for cell, text in zip(table._cells, ['Plan', 'Copay', 'Alpha', 'USD 150']):
+        cell.text = text
+    out = io.BytesIO()
+    word.save(out)
+    ingest_document('benefits.docx', out.getvalue(), store=store)
+    requests = native_script(['The Alpha copay is USD 150.'])
+    response = ask_question('What is the Alpha copay?', document_filenames=['benefits.docx'], retrieval_option=1)
+    assert response['status'] == 'answered' and response['answer'] == 'The Alpha copay is USD 150.'
+    prompt = requests[0]['messages'][0]['content'][0]['text']
+    assert prompt.startswith('# Document: benefits.docx\nPlan Alpha covers emergency care.')
+    assert 'Plan | Copay' in prompt and 'Alpha | USD 150' in prompt

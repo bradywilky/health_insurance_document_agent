@@ -82,14 +82,21 @@ def _vectors(settings):
     return S3VectorIndex(client, (env['S3_VECTORS_BUCKET'] or '').strip(), (env['S3_VECTORS_INDEX'] or '').strip())
 
 
+def _other_model(meta, embedder):
+    """Why vectors described by meta cannot be compared with this embedder's, or None when they can."""
+    if (meta.get('model_id'), meta.get('dimensions')) != (embedder.model_id, embedder.dimensions):
+        return (f"embedded with {meta.get('model_id')} ({meta.get('dimensions')} dimensions), not "
+                f'{embedder.model_id} ({embedder.dimensions}); regenerate its embeddings')
+    return None
+
+
 def _unusable(doc, embedder, index):
     """Why doc's embeddings cannot be compared with this query, or None when they can."""
     meta = (doc.embeddings or {}).get('meta')
     if not meta:
         return 'no embeddings; generate them in the upload portal'
-    if (meta.get('model_id'), meta.get('dimensions')) != (embedder.model_id, embedder.dimensions):
-        return (f"embedded with {meta.get('model_id')} ({meta.get('dimensions')} dimensions), not "
-                f'{embedder.model_id} ({embedder.dimensions}); regenerate its embeddings')
+    if _other_model(meta, embedder):
+        return _other_model(meta, embedder)
     if 'vectors' not in doc.embeddings and index is None:
         return 'its vectors are in an S3 Vectors index, but VECTOR_STORE is not s3vectors'
     return None
@@ -144,6 +151,44 @@ def semantic_search_documents(documents, query, embedder, *, limit=8, index=None
                                   '0..1). The closest blocks are returned even when none is relevant, so judge each '
                                   'one. Spreadsheet data rows are not embedded; use table tools for them.',
               'warnings': {doc.name: doc.warnings for doc in documents.values() if doc.warnings}}
+    if not_indexed:
+        output['not_indexed'] = not_indexed
+    return output
+
+
+def row_search_documents(documents, query, embedder, *, limit=8):
+    """The spreadsheet row chunks (row_embeddings.json, from embed_rows) closest in meaning to query, most similar
+    first. Selected spreadsheets without usable row embeddings are listed in not_indexed; other files are skipped."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError('query must be a nonempty string')
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError('limit must be 1..20')
+    not_indexed, searchable = [], []
+    for doc in documents.values():
+        meta = (doc.row_embeddings or {}).get('meta')
+        reason = ('no row embeddings; generate them with development/notebooks/row_embeddings.ipynb' if not meta
+                  else _other_model(meta, embedder))
+        if reason and doc.table_folder is not None:
+            not_indexed.append({'document_id': doc.id, 'filename': doc.name, 'reason': reason})
+        elif not reason:
+            searchable.append(doc)
+    hits = []
+    if searchable:
+        vector = np.asarray(embedder.embed(query, purpose='Query Embedding'), dtype='<f4')
+        for doc in searchable:
+            chunks = doc.row_embeddings['chunks']
+            # Titan returns unit-length vectors, so the dot product is the cosine similarity.
+            scores = np.stack([decode(c['vector']) for c in chunks]) @ vector
+            hits += [(float(score), doc, chunk) for score, chunk in zip(scores, chunks)]
+    hits.sort(key=lambda hit: -hit[0])
+    matches = [{'document_id': doc.id, 'filename': doc.name, 'chunk_id': chunk['chunk_id'], 'sheet': chunk['sheet'],
+                'source_rows': chunk['rows'], 'text': chunk['text'], 'similarity': round(score, 4)}
+               for score, doc, chunk in hits[:limit]]
+    output = {'matches': matches,
+              'retrieval_method': 'semantic: spreadsheet data-row chunks ranked by closeness in meaning to the query '
+                                  '(similarity 0..1). The closest chunks are returned even when none is relevant, so '
+                                  'judge each one. Each match is a few rows, not the whole sheet: use table_tool '
+                                  'query_table for totals, counts and complete lists.'}
     if not_indexed:
         output['not_indexed'] = not_indexed
     return output

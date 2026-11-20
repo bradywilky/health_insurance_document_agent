@@ -1,7 +1,7 @@
 """Selected-document tools, independent of agent orchestration."""
 from backend.retrieval.scan import scan_documents
 from backend.retrieval.search import search_documents
-from backend.retrieval.semantic import configured_vectors, semantic_search_documents
+from backend.retrieval.semantic import configured_vectors, row_search_documents, semantic_search_documents
 from backend.tools.tables import execute_table_tool
 
 def selected_documents(documents, ids):
@@ -22,7 +22,7 @@ def _document(docs, params):
 
 def execute_document_tool(name, params, docs, *, scan_llm=None, embedder=None):
     """Run one document tool on the selected docs. scan_llm is the model the scan tool reads blocks with;
-    embedder (backend/agents/embeddings.py) embeds semantic_search queries."""
+    embedder (backend/agents/embeddings.py) embeds semantic_search and semantic_row_search queries."""
     if name == 'list_documents':
         return {'documents':[doc.summary() for doc in docs.values()]}
     if name == 'search':
@@ -39,6 +39,11 @@ def execute_document_tool(name, params, docs, *, scan_llm=None, embedder=None):
         subset = selected_documents(docs, params['document_ids']) if 'document_ids' in params else docs
         return semantic_search_documents(subset, params['query'], embedder, limit=params.get('limit', 8),
                                          index=configured_vectors())
+    if name == 'semantic_row_search':
+        if embedder is None:
+            raise ValueError('semantic_row_search is not available here')
+        subset = selected_documents(docs, params['document_ids']) if 'document_ids' in params else docs
+        return row_search_documents(subset, params['query'], embedder, limit=params.get('limit', 8))
     if name == 'read_document':
         doc = _document(docs, params)
         offset, limit = params.get('offset',0), params.get('limit',8)

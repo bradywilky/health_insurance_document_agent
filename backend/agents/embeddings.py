@@ -6,14 +6,18 @@ vectors point the same way as the question's are its closest matches in meaning 
 Off unless SEMANTIC_SEARCH=true (backend/config/settings.py).
 """
 from base64 import b64decode, b64encode
+import csv
 from datetime import datetime, timezone
+import io
 import json
+import math
 import os
 
 import numpy as np
 
 from backend.observability import tracing
 from backend.shared.parallel import parallel_map
+from backend.storage.tables import load_table
 
 EMBEDDINGS_VERSION = 1
 DEFAULT_MODEL = 'amazon.titan-embed-text-v2:0'
@@ -93,6 +97,80 @@ def embed_document(doc, embedder, *, workers=None):
         'dimensions': embedder.dimensions, 'vector_store': 'local',
         'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'blocks_total': len(doc.blocks), 'blocks_embedded': len(vectors), 'failed_blocks': failed}}
+
+
+ROW_EMBEDDINGS_VERSION = 1
+CHUNKINGS = ('row', 'row_group')
+
+
+def _cell(value):
+    return '' if value is None or (isinstance(value, float) and math.isnan(value)) else str(value).strip()
+
+
+def row_chunks(doc, *, chunking='row', rows_per_chunk=10):
+    """Text chunks of a saved spreadsheet's data-sheet rows, each opening with its sheet and Excel row numbers.
+
+    row: one row per chunk as "column: value" lines, so each chunk names its own columns.
+    row_group: rows_per_chunk consecutive rows per chunk as CSV with the header once.
+    Narrative sheets are left out: they are text blocks already, searched by semantic_search.
+    """
+    if chunking not in CHUNKINGS:
+        raise ValueError(f'chunking must be one of {list(CHUNKINGS)}')
+    if type(rows_per_chunk) is not int or rows_per_chunk < 1:
+        raise ValueError('rows_per_chunk must be a positive integer')
+    if doc.table_folder is None:
+        raise ValueError('Row chunks need a spreadsheet')
+    size = 1 if chunking == 'row' else rows_per_chunk
+    chunks = []
+    for sheet, meta in doc.table_metadata['sheets'].items():
+        if meta.get('sheet_type') != 'data':
+            continue
+        table = load_table(doc.table_folder, meta)
+        source_rows = meta.get('source_rows') or []
+        for start in range(0, len(table), size):
+            rows = table.rows[start:start + size]
+            numbers = [source_rows[i] if i < len(source_rows) else None for i in table.index[start:start + size]]
+            if size == 1:
+                body = '\n'.join(f'{column}: {_cell(value)}' for column, value in rows[0].items() if _cell(value))
+            else:
+                out = io.StringIO()
+                writer = csv.writer(out, lineterminator='\n')
+                writer.writerow(table.columns)
+                writer.writerows([_cell(row.get(c)) for c in table.columns] for row in rows)
+                body = out.getvalue().strip()
+            if not body.strip():
+                continue
+            where = (f'row {numbers[0]}' if len(numbers) == 1 else f'rows {numbers[0]}-{numbers[-1]}') \
+                if numbers[0] is not None else 'rows unknown'
+            chunks.append({'chunk_id': f'R{len(chunks) + 1}', 'sheet': sheet, 'rows': [numbers[0], numbers[-1]],
+                           'text': f'Sheet: {sheet} ({where})\n{body}'})
+    return chunks
+
+
+def embed_rows(doc, embedder, *, chunking='row', rows_per_chunk=10, workers=None):
+    """{'chunks': [chunk + encoded vector], 'meta': ...} for row_embeddings.json; one Bedrock call per chunk.
+
+    Raises ValueError when no chunk could be embedded; failed chunks are listed in meta and left out of search.
+    """
+    chunks = row_chunks(doc, chunking=chunking, rows_per_chunk=rows_per_chunk)
+    if not chunks:
+        raise ValueError('No data rows to embed')
+    workers = workers or int(os.getenv('EMBEDDING_WORKERS', '8'))
+    results = parallel_map(lambda c: embedder.embed(c['text'], purpose='Row Embedding'), chunks, workers)
+    embedded, failed = [], []
+    for chunk, result in zip(chunks, results):
+        if isinstance(result, Exception):
+            failed.append({'chunk_id': chunk['chunk_id'], 'error': f'{type(result).__name__}: {result}'[:300]})
+        else:
+            embedded.append({**chunk, 'vector': encode(result)})
+    if not embedded:
+        raise ValueError(f"No row chunks embedded: {failed[0]['error']}")
+    return {'chunks': embedded, 'meta': {
+        'row_embeddings_version': ROW_EMBEDDINGS_VERSION, 'model_id': embedder.model_id,
+        'dimensions': embedder.dimensions, 'chunking': chunking,
+        'rows_per_chunk': 1 if chunking == 'row' else rows_per_chunk,
+        'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'chunks_total': len(chunks), 'chunks_embedded': len(embedded), 'failed_chunks': failed}}
 
 
 def make_embedder():
