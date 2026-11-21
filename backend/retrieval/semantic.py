@@ -166,8 +166,8 @@ def row_search_documents(documents, query, embedder, *, limit=8):
     not_indexed, searchable = [], []
     for doc in documents.values():
         meta = (doc.row_embeddings or {}).get('meta')
-        reason = ('no row embeddings; generate them with development/notebooks/row_embeddings.ipynb' if not meta
-                  else _other_model(meta, embedder))
+        reason = ('no row embeddings; generate them with the last level of development/notebooks/excel_retrieval.ipynb'
+                  if not meta else _other_model(meta, embedder))
         if reason and doc.table_folder is not None:
             not_indexed.append({'document_id': doc.id, 'filename': doc.name, 'reason': reason})
         elif not reason:

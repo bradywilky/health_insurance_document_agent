@@ -577,7 +577,7 @@ filters needs GetVectors too).
 ### Spreadsheet row search (experimental)
 
 The tools above never embed spreadsheet data rows. To try semantic search over them, run
-`development/notebooks/row_embeddings.ipynb` for a saved spreadsheet. It cuts the data sheets into chunks (`row`: one
+the last level of `development/notebooks/excel_retrieval.ipynb` for a saved spreadsheet. It cuts the data sheets into chunks (`row`: one
 row per chunk as `column: value` lines; `row_group`: N rows as CSV with the header once), embeds each chunk, and
 saves `row_embeddings.json` (chunk text, sheet, Excel rows and base64 float32 vector) beside the document, through the
 configured store, local or S3. Whenever a selected spreadsheet has that file, the planner is offered
