@@ -125,7 +125,7 @@ secondaryBackgroundColor = "#F0F2ED"
 textColor = "#172A27"
 
 ===== REPOSITORY FILE =====
-{"path": "README.md", "characters": 58045, "sha256": "9c6bcfcb6001ded94077c7b004daab97a7673847c9cbfafcda999b8e82a7616a"}
+{"path": "README.md", "characters": 58064, "sha256": "1e2f1f8496d3c0102aa7a24ebded418e885e90054dc166af15740d52816ba54d"}
 # Health Insurance Document Agent
 
 `health_insurance_document_agent` answers questions across selected health-insurance documents and tables using Llama 4 Maverick or Claude 4.5 through Amazon Bedrock. It includes a local chat interface, document extraction, source evidence, and deterministic table tools. The document agent is the sole LangGraph workflow; chat, CLI, and evaluations share it.
@@ -705,7 +705,7 @@ filters needs GetVectors too).
 ### Spreadsheet row search (experimental)
 
 The tools above never embed spreadsheet data rows. To try semantic search over them, run
-`development/notebooks/row_embeddings.ipynb` for a saved spreadsheet. It cuts the data sheets into chunks (`row`: one
+the last level of `development/notebooks/excel_retrieval.ipynb` for a saved spreadsheet. It cuts the data sheets into chunks (`row`: one
 row per chunk as `column: value` lines; `row_group`: N rows as CSV with the header once), embeds each chunk, and
 saves `row_embeddings.json` (chunk text, sheet, Excel rows and base64 float32 vector) beside the document, through the
 configured store, local or S3. Whenever a selected spreadsheet has that file, the planner is offered
@@ -4903,7 +4903,7 @@ def search_documents(documents, query, *, limit=8):
             'warnings':{doc.name:doc.warnings for doc in documents.values() if doc.warnings}}
 
 ===== REPOSITORY FILE =====
-{"path": "backend/retrieval/semantic.py", "characters": 10630, "sha256": "5fc184fd6457af6663977e50e16add570626f33498974aec697508c1f2b20a9d"}
+{"path": "backend/retrieval/semantic.py", "characters": 10649, "sha256": "9390aa680fc2b8571d3ab9e70631f0ddaf640af9837934bef5e7697cb3bc71e7"}
 """Semantic search: the text blocks closest in meaning to a query, found by comparing embeddings
 (backend/agents/embeddings.py) instead of shared words.
 
@@ -5072,8 +5072,8 @@ def row_search_documents(documents, query, embedder, *, limit=8):
     not_indexed, searchable = [], []
     for doc in documents.values():
         meta = (doc.row_embeddings or {}).get('meta')
-        reason = ('no row embeddings; generate them with development/notebooks/row_embeddings.ipynb' if not meta
-                  else _other_model(meta, embedder))
+        reason = ('no row embeddings; generate them with the last level of development/notebooks/excel_retrieval.ipynb'
+                  if not meta else _other_model(meta, embedder))
         if reason and doc.table_folder is not None:
             not_indexed.append({'document_id': doc.id, 'filename': doc.name, 'reason': reason})
         elif not reason:
@@ -8404,23 +8404,28 @@ DEMO-IMAGING is not listed. No rate for it can be inferred from this schedule. N
 }
 
 ===== REPOSITORY FILE =====
-{"path": "development/notebooks/row_embeddings.ipynb", "characters": 4464, "sha256": "048e08cbcfc8a5ad3041bf9292a0009d846ff971170b4f623846e0d32a596c43"}
+{"path": "development/notebooks/excel_retrieval.ipynb", "characters": 9756, "sha256": "c9c98728129cd3d49e7697e8cf850a325e4e5291f25049c232ce446463f94bbc"}
 {
  "cells": [
   {
    "cell_type": "markdown",
    "metadata": {},
    "source": [
-    "# Row embeddings (ad hoc)\n",
+    "# Excel retrieval, step by step\n",
     "\n",
-    "Chunk a saved spreadsheet's data rows, embed each chunk with Titan Text Embeddings v2, and save them as\n",
-    "`row_embeddings.json` in the document's `preprocessed/` folder. Once saved, the agent offers the\n",
-    "`semantic_row_search` tool whenever that spreadsheet is selected.\n",
-    "\n",
-    "The document store comes from `.env` like the apps: the local document library by default, or S3 when\n",
-    "`DOCUMENTS_STORAGE=s3`. Re-uploading the spreadsheet removes its row embeddings; run this again afterwards."
+    "Goal: find the rows that answer a question.\n",
+    "Each level adds one idea. Run top to bottom.\n",
+    "Last level saves embeddings for the agent's `semantic_row_search` tool."
    ],
    "id": "cell-0"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Setup"
+   ],
+   "id": "cell-1"
   },
   {
    "cell_type": "code",
@@ -8429,103 +8434,150 @@ DEMO-IMAGING is not listed. No rate for it can be inferred from this schedule. N
    "outputs": [],
    "source": [
     "import sys\n",
+    "from concurrent.futures import ThreadPoolExecutor\n",
     "from pathlib import Path\n",
     "\n",
+    "import numpy as np\n",
+    "\n",
     "ROOT = Path.cwd().resolve()\n",
-    "while not (ROOT / \"backend\").is_dir():  # walk up to the repo root wherever the kernel started\n",
+    "while not (ROOT / \"backend\").is_dir():  # find the repo root\n",
     "    ROOT = ROOT.parent\n",
     "sys.path.insert(0, str(ROOT))\n",
     "\n",
     "from dotenv import load_dotenv\n",
     "load_dotenv(ROOT / \".env\")\n",
     "\n",
-    "from backend.agents.embeddings import Embedder, embed_rows, row_chunks\n",
-    "from backend.retrieval.semantic import row_search_documents\n",
+    "from backend.agents.embeddings import Embedder\n",
     "from backend.storage.s3 import configured_store\n",
     "\n",
-    "FILENAME = \"Location of 386 Pokémon in Gen 3.xlsx\"  # a spreadsheet already saved in the document library\n",
-    "GROUP = None              # group folder in S3 mode, or None to use DOCUMENTS_GROUP_NAME\n",
-    "CHUNKING = \"row\"          # \"row\" or \"row_group\"\n",
-    "ROWS_PER_CHUNK = 10       # used by \"row_group\""
-   ],
-   "id": "cell-1"
-  },
-  {
-   "cell_type": "markdown",
-   "metadata": {},
-   "source": [
-    "## 1. Load the saved spreadsheet"
+    "store = configured_store()  # local library, or S3 when DOCUMENTS_STORAGE=s3\n",
+    "embedder = Embedder()       # Titan Text Embeddings v2\n",
+    "_cache = {}\n",
+    "\n",
+    "def embed_all(texts):\n",
+    "    \"\"\"One vector per text. Same text is embedded once.\"\"\"\n",
+    "    new = [t for t in dict.fromkeys(texts) if t not in _cache]\n",
+    "    with ThreadPoolExecutor(max_workers=8) as pool:\n",
+    "        for text, vector in zip(new, pool.map(embedder.embed, new)):\n",
+    "            _cache[text] = vector\n",
+    "    return np.array([_cache[t] for t in texts])\n",
+    "\n",
+    "def search(chunks, vectors, query, k=5):\n",
+    "    \"\"\"Top k chunks by similarity. Vectors are unit length, so dot product = cosine.\"\"\"\n",
+    "    scores = vectors @ embed_all([query])[0]\n",
+    "    best = np.argsort(scores)[::-1][:k]\n",
+    "    return [(float(scores[i]), chunks[i]) for i in best]\n",
+    "\n",
+    "def show(results, chars=300):\n",
+    "    for score, chunk in results:\n",
+    "        print(f\"--- {score:.3f}\\n{chunk[:chars]}\\n\")\n",
+    "\n",
+    "FILENAME = \"Location of 386 Pokémon in Gen 3.xlsx\"  # must already be uploaded\n",
+    "SHEET = \"Gen 3 Location Sheet\"\n",
+    "QUERY = \"Where can I find Ralts?\"\n",
+    "\n",
+    "from backend.storage.tables import load_table\n",
+    "\n",
+    "doc = store.load(FILENAME)\n",
+    "sheets = doc.table_metadata[\"sheets\"]\n",
+    "data_sheets = [name for name, meta in sheets.items() if meta[\"sheet_type\"] == \"data\"]\n",
+    "print(\"Data sheets:\", data_sheets)\n",
+    "\n",
+    "def rows_of(sheet):\n",
+    "    \"\"\"Preprocessed rows: header found, blank rows removed.\"\"\"\n",
+    "    return load_table(doc.table_folder, sheets[sheet])"
    ],
    "id": "cell-2"
   },
   {
-   "cell_type": "code",
+   "cell_type": "markdown",
    "metadata": {},
-   "execution_count": null,
-   "outputs": [],
    "source": [
-    "store = configured_store()\n",
-    "if GROUP:\n",
-    "    store = store.for_group(GROUP)\n",
-    "doc = store.load(FILENAME)\n",
-    "{name: (sheet[\"sheet_type\"], sheet[\"row_count\"]) for name, sheet in doc.table_metadata[\"sheets\"].items()}"
+    "## Level 1: one row = one chunk, values only\n",
+    "\n",
+    "Simplest. Each row becomes a comma-separated line.\n",
+    "Weakness: no column names. The model sees `280,..,Ralts,...` with no labels."
    ],
    "id": "cell-3"
   },
   {
-   "cell_type": "markdown",
+   "cell_type": "code",
    "metadata": {},
+   "execution_count": null,
+   "outputs": [],
    "source": [
-    "## 2. Preview the chunks\n",
-    "\n",
-    "Data sheets only; narrative sheets are already text blocks for `semantic_search`."
+    "table = rows_of(SHEET)\n",
+    "chunks = [\", \".join(str(v) for v in row.values() if v not in (None, \"\")) for row in table.rows]\n",
+    "vectors = embed_all(chunks)\n",
+    "print(len(chunks), \"chunks\")\n",
+    "show(search(chunks, vectors, QUERY))"
    ],
    "id": "cell-4"
   },
   {
-   "cell_type": "code",
+   "cell_type": "markdown",
    "metadata": {},
-   "execution_count": null,
-   "outputs": [],
    "source": [
-    "chunks = row_chunks(doc, chunking=CHUNKING, rows_per_chunk=ROWS_PER_CHUNK)\n",
-    "print(f\"{len(chunks)} chunks, longest {max(len(c['text']) for c in chunks):,} characters\\n\")\n",
-    "print(chunks[0][\"text\"])"
+    "## Level 2: add column names\n",
+    "\n",
+    "Each value gets its label: `NAME: Ralts`.\n",
+    "Labels give meaning. \"Ruby\" now means a game column."
    ],
    "id": "cell-5"
   },
   {
-   "cell_type": "markdown",
+   "cell_type": "code",
    "metadata": {},
+   "execution_count": null,
+   "outputs": [],
    "source": [
-    "## 3. Embed and save\n",
+    "def labeled(row):\n",
+    "    return \"\\n\".join(f\"{col}: {val}\" for col, val in row.items() if val not in (None, \"\"))\n",
     "\n",
-    "One Titan call per chunk, 8 at a time."
+    "chunks = [labeled(row) for row in table.rows]\n",
+    "vectors = embed_all(chunks)\n",
+    "show(search(chunks, vectors, QUERY))"
    ],
    "id": "cell-6"
   },
   {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 3: add sheet and row number\n",
+    "\n",
+    "Each chunk says where it came from.\n",
+    "Needed to cite the source and check the answer."
+   ],
+   "id": "cell-7"
+  },
+  {
    "cell_type": "code",
    "metadata": {},
    "execution_count": null,
    "outputs": [],
    "source": [
-    "embedder = Embedder()\n",
-    "row_embeddings = embed_rows(doc, embedder, chunking=CHUNKING, rows_per_chunk=ROWS_PER_CHUNK)\n",
-    "print({k: v for k, v in row_embeddings[\"meta\"].items() if k != \"failed_chunks\"})\n",
-    "if row_embeddings[\"meta\"][\"failed_chunks\"]:\n",
-    "    print(\"Failed:\", row_embeddings[\"meta\"][\"failed_chunks\"][:5])\n",
-    "store.save_row_embeddings(doc.storage_ref[\"manifest_key\"], row_embeddings)"
+    "source_rows = sheets[SHEET][\"source_rows\"]  # Excel row numbers, after preprocessing\n",
+    "\n",
+    "def located(sheet, row, number):\n",
+    "    return f\"Sheet: {sheet} (row {number})\\n{labeled(row)}\"\n",
+    "\n",
+    "chunks = [located(SHEET, row, source_rows[i]) for i, row in zip(table.index, table.rows)]\n",
+    "vectors = embed_all(chunks)\n",
+    "show(search(chunks, vectors, QUERY))"
    ],
-   "id": "cell-7"
+   "id": "cell-8"
   },
   {
    "cell_type": "markdown",
    "metadata": {},
    "source": [
-    "## 4. Try the search the agent's tool runs"
+    "## Level 4: all data sheets\n",
+    "\n",
+    "Answers can live on any tab.\n",
+    "Chunk every data sheet, search them together."
    ],
-   "id": "cell-8"
+   "id": "cell-9"
   },
   {
    "cell_type": "code",
@@ -8533,12 +8585,434 @@ DEMO-IMAGING is not listed. No rate for it can be inferred from this schedule. N
    "execution_count": null,
    "outputs": [],
    "source": [
-    "doc = store.load(FILENAME)  # reload to read back what was saved\n",
-    "QUERY = \"Where can I find Ralts?\"  # change me\n",
-    "for match in row_search_documents({doc.id: doc}, QUERY, embedder, limit=5)[\"matches\"]:\n",
-    "    print(f\"--- {match['similarity']:.3f}  {match['sheet']} rows {match['source_rows']}\\n{match['text'][:500]}\\n\")"
+    "chunks = []\n",
+    "for sheet in data_sheets:\n",
+    "    t = rows_of(sheet)\n",
+    "    numbers = sheets[sheet][\"source_rows\"]\n",
+    "    chunks += [located(sheet, row, numbers[i]) for i, row in zip(t.index, t.rows)]\n",
+    "vectors = embed_all(chunks)\n",
+    "print(len(chunks), \"chunks across\", len(data_sheets), \"sheets\")\n",
+    "show(search(chunks, vectors, QUERY))\n",
+    "level4_chunks, level4_vectors = chunks, vectors  # reused by a later level"
+   ],
+   "id": "cell-10"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 5: row groups\n",
+    "\n",
+    "Several rows per chunk, header once (CSV).\n",
+    "Fewer chunks, fewer embedding calls.\n",
+    "Trade-off: one chunk mixes topics, so matches get fuzzier."
+   ],
+   "id": "cell-11"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "ROWS_PER_CHUNK = 10\n",
+    "\n",
+    "import csv, io\n",
+    "\n",
+    "def grouped(sheet):\n",
+    "    t = rows_of(sheet)\n",
+    "    numbers = sheets[sheet][\"source_rows\"]\n",
+    "    for start in range(0, len(t), ROWS_PER_CHUNK):\n",
+    "        part = t.rows[start:start + ROWS_PER_CHUNK]\n",
+    "        first, last = numbers[t.index[start]], numbers[t.index[start + len(part) - 1]]\n",
+    "        out = io.StringIO()\n",
+    "        writer = csv.writer(out, lineterminator=\"\\n\")\n",
+    "        writer.writerow(t.columns)\n",
+    "        writer.writerows([row.get(c, \"\") for c in t.columns] for row in part)\n",
+    "        yield f\"Sheet: {sheet} (rows {first}-{last})\\n{out.getvalue().strip()}\"\n",
+    "\n",
+    "chunks = [chunk for sheet in data_sheets for chunk in grouped(sheet)]\n",
+    "vectors = embed_all(chunks)\n",
+    "print(len(chunks), \"chunks\")\n",
+    "show(search(chunks, vectors, QUERY))"
+   ],
+   "id": "cell-12"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 6: drop weak matches\n",
+    "\n",
+    "Search always returns k results, even bad ones.\n",
+    "A minimum score drops the weak ones.\n",
+    "Pick it by looking at scores for good and bad queries.\n",
+    "Uses the level 4 chunks."
+   ],
+   "id": "cell-13"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "MIN_SCORE = 0.35\n",
+    "\n",
+    "def search_filtered(chunks, vectors, query, k=5, min_score=MIN_SCORE):\n",
+    "    return [(s, c) for s, c in search(chunks, vectors, query, k) if s >= min_score]\n",
+    "\n",
+    "for q in [QUERY, \"What is the capital of France?\"]:\n",
+    "    print(\"Query:\", q)\n",
+    "    show(search_filtered(level4_chunks, level4_vectors, q), chars=120)"
+   ],
+   "id": "cell-14"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 7: save for the agent\n",
+    "\n",
+    "Same idea as levels 3-5, using the backend code the agent uses.\n",
+    "Saves `row_embeddings.json` in this file's `preprocessed/` folder.\n",
+    "After this, the agent offers `semantic_row_search` for this spreadsheet.\n",
+    "Re-uploading the file deletes it. Run again after."
+   ],
+   "id": "cell-15"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "CHUNKING = \"row\"  # \"row\" (levels 3-4) or \"row_group\" (level 5)\n",
+    "\n",
+    "from backend.agents.embeddings import embed_rows\n",
+    "from backend.retrieval.semantic import row_search_documents\n",
+    "\n",
+    "row_embeddings = embed_rows(doc, embedder, chunking=CHUNKING, rows_per_chunk=ROWS_PER_CHUNK)\n",
+    "print({k: v for k, v in row_embeddings[\"meta\"].items() if k != \"failed_chunks\"})\n",
+    "store.save_row_embeddings(doc.storage_ref[\"manifest_key\"], row_embeddings)\n",
+    "\n",
+    "saved = store.load(FILENAME)  # read back what the agent will read\n",
+    "for m in row_search_documents({saved.id: saved}, QUERY, embedder, limit=5)[\"matches\"]:\n",
+    "    print(f\"--- {m['similarity']:.3f}  {m['sheet']} rows {m['source_rows']}\\n{m['text'][:300]}\\n\")"
+   ],
+   "id": "cell-16"
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+
+===== REPOSITORY FILE =====
+{"path": "development/notebooks/word_retrieval.ipynb", "characters": 10406, "sha256": "a3f2684f62ad4e1c864d85ad58cd6742b1934996ebbe57da7d23d2f8c7d723f8"}
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Word retrieval, step by step\n",
+    "\n",
+    "Goal: find the passages that answer a question.\n",
+    "Each level adds one idea. Run top to bottom.\n",
+    "Last level saves embeddings for the agent's `semantic_search` tool.\n",
+    "\n",
+    "Example: a synthetic plan handbook, built from `development/fixtures/documents/`.\n",
+    "Made on first run, then uploaded to the document library."
+   ],
+   "id": "cell-0"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Setup"
+   ],
+   "id": "cell-1"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "import sys\n",
+    "from concurrent.futures import ThreadPoolExecutor\n",
+    "from pathlib import Path\n",
+    "\n",
+    "import numpy as np\n",
+    "\n",
+    "ROOT = Path.cwd().resolve()\n",
+    "while not (ROOT / \"backend\").is_dir():  # find the repo root\n",
+    "    ROOT = ROOT.parent\n",
+    "sys.path.insert(0, str(ROOT))\n",
+    "\n",
+    "from dotenv import load_dotenv\n",
+    "load_dotenv(ROOT / \".env\")\n",
+    "\n",
+    "from backend.agents.embeddings import Embedder\n",
+    "from backend.storage.s3 import configured_store\n",
+    "\n",
+    "store = configured_store()  # local library, or S3 when DOCUMENTS_STORAGE=s3\n",
+    "embedder = Embedder()       # Titan Text Embeddings v2\n",
+    "_cache = {}\n",
+    "\n",
+    "def embed_all(texts):\n",
+    "    \"\"\"One vector per text. Same text is embedded once.\"\"\"\n",
+    "    new = [t for t in dict.fromkeys(texts) if t not in _cache]\n",
+    "    with ThreadPoolExecutor(max_workers=8) as pool:\n",
+    "        for text, vector in zip(new, pool.map(embedder.embed, new)):\n",
+    "            _cache[text] = vector\n",
+    "    return np.array([_cache[t] for t in texts])\n",
+    "\n",
+    "def search(chunks, vectors, query, k=5):\n",
+    "    \"\"\"Top k chunks by similarity. Vectors are unit length, so dot product = cosine.\"\"\"\n",
+    "    scores = vectors @ embed_all([query])[0]\n",
+    "    best = np.argsort(scores)[::-1][:k]\n",
+    "    return [(float(scores[i]), chunks[i]) for i in best]\n",
+    "\n",
+    "def show(results, chars=300):\n",
+    "    for score, chunk in results:\n",
+    "        print(f\"--- {score:.3f}\\n{chunk[:chars]}\\n\")\n",
+    "\n",
+    "FILENAME = \"bingle_dingle_handbook.docx\"\n",
+    "QUERY = \"How much does a member pay for a virtual visit?\"\n",
+    "\n",
+    "import re\n",
+    "from docx import Document as WordDocument\n",
+    "from backend.preprocessing.documents import ingest_document\n",
+    "\n",
+    "def build_handbook():\n",
+    "    \"\"\"Synthetic handbook: one heading per fixture, numbered sections as subheadings, rates as a table.\"\"\"\n",
+    "    word = WordDocument()\n",
+    "    word.add_heading(\"Bingle-Dingle Insurance plan handbook\", 0)\n",
+    "    for path in sorted((ROOT / \"development/fixtures/documents\").glob(\"bingle_dingle_*.txt\")):\n",
+    "        lines = [l.strip() for l in path.read_text(encoding=\"utf-8\").splitlines() if l.strip()]\n",
+    "        word.add_heading(lines[0], 1)\n",
+    "        rates = [l for l in lines if re.match(r\"DEMO-[A-Z]+: .+; USD\", l)]\n",
+    "        for line in lines[1:]:\n",
+    "            if re.match(r\"^(\\d+\\.|Section [A-Z])\\s\", line):\n",
+    "                word.add_heading(line, 2)\n",
+    "            elif line in rates:\n",
+    "                if line == rates[0]:\n",
+    "                    table = word.add_table(rows=1, cols=4)\n",
+    "                    for cell, text in zip(table.rows[0].cells, [\"Code\", \"Service\", \"Rate\", \"Limit\"]):\n",
+    "                        cell.text = text\n",
+    "                    for rate in rates:\n",
+    "                        code, rest = rate.split(\": \", 1)\n",
+    "                        for cell, text in zip(table.add_row().cells, [code, *rest.split(\"; \")]):\n",
+    "                            cell.text = text\n",
+    "            else:\n",
+    "                word.add_paragraph(line)\n",
+    "    path = ROOT / \"data\" / \"examples\" / FILENAME\n",
+    "    path.parent.mkdir(parents=True, exist_ok=True)\n",
+    "    word.save(path)\n",
+    "    return path\n",
+    "\n",
+    "try:\n",
+    "    doc = store.load(FILENAME)\n",
+    "except Exception:\n",
+    "    doc = ingest_document(FILENAME, build_handbook().read_bytes(), store=store)\n",
+    "print(len(doc.blocks), \"blocks. First three:\")\n",
+    "for block in doc.blocks[:3]:\n",
+    "    print(block[\"location\"], \"|\", block[\"text\"][:80])"
+   ],
+   "id": "cell-2"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 1: one paragraph = one chunk\n",
+    "\n",
+    "Simplest. Preprocessing already split the file into blocks.\n",
+    "Paragraphs are blocks. Each table row is a block too (`cell | cell`).\n",
+    "Weakness: a short paragraph loses its context."
+   ],
+   "id": "cell-3"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "chunks = [b[\"text\"] for b in doc.blocks]\n",
+    "vectors = embed_all(chunks)\n",
+    "show(search(chunks, vectors, QUERY))"
+   ],
+   "id": "cell-4"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 2: add the section heading\n",
+    "\n",
+    "Each chunk starts with its heading.\n",
+    "\"20 percent\" alone is vague. Under \"Benefit categories\" it is clear."
+   ],
+   "id": "cell-5"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "def with_section(block):\n",
+    "    section = block[\"location\"].get(\"section\", \"\")\n",
+    "    return f\"[{section}]\\n{block['text']}\" if section else block[\"text\"]\n",
+    "\n",
+    "chunks = [with_section(b) for b in doc.blocks]\n",
+    "vectors = embed_all(chunks)\n",
+    "show(search(chunks, vectors, QUERY))\n",
+    "level2_chunks, level2_vectors = chunks, vectors  # reused by a later level"
+   ],
+   "id": "cell-6"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 3: merge paragraphs up to a size\n",
+    "\n",
+    "Join neighbors in the same section until `MAX_CHARS`.\n",
+    "More context per chunk. Fewer chunks.\n",
+    "Too big: one chunk covers many topics, matches blur."
+   ],
+   "id": "cell-7"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "MAX_CHARS = 800\n",
+    "\n",
+    "def merged(blocks, max_chars=MAX_CHARS):\n",
+    "    chunks, current, section = [], [], None\n",
+    "    for b in blocks:\n",
+    "        s = b[\"location\"].get(\"section\", \"\")\n",
+    "        if current and (s != section or sum(len(t) for t in current) + len(b[\"text\"]) > max_chars):\n",
+    "            chunks.append(current)\n",
+    "            current = []\n",
+    "        current.append(b[\"text\"])\n",
+    "        section = s\n",
+    "    if current:\n",
+    "        chunks.append(current)\n",
+    "    return chunks\n",
+    "\n",
+    "groups = merged(doc.blocks)\n",
+    "chunks = [\"\\n\".join(g) for g in groups]\n",
+    "vectors = embed_all(chunks)\n",
+    "print(len(chunks), \"chunks, from\", len(doc.blocks), \"blocks\")\n",
+    "show(search(chunks, vectors, QUERY))"
+   ],
+   "id": "cell-8"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 4: overlap\n",
+    "\n",
+    "Each chunk repeats the last paragraph of the one before.\n",
+    "An answer split across a boundary still lands in one chunk.\n",
+    "Cost: some text is embedded twice."
    ],
    "id": "cell-9"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "OVERLAP = 1  # paragraphs carried into the next chunk\n",
+    "\n",
+    "overlapped = [groups[0]] + [prev[-OVERLAP:] + g for prev, g in zip(groups, groups[1:])]\n",
+    "chunks = [\"\\n\".join(g) for g in overlapped]\n",
+    "vectors = embed_all(chunks)\n",
+    "show(search(chunks, vectors, QUERY))"
+   ],
+   "id": "cell-10"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 5: drop weak matches\n",
+    "\n",
+    "Search always returns k results, even bad ones.\n",
+    "A minimum score drops the weak ones.\n",
+    "Pick it by looking at scores for good and bad queries.\n",
+    "Uses the level 2 chunks."
+   ],
+   "id": "cell-11"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "MIN_SCORE = 0.35\n",
+    "\n",
+    "def search_filtered(chunks, vectors, query, k=5, min_score=MIN_SCORE):\n",
+    "    return [(s, c) for s, c in search(chunks, vectors, query, k) if s >= min_score]\n",
+    "\n",
+    "for q in [QUERY, \"Who won the 1998 World Cup?\"]:\n",
+    "    print(\"Query:\", q)\n",
+    "    show(search_filtered(level2_chunks, level2_vectors, q), chars=120)"
+   ],
+   "id": "cell-12"
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Level 6: save for the agent\n",
+    "\n",
+    "Uses the backend code the agent uses: one vector per block (level 1 chunks).\n",
+    "Saves `embeddings.json` in this file's `preprocessed/` folder.\n",
+    "The agent offers `semantic_search` when `SEMANTIC_SEARCH=true`."
+   ],
+   "id": "cell-13"
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "execution_count": null,
+   "outputs": [],
+   "source": [
+    "from backend.agents.embeddings import embed_document\n",
+    "from backend.retrieval.semantic import semantic_search_documents\n",
+    "\n",
+    "embeddings = embed_document(doc, embedder)\n",
+    "print({k: v for k, v in embeddings[\"meta\"].items() if k != \"failed_blocks\"})\n",
+    "store.save_embeddings(doc.storage_ref[\"manifest_key\"], embeddings)\n",
+    "\n",
+    "saved = store.load(FILENAME)  # read back what the agent will read\n",
+    "for m in semantic_search_documents({saved.id: saved}, QUERY, embedder, limit=5)[\"matches\"]:\n",
+    "    print(f\"--- {m['similarity']:.3f}  {m['location']}\\n{m['text'][:300]}\\n\")"
+   ],
+   "id": "cell-14"
   }
  ],
  "metadata": {
