@@ -123,3 +123,19 @@ def test_model_switch_clears_history(monkeypatch):
     next(s for s in app.selectbox if s.label=='Model').set_value('claude-haiku-4.5').run()
     assert app.session_state['messages']==[]
     assert not app.exception
+
+
+def test_retrieval_option_1_answers_in_one_call_without_the_agent(native_script):
+    doc = saved('rates.txt', b'Plan Alpha member rate is USD 88 per month.')
+    requests = native_script(['The member rate is USD 88.'])
+    app = AppTest.from_file(str(APP)).run(timeout=20)
+    app.multiselect[0].set_value([key(doc)]).run()
+    next(s for s in app.selectbox if s.label == 'Ambiguous questions').set_value('Ask when ambiguous').run()
+    next(s for s in app.selectbox if s.label == 'Retrieval option').set_value(1).run()
+    assert next(s for s in app.selectbox if s.label == 'Ambiguous questions').disabled
+    app.chat_input[0].set_value('What is the member rate?').run(timeout=20)
+    assert not app.exception
+    [request] = requests  # one model call, no tools
+    assert 'toolConfig' not in request and 'Plan Alpha member rate' in request['messages'][0]['content'][0]['text']
+    assert app.session_state['messages'][-1]['result']['protocol']['retrieval_option'] == 1
+    assert any('Whole files in one prompt' in c.value for c in app.caption)

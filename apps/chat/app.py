@@ -16,6 +16,8 @@ capture.enable(content=os.getenv('DD_LLMOBS_ENABLED', '').strip().lower() not in
 
 AMBIGUITY_MODES = {'Off: answer directly': 'off', 'State assumptions': 'assumptions',
                    'Ask when ambiguous': 'ask'}
+# Labels for backend.entrypoint.RETRIEVAL_OPTIONS.
+RETRIEVAL_LABELS = {0: '0: Agent looks things up', 1: '1: Whole files in one prompt'}
 
 st.set_page_config(page_title='Health Insurance Document Agent', layout='wide')
 st.title('Health Insurance Document Agent')
@@ -54,11 +56,19 @@ with st.sidebar:
         format_func=lambda key: saved[key]['filename'], max_selections=10,
         help='Only these files are available to the answering agent.')
     model = st.selectbox('Model', list(MODELS))
+    retrieval_option = st.selectbox(
+        'Retrieval option', list(RETRIEVAL_LABELS), format_func=RETRIEVAL_LABELS.get,
+        help='0 runs the research agent, which reads only what it looks up. 1 puts every selected file\'s '
+             'preprocessed content into one prompt and answers in a single model call; files must fit in '
+             'the model\'s context.')
     ambiguity = AMBIGUITY_MODES[st.selectbox(
-        'Ambiguous questions', list(AMBIGUITY_MODES),
+        'Ambiguous questions', list(AMBIGUITY_MODES), disabled=retrieval_option == 1,
         help='Off answers directly. State assumptions answers the most likely reading and names it. '
              'Ask when ambiguous offers the possible readings for you to choose when they would give '
              'different answers. The last two add one model call per question.')]
+    if retrieval_option == 1:
+        ambiguity = 'off'  # option 1 answers directly
+        st.caption('Retrieval option 1 always answers directly.')
     production_path = st.toggle(
         'Use production entry point', key='production_path',
         help='Call ask_question with saved filenames, as the Lambda does, so the documents are reloaded from '
@@ -78,7 +88,7 @@ except Exception as exc:
     st.stop()
 st.session_state.documents = {doc.id: doc for doc in docs}
 selected = list(st.session_state.documents)
-signature = (tuple(sorted(selected)), model)
+signature = (tuple(sorted(selected)), model, retrieval_option)
 if signature != st.session_state.selection_signature:
     st.session_state.messages = []
     st.session_state.selection_signature = signature
@@ -102,7 +112,9 @@ def show_evidence(response):
     if (response.get('interpretation') or {}).get('note'):
         st.caption(response['interpretation']['note'])
     protocol = response.get('protocol')
-    if protocol:
+    if protocol and protocol.get('retrieval_option') == 1:
+        st.caption(f"Whole files in one prompt: {protocol['context_characters']:,} characters")
+    elif protocol:
         st.caption(f"{protocol['repair_attempts']} corrective retries")
     for warning in response.get('limitations',[]):
         st.warning(warning)
@@ -151,7 +163,7 @@ def ask(question, clarification=None):
     with st.chat_message('assistant'):
         status = st.empty()
         options = dict(history=history, session_id=st.session_state.session_id, clarification=clarification,
-                       model=model, ambiguity=ambiguity, app_id='chat')
+                       model=model, ambiguity=ambiguity, app_id='chat', retrieval_option=retrieval_option)
         if production_path:
             # Same call the Lambda makes; it has no progress hook.
             status.caption('Answering through ask_question…')

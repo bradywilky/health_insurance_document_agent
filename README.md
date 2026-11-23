@@ -739,7 +739,8 @@ response = ask_question(
 reads and queries the files with tools over several calls. `1` puts every selected file's preprocessed content
 (text blocks plus each data sheet's CSV) into one prompt and answers in a single call
 (`backend/agents/full_context.py`); it needs `ambiguity="off"` and returns `invalid_request` when the files exceed
-about 600,000 characters. New options get the next number in `RETRIEVAL_OPTIONS`.
+about 600,000 characters. New options get the next number in `RETRIEVAL_OPTIONS`. The chat app's sidebar has a
+**Retrieval option** selector; choosing `1` turns off the Ambiguous questions setting.
 
 | `status` | `status_code` | Meaning |
 | --- | --- | --- |
