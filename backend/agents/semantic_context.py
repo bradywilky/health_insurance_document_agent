@@ -81,7 +81,8 @@ def retrieve(docs, question, embedder, *, limit=TOP_K, index=None):
         for m in found['matches']:
             first, last = m['source_rows']
             matches.append({'document_id': m['document_id'], 'filename': m['filename'],
-                            'location': {'sheet': m['sheet'], 'rows': str(first) if first == last else f'{first}-{last}'},
+                            'location': {'sheet': m['sheet'], **({'row': first} if first == last
+                                                                     else {'rows': f'{first}-{last}'})},
                             'text': m['text'], 'similarity': m['similarity']})
     matches.sort(key=lambda m: -m['similarity'])
     return matches[:limit], limitations

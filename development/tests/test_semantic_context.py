@@ -64,14 +64,14 @@ def test_option_2_answers_from_text_and_row_chunks_in_one_call(library, native_s
     assert 'toolConfig' not in request
     prompt = request['messages'][0]['content'][0]['text']
     first = prompt.split('\n\n')[1]
-    assert first.startswith('[1] mappings.xlsx | sheet Mappings, rows 3 |') and 'billed_amount' in first
+    assert first.startswith('[1] mappings.xlsx | sheet Mappings, row 3 |') and 'billed_amount' in first
     assert '[3] benefits.txt' in prompt  # text blocks are searched too
     assert prompt.endswith('Based on the excerpts above, Which field holds the money charged?')
     assert query.calls == [('Query Embedding', 'Which field holds the money charged?')]  # embedded once
     assert response['protocol']['retrieval_option'] == 2 and response['protocol']['chunks'] == 4
     [source] = response['sources']
     assert source['tool'] == 'semantic_context'
-    assert source['passages'][0] == {'filename': 'mappings.xlsx', 'location': 'sheet Mappings, rows 3',
+    assert source['passages'][0] == {'filename': 'mappings.xlsx', 'location': 'sheet Mappings, row 3',
                                      'text': 'Sheet: Mappings (row 3)\nSource Field: charge\nCanonical Field: billed_amount'}
 
 
