@@ -48,21 +48,28 @@ def build_context(docs):
     return context, sizes
 
 
-def run_full_context(docs, question, *, history=None, usage=None, model=None, clarification=None):
-    """Answer from the whole content of docs in one model call; the result has the agent's response keys."""
-    context, sizes = build_context(docs)
+def answer_once(system, context, question, *, tool_name, history=None, usage=None, model=None, clarification=None,
+                lead='Based on the above, '):
+    """One model call with no tools: context, the recent conversation, then the question."""
     model = model or os.getenv('TABLES_MODEL', 'maverick').lower()
     if model not in MODELS:
         raise ValueError(f'Model must be one of {list(MODELS)}')
     _, inference = get_model_config()
-    llm = LLM(agent_name='health_insurance_document_agent', tool_name='Full Context Answer',
+    llm = LLM(agent_name='health_insurance_document_agent', tool_name=tool_name,
               model_id=os.getenv('BEDROCK_MODEL_ID') or MODELS[model], params=inference, usage_meter=usage)
     turns = ''.join(f"{t['role']}: {t['content']}\n" for t in (history or [])[-6:])
     prompt = (f'{context}\n\n'
               + (f'Conversation so far:\n{turns}\n' if turns else '')
-              + f'Based on the above, {question}'
+              + f'{lead}{question}'
               + (f'\n(The user clarified: {clarification})' if clarification else ''))
-    answer = llm.run(system=SYSTEM, messages=[{'role': 'user', 'content': [{'text': prompt}]}])
+    return llm.run(system=system, messages=[{'role': 'user', 'content': [{'text': prompt}]}])
+
+
+def run_full_context(docs, question, *, history=None, usage=None, model=None, clarification=None):
+    """Answer from the whole content of docs in one model call; the result has the agent's response keys."""
+    context, sizes = build_context(docs)
+    answer = answer_once(SYSTEM, context, question, tool_name='Full Context Answer', history=history, usage=usage,
+                         model=model, clarification=clarification)
     evidence = [{'id': 'E1', 'tool': 'full_context', 'parameters': {}, 'auto': True,
                  'data': {'documents': sizes, 'characters': len(context)}}]
     return {'status': 'answered', 'answer': answer, 'evidence': evidence, 'limitations': [

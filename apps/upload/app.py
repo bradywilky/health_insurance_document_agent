@@ -7,7 +7,7 @@ from backend.preprocessing.documents import ingest_document, SUPPORTED
 from backend.storage.s3 import configured_store
 from backend.agents.enrichment import make_enricher
 from backend.agents.search_hints import make_hinter
-from backend.agents.embeddings import make_embedder
+from backend.agents.embeddings import Embedder, embed_rows, make_embedder
 from backend.config.settings import semantic_search_enabled
 
 st.set_page_config(page_title='Document Upload Portal', layout='wide')
@@ -34,8 +34,14 @@ hints_at_upload = st.checkbox(
 # Shown only with SEMANTIC_SEARCH=true; environments without a Bedrock embedding model leave it off.
 embed_at_upload = semantic_search_enabled() and st.checkbox(
     'Embed passages for semantic search', value=True,
-    help='Sends each passage to the Bedrock embedding model once at upload (one call per passage). The answering '
-         'agent can then find passages by meaning, not only by shared words.')
+    help='Sends each passage, and each spreadsheet data row, to the Bedrock embedding model once at upload (one '
+         'call each). The answering agent and retrieval option 2 can then find content by meaning, not only by '
+         'shared words.')
+
+
+def save_row_embeddings(key, doc):
+    """Embed a spreadsheet's data rows (one call per row) for retrieval option 2."""
+    store.save_row_embeddings(key, embed_rows(doc, Embedder()))
 
 
 def save_files(files):
@@ -47,6 +53,12 @@ def save_files(files):
                 hint = make_hinter() if hints_at_upload else None
                 embed = make_embedder() if embed_at_upload else None
                 doc = ingest_document(name, content, store=store, enrich=enrich, hint=hint, embed=embed)
+            if embed is not None and doc.table_folder is not None:
+                try:
+                    with st.spinner(f'Embedding the rows of {name}...'):
+                        save_row_embeddings(doc.storage_ref['manifest_key'], doc)
+                except Exception as exc:
+                    doc.warnings.append(f'Row embeddings not generated: {type(exc).__name__}: {exc}')
             st.success(f'Saved {doc.name}')
             for warning in doc.warnings:
                 st.warning(f'{doc.name}: {warning}')
@@ -105,13 +117,21 @@ if key:
                 st.error(f'Could not generate search hints: {type(exc).__name__}: {exc}')
     if semantic_search_enabled():
         embedded = (doc.embeddings or {}).get('meta')
+        rows = (doc.row_embeddings or {}).get('meta')
         st.caption(f"Embeddings: {embedded['blocks_embedded']} of {embedded['blocks_total']} passages "
-                   f"({embedded['model_id']})" if embedded else 'No embeddings for this document yet.')
-        if doc.blocks and st.button('Regenerate embeddings' if embedded else 'Generate embeddings',
-                                    help='Sends each passage to the Bedrock embedding model.'):
-            with st.spinner('Embedding passages...'):
+                   f"({embedded['model_id']})" if embedded else 'No passage embeddings for this document yet.')
+        if doc.table_folder is not None:
+            st.caption(f"Row embeddings: {rows['chunks_embedded']} of {rows['chunks_total']} rows ({rows['model_id']})"
+                       if rows else 'No row embeddings for this spreadsheet yet.')
+        if (doc.blocks or doc.table_folder is not None) and st.button(
+                'Regenerate embeddings' if embedded or rows else 'Generate embeddings',
+                help='Sends each passage, and each spreadsheet data row, to the Bedrock embedding model.'):
+            with st.spinner('Embedding...'):
                 try:
-                    store.save_embeddings(key, make_embedder()(doc))
+                    if doc.blocks:
+                        store.save_embeddings(key, make_embedder()(doc))
+                    if doc.table_folder is not None:
+                        save_row_embeddings(key, store.load(key))
                     st.rerun()
                 except Exception as exc:
                     st.error(f'Could not generate embeddings: {type(exc).__name__}: {exc}')

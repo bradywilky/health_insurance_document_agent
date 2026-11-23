@@ -557,7 +557,8 @@ It has three parts, all behind one switch, `SEMANTIC_SEARCH=true`:
   Documents without usable embeddings (none yet, a different embedding model, or vectors in an index that is not
   configured) are listed in `not_indexed`. Query embeddings count toward the question's usage.
 
-With the switch off nothing changes: no embedding calls, no tool, and saved embeddings are ignored. Documents
+With the switch off nothing changes: no embedding calls, no tool, and the agent ignores saved embeddings
+(retrieval option 2 still uses any that exist). Documents
 uploaded before it was turned on have no embeddings until someone clicks Generate embeddings for them.
 
 To create the S3 Vectors bucket and index (cosine distance, dimension equal to `EMBEDDING_DIMENSIONS`):
@@ -574,16 +575,15 @@ The answering and upload roles need `bedrock:InvokeModel` on the embedding model
 `s3vectors:DeleteVectors`, `s3vectors:QueryVectors` and `s3vectors:GetVectors` on the index (query with metadata
 filters needs GetVectors too).
 
-### Spreadsheet row search (experimental)
+### Spreadsheet row embeddings
 
-The tools above never embed spreadsheet data rows. To try semantic search over them, run
-the last level of `development/notebooks/excel_retrieval.ipynb` for a saved spreadsheet. It cuts the data sheets into chunks (`row`: one
-row per chunk as `column: value` lines; `row_group`: N rows as CSV with the header once), embeds each chunk, and
+The passage embeddings above never cover spreadsheet data rows. With `SEMANTIC_SEARCH=true` the upload portal also
+embeds them: it cuts each data sheet into one-row chunks written as `column: value` lines, embeds each chunk and
 saves `row_embeddings.json` (chunk text, sheet, Excel rows and base64 float32 vector) beside the document, through the
-configured store, local or S3. Whenever a selected spreadsheet has that file, the planner is offered
-`semantic_row_search`, which returns the closest chunks as evidence. Running the notebook is the opt-in, so
-`SEMANTIC_SEARCH` is not checked. Row embeddings always stay in the file, even with `VECTOR_STORE=s3vectors`, and
-re-uploading the spreadsheet removes them.
+configured store, local or S3. **Generate embeddings** does the same for spreadsheets saved earlier, and the last
+level of `development/notebooks/excel_retrieval.ipynb` can make them with other chunking (`row_group`: N rows as CSV
+with the header once). Only retrieval option 2 reads them; the research agent does not. Row embeddings always stay in
+the file, even with `VECTOR_STORE=s3vectors`, and re-uploading the spreadsheet removes them.
 
 ## Semantic profiles (optional, at upload)
 
@@ -731,7 +731,7 @@ response = ask_question(
     model="maverick",            # optional; a key of MODELS
     ambiguity="off",             # off | assumptions | ask
     app_id="my-service",         # which application called; a Datadog tag
-    retrieval_option=0,          # 0: research agent with tools; 1: whole files in one prompt
+    retrieval_option=0,          # 0: research agent; 1: whole files in one prompt; 2: semantic search, one prompt
 )
 ```
 
@@ -739,8 +739,12 @@ response = ask_question(
 reads and queries the files with tools over several calls. `1` puts every selected file's preprocessed content
 (text blocks plus each data sheet's CSV) into one prompt and answers in a single call
 (`backend/agents/full_context.py`); it needs `ambiguity="off"` and returns `invalid_request` when the files exceed
-about 600,000 characters. New options get the next number in `RETRIEVAL_OPTIONS`. The chat app's sidebar has a
-**Retrieval option** selector; choosing `1` turns off the Ambiguous questions setting.
+about 600,000 characters. `2` embeds the question once, takes the 20 chunks closest in meaning from every selected
+file (passage embeddings and spreadsheet row embeddings, so any file type works) and answers from them in a single
+call (`backend/agents/semantic_context.py`); it needs `ambiguity="off"`, lists files without embeddings under
+`limitations`, and returns `invalid_request` when no selected file has any. New options get the next number in
+`RETRIEVAL_OPTIONS`. The chat app's sidebar has a **Retrieval option** selector; choosing `1` or `2` turns off the
+Ambiguous questions setting.
 
 | `status` | `status_code` | Meaning |
 | --- | --- | --- |

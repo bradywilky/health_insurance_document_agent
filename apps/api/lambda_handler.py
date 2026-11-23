@@ -6,7 +6,7 @@ Event:
      "chat_history": [{"role": "user" | "assistant", "content": "..."}],
      "clarification": "<chosen reading, after a needs_clarification response>",
      "args": {"model": "maverick", "ambiguity": "off" | "assumptions" | "ask", "app_id": "...",
-              "retrieval_option": 0 | 1}}
+              "retrieval_option": 0 | 1 | 2}}
 
 Returns the ask_question response (status, status_code, answer or message, sources, limitations, request_id, ...).
 Configure storage, trace archive and model settings with the same environment variables as the apps (.env.example).

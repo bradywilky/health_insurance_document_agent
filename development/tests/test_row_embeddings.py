@@ -1,4 +1,4 @@
-"""Row embeddings: chunking a spreadsheet's data rows, saving row_embeddings.json, and the semantic_row_search tool.
+"""Row embeddings: chunking a spreadsheet's data rows, saving row_embeddings.json, and searching them.
 
 Embeddings are faked; vectors point along a few made-up topics.
 """
@@ -96,24 +96,14 @@ def offered(request):
     return [t['toolSpec']['name'] for t in request['toolConfig']['tools']]
 
 
-def test_agent_offers_semantic_row_search_only_for_spreadsheets_with_row_embeddings(tmp_path, native_script,
-                                                                                    monkeypatch):
-    embedder = FakeEmbedder()
-    monkeypatch.setattr(document_agent, 'Embedder', lambda usage_meter=None: embedder)
+def test_agent_never_offers_row_search_even_with_row_embeddings(tmp_path, native_script, monkeypatch):
+    """Row embeddings serve retrieval option 2 (backend/agents/semantic_context.py), not the research agent."""
+    monkeypatch.setattr(document_agent, 'Embedder', lambda usage_meter=None: FakeEmbedder())
     monkeypatch.delenv('SEMANTIC_SEARCH', raising=False)
-    bare = ingest_document('bare.xlsx', workbook())
-    requests = native_script([{'tool': 'table_tool', 'parameters': {'document_id': bare.id, 'name': 'list_sheets',
+    _, doc = saved(tmp_path)
+    requests = native_script([{'tool': 'table_tool', 'parameters': {'document_id': doc.id, 'name': 'list_sheets',
                                                                      'parameters': {}}},
                               {'tool': 'answer', 'parameters': {}}, 'The workbook has a Mappings sheet [E1].'])
-    run_document_agent({bare.id: bare}, [bare.id], 'Which field holds the charge?')
-    assert 'semantic_row_search' not in offered(requests[0])
-
-    _, doc = saved(tmp_path)
-    requests = native_script([{'tool': 'semantic_row_search', 'parameters': {'query': 'money charged', 'limit': 1}},
-                              {'tool': 'answer', 'parameters': {}}, 'The charge maps to billed_amount [E1].'])
-    result = run_document_agent({doc.id: doc}, [doc.id], 'Which field holds the charge?')
-    assert 'semantic_row_search' in offered(requests[0])
-    assert '- semantic_row_search:' in requests[0]['system'][0]['text']
-    [evidence] = [e for e in result['evidence'] if e['tool'] == 'semantic_row_search']
-    assert [m['source_rows'] for m in evidence['data']['matches']] == [[3, 3]]
-    assert embedder.calls == [('Query Embedding', 'money charged')]
+    run_document_agent({doc.id: doc}, [doc.id], 'Which field holds the charge?')
+    assert not [name for name in offered(requests[0]) if name.startswith('semantic')]
+    assert 'semantic_row_search' not in requests[0]['system'][0]['text']

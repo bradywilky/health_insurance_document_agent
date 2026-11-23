@@ -187,6 +187,7 @@ def test_retrieval_option_1_answers_from_the_whole_file_in_one_call(native_scrip
     ({'retrieval_option': 7}, 'retrieval_option must be one of'),
     ({'retrieval_option': '1'}, 'retrieval_option must be one of'),
     ({'retrieval_option': 1, 'ambiguity': 'ask'}, "use ambiguity 'off'"),
+    ({'retrieval_option': 2, 'ambiguity': 'assumptions'}, "use ambiguity 'off'"),
 ])
 def test_invalid_retrieval_options_are_rejected(kwargs, message, isolated_archive):
     response = ask_question('Rate?', document_filenames=['k'], app_id='test', **kwargs)

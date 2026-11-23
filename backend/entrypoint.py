@@ -22,6 +22,9 @@ retrieval_option picks how content reaches the model (RETRIEVAL_OPTIONS):
 0  agent         the research loop: the model searches, reads and queries the files with tools, then answers
 1  full_context  every selected file's preprocessed content goes into one prompt and the model answers in one call
                  (backend/agents/full_context.py); invalid_request when the files are too large to fit
+2  semantic      semantic search pulls the chunks closest to the question from every selected file (text blocks and
+                 spreadsheet rows) and the model answers from them in one call (backend/agents/semantic_context.py);
+                 invalid_request when no selected file has embeddings
 """
 import logging
 import uuid
@@ -29,6 +32,7 @@ import uuid
 from backend.agents import ambiguity as amb
 from backend.agents import document_agent
 from backend.agents import full_context
+from backend.agents import semantic_context
 from backend.agents.llm import Usage
 from backend.config.settings import MODELS
 from backend.observability import tracing
@@ -41,7 +45,7 @@ MAX_DOCUMENTS = 10
 MAX_QUESTION_CHARS = 4000
 STATUS_CODES = {'answered': 200, 'needs_clarification': 200, 'no_evidence': 204, 'invalid_request': 400,
                 'documents_unavailable': 404, 'model_unavailable': 503, 'error': 500}
-RETRIEVAL_OPTIONS = {0: 'agent', 1: 'full_context'}
+RETRIEVAL_OPTIONS = {0: 'agent', 1: 'full_context', 2: 'semantic'}
 MESSAGES = {
     'no_evidence': 'I could not retrieve supporting content from the selected files. '
                    'Try a different question or inspect extraction warnings.',
@@ -121,13 +125,16 @@ def _run(question, *, selected, load, history, session_id, user_id, clarificatio
             if retrieval_option == 1:
                 result = full_context.run_full_context(loaded, question, history=history, usage=usage, model=model,
                                                        clarification=clarification)
+            elif retrieval_option == 2:
+                result = semantic_context.run_semantic_context(loaded, question, history=history, usage=usage,
+                                                               model=model, clarification=clarification)
             else:
                 # Module attribute, so tests can replace the agent.
                 result = document_agent.run_document_agent(
                     {d.id: d for d in loaded}, [d.id for d in loaded], question, history=history, usage=usage,
                     on_step=on_step, model=model, ambiguity=ambiguity, clarification=clarification)
             status = result.get('status') or 'answered'
-        except full_context.ContextTooLarge as exc:
+        except (full_context.ContextTooLarge, semantic_context.NotIndexed) as exc:
             status, error = 'invalid_request', str(exc)
         except RequestError as exc:
             status, error = exc.status, str(exc)
@@ -170,8 +177,8 @@ def _validate(question, history, clarification, model, ambiguity, selected, retr
         raise RequestError('invalid_request', f'ambiguity must be one of {list(amb.MODES)}.')
     if type(retrieval_option) is not int or retrieval_option not in RETRIEVAL_OPTIONS:
         raise RequestError('invalid_request', f'retrieval_option must be one of {RETRIEVAL_OPTIONS}.')
-    if retrieval_option == 1 and ambiguity != 'off':
-        raise RequestError('invalid_request', "retrieval_option 1 answers directly; use ambiguity 'off'.")
+    if retrieval_option != 0 and ambiguity != 'off':
+        raise RequestError('invalid_request', f"retrieval_option {retrieval_option} answers directly; use ambiguity 'off'.")
     if not isinstance(selected, (list, tuple)) or not selected:
         raise RequestError('invalid_request', 'Select at least one document.')
     if len(selected) > MAX_DOCUMENTS:
